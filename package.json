@@ -13,6 +13,8 @@
     "desktop:dev": "npm run tdlib:ensure && vite",
     "desktop:build": "npm run tdlib:ensure && npm run build",
     "build": "tsc && vite build",
+    "screenshot:dev": "vite --mode screenshot",
+    "verify:production-bundle": "sh scripts/verify-production-bundle.sh",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

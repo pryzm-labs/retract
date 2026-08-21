@@ -1,10 +1,19 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath, URL } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  resolve: {
+    alias: {
+      "@retract/api": fileURLToPath(new URL(
+        mode === "screenshot" ? "./src/api.fixture.ts" : "./src/api.desktop.ts",
+        import.meta.url
+      ))
+    }
+  },
   clearScreen: false,
   server: {
     port: 1420,
@@ -19,5 +28,4 @@ export default defineConfig({
     minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG)
   }
-});
-
+}));

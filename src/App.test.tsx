@@ -1,12 +1,13 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "@retract/api";
 import App from "./App";
-import { api } from "./api";
+import { fixtureApi } from "./api.fixture";
 import type { AppSnapshot, ChatSummary, JobRecord } from "./types";
 
 describe("Retract desktop UI", () => {
   beforeEach(async () => {
-    await api.resetDemo();
+    await fixtureApi.resetFixtures();
   });
 
   afterEach(() => vi.restoreAllMocks());

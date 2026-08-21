@@ -1,6 +1,6 @@
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { api } from "@retract/api";
 import { AuthGate } from "./components/AuthGate";
 import { BrandLogo } from "./components/BrandLogo";
 import { ConfirmDialog } from "./components/ConfirmDialog";

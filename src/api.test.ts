@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { api } from "./api";
+import { api, fixtureApi } from "./api.fixture";
 import { hasCryptoWallet } from "./demo";
 
 describe("browser demo API", () => {
   beforeEach(async () => {
-    await api.resetDemo();
+    await fixtureApi.resetFixtures();
   });
 
   it("searches captions and message text without a cloud index", async () => {

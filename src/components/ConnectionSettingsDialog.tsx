@@ -1,6 +1,6 @@
 import { Check, Database, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api } from "@retract/api";
 import type { ConnectionSettings, SaveConnectionSettingsResult } from "../types";
 
 interface ConnectionSettingsDialogProps {

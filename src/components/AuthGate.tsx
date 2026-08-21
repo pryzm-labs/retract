@@ -1,7 +1,7 @@
 import { CheckCircle2, KeyRound, LoaderCircle, LockKeyhole, QrCode, Settings2, Smartphone } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../api";
+import { api } from "@retract/api";
 import type { AuthSnapshot } from "../types";
 import { BrandLogo } from "./BrandLogo";
 
