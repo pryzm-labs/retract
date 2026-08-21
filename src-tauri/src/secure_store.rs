@@ -245,9 +245,8 @@ pub fn load_telegram_api_hash(
     let key = load_or_create_named_key(data_dir, "connection-settings", "connection-settings.key")?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-    let nonce = AesNonce::try_from(&bytes[..NONCE_LENGTH]).map_err(|_| {
-        AppError::SecureStore("encrypted Telegram API hash is malformed".into())
-    })?;
+    let nonce = AesNonce::try_from(&bytes[..NONCE_LENGTH])
+        .map_err(|_| AppError::SecureStore("encrypted Telegram API hash is malformed".into()))?;
     let plaintext = cipher
         .decrypt(&nonce, &bytes[NONCE_LENGTH..])
         .map_err(|_| AppError::SecureStore("Telegram API hash authentication failed".into()))?;
@@ -564,9 +563,8 @@ fn load_or_create_named_key(
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], AppError> {
-    <[u8; N]>::try_generate().map_err(|error| {
-        AppError::SecureStore(format!("secure random generation failed: {error}"))
-    })
+    <[u8; N]>::try_generate()
+        .map_err(|error| AppError::SecureStore(format!("secure random generation failed: {error}")))
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
@@ -593,10 +591,9 @@ mod tests {
     #[test]
     fn loads_job_store_written_by_aes_gcm_010() {
         const AES_GCM_010_FIXTURE: &[u8] = &[
-            82, 84, 82, 67, 84, 48, 50, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
-            17, 239, 11, 194, 18, 253, 131, 214, 66, 230, 179, 93, 246, 94, 231, 64, 115,
-            10, 226, 65, 34, 72, 162, 142, 51, 220, 155, 170, 220, 251, 58, 97, 241, 142,
-            68, 129, 108, 100,
+            82, 84, 82, 67, 84, 48, 50, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 239,
+            11, 194, 18, 253, 131, 214, 66, 230, 179, 93, 246, 94, 231, 64, 115, 10, 226, 65, 34,
+            72, 162, 142, 51, 220, 155, 170, 220, 251, 58, 97, 241, 142, 68, 129, 108, 100,
         ];
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.enc");
