@@ -85,6 +85,70 @@ for (const markdown of markdownFiles(root)) {
   }
 }
 
+const workflowsDirectory = resolve(root, ".github/workflows");
+const workflowPaths = existsSync(workflowsDirectory)
+  ? readdirSync(workflowsDirectory)
+      .filter((name) => /\.ya?ml$/i.test(name))
+      .map((name) => resolve(workflowsDirectory, name))
+  : [];
+
+for (const workflowPath of workflowPaths) {
+  const workflow = readFileSync(workflowPath, "utf8");
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)) {
+    const reference = match[1];
+    if (!reference.startsWith("./") && !/@[0-9a-f]{40}$/i.test(reference)) {
+      errors.push(`workflow action is not pinned to a full commit SHA in ${workflowPath.slice(root.length + 1)}: ${reference}`);
+    }
+  }
+}
+
+const releaseWorkflowPath = resolve(workflowsDirectory, "release.yml");
+if (!existsSync(releaseWorkflowPath)) {
+  errors.push("missing tag release workflow: .github/workflows/release.yml");
+} else {
+  const releaseWorkflow = readFileSync(releaseWorkflowPath, "utf8");
+  const topLevel = releaseWorkflow.split(/^jobs:\s*$/m)[0];
+  const releaseJob = releaseWorkflow.match(/^  release-preview:\s*$([\s\S]*)/m)?.[1] || "";
+
+  if (!/^\s{2}push:\s*\n\s{4}tags:\s*\n\s{6}-\s*["']v\*["']\s*$/m.test(releaseWorkflow)) {
+    errors.push("release workflow must trigger on v* tags");
+  }
+  if (!/^\s{2}workflow_dispatch:\s*$/m.test(releaseWorkflow)) {
+    errors.push("release workflow must support manual tag dispatch");
+  }
+  if (/^\s{2}(?:pull_request|schedule):/m.test(releaseWorkflow) || /^\s{4}branches:/m.test(releaseWorkflow)) {
+    errors.push("release workflow must not run for branches, pull requests, or schedules");
+  }
+  if (!/^permissions:\s*\n\s{2}contents:\s*read\s*$/m.test(topLevel) || /:\s*write\s*$/m.test(topLevel)) {
+    errors.push("release workflow must be read-only by default");
+  }
+  for (const permission of ["contents", "id-token", "attestations", "artifact-metadata"]) {
+    if (!new RegExp(`^\\s{6}${permission}:\\s*write\\s*$`, "m").test(releaseJob)) {
+      errors.push(`release-preview job must grant ${permission}: write`);
+    }
+    if ((releaseWorkflow.match(new RegExp(`^\\s+${permission}:\\s*write\\s*$`, "gm")) || []).length !== 1) {
+      errors.push(`${permission}: write must appear only on the release-preview job`);
+    }
+  }
+  if (!/uses:\s*actions\/attest@[0-9a-f]{40}/i.test(releaseJob)) {
+    errors.push("release-preview job must attest release provenance");
+  }
+  if (!/persist-credentials:\s*false/.test(releaseWorkflow)) {
+    errors.push("release checkouts must not persist GitHub credentials");
+  }
+  if (!/npm run package:unsigned/.test(releaseWorkflow)) {
+    errors.push("release workflow must call npm run package:unsigned");
+  }
+  for (const suffix of [".app.zip", ".app.zip.sha256", ".app.zip.manifest.json"]) {
+    if (!releaseJob.includes(`Retract-*${suffix}`)) {
+      errors.push(`release-preview job must publish only the named ${suffix} artifact`);
+    }
+  }
+  if (!/gh release create[\s\S]*--prerelease/.test(releaseJob)) {
+    errors.push("release-preview job must create a GitHub pre-release");
+  }
+}
+
 if (errors.length > 0) {
   console.error(errors.map((error) => `- ${error}`).join("\n"));
   process.exit(1);

@@ -73,6 +73,7 @@ ENV CARGO_INCREMENTAL=0 \
 # network. Dependency code may execute here, but it cannot reach credentials,
 # the host filesystem, Docker's socket, or the network through this build.
 RUN --network=none npm test
+RUN --network=none npm run check:public-repo
 RUN --network=none npm run build
 RUN --network=none cargo fmt --manifest-path crates/cleaner-domain/Cargo.toml -- --check \
     && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

@@ -44,7 +44,7 @@ jobs:
   native-macos-package:
     name: Native macOS package
     needs: container-checks
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - name: Check out the reviewed source
@@ -61,8 +61,5 @@ jobs:
       - name: Install locked JavaScript dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Build the native application
-        run: npm run tauri build -- --bundles app
-
-      - name: Verify the ad-hoc development signature
-        run: codesign --verify --deep --strict src-tauri/target/release/bundle/macos/Retract.app
+      - name: Build and verify the unsigned preview
+        run: npm run package:unsigned
