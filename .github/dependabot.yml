@@ -5,23 +5,50 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    # TypeScript 7 is a native-port migration. Stay on the supported 6.x
+    # bridge until the project deliberately schedules that work.
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
   - package-ecosystem: cargo
-    directory: /src-tauri
+    directories:
+      - /src-tauri
+      - /crates/cleaner-domain
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: cargo
-    directory: /crates/cleaner-domain
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    groups:
+      cargo-dependency:
+        group-by: dependency-name
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      docker-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
