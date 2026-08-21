@@ -173,7 +173,12 @@ function conversationLabel(chat: ChatSummary): string | null {
 
 function ScopeButton({ icon, label, count, active, onClick }: { icon: React.ReactElement<{ size?: number }>; label: string; count: number; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" className={`scope-button ${active ? "is-active" : ""}`} onClick={onClick}>
+    <button
+      type="button"
+      className={`scope-button ${active ? "is-active" : ""}`}
+      aria-label={`${label} ${count}`}
+      onClick={onClick}
+    >
       {icon}
       <span>{label}</span>
       <span className="scope-count">{count}</span>
