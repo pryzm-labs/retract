@@ -11,6 +11,6 @@ repository = "https://github.com/Pryzm-Labs/retract"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 serde = { version = "1", features = ["derive"] }
 regex = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

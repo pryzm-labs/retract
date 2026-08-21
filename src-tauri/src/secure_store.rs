@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
-    aead::{Aead, OsRng, Payload, rand_core::RngCore},
+    aead::{Aead, Generate, Payload},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -19,6 +19,7 @@ const MAGIC: &[u8; 7] = b"RTRCT02";
 const LEGACY_UNBOUND_MAGIC: &[u8; 7] = b"RTRCT01";
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 12;
+type AesNonce = aes_gcm::aead::Nonce<Aes256Gcm>;
 
 #[cfg(any(target_os = "macos", test))]
 const VAULT_MAGIC: &[u8; 7] = b"RTRCTV1";
@@ -130,7 +131,8 @@ impl SecureJobStore {
         }
         let cipher = Aes256Gcm::new_from_slice(&self.key)
             .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-        let nonce = aes_gcm::Nonce::from_slice(&bytes[MAGIC.len()..MAGIC.len() + NONCE_LENGTH]);
+        let nonce = AesNonce::try_from(&bytes[MAGIC.len()..MAGIC.len() + NONCE_LENGTH])
+            .map_err(|_| AppError::SecureStore("job store has an invalid nonce".into()))?;
         let aad = if legacy_unbound {
             &[][..]
         } else {
@@ -138,7 +140,7 @@ impl SecureJobStore {
         };
         let plaintext = cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: &bytes[MAGIC.len() + NONCE_LENGTH..],
                     aad,
@@ -155,12 +157,11 @@ impl SecureJobStore {
             serde_json::to_vec(state).map_err(|error| AppError::SecureStore(error.to_string()))?;
         let cipher = Aes256Gcm::new_from_slice(&self.key)
             .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-        let mut nonce_bytes = [0_u8; NONCE_LENGTH];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+        let nonce_bytes = random_bytes::<NONCE_LENGTH>()?;
+        let nonce = AesNonce::from(nonce_bytes);
         let ciphertext = cipher
             .encrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: plaintext.as_ref(),
                     aad: self.profile_binding.as_slice(),
@@ -244,11 +245,10 @@ pub fn load_telegram_api_hash(
     let key = load_or_create_named_key(data_dir, "connection-settings", "connection-settings.key")?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
+    let nonce = AesNonce::try_from(&bytes[..NONCE_LENGTH])
+        .map_err(|_| AppError::SecureStore("encrypted Telegram API hash is malformed".into()))?;
     let plaintext = cipher
-        .decrypt(
-            aes_gcm::Nonce::from_slice(&bytes[..NONCE_LENGTH]),
-            &bytes[NONCE_LENGTH..],
-        )
+        .decrypt(&nonce, &bytes[NONCE_LENGTH..])
         .map_err(|_| AppError::SecureStore("Telegram API hash authentication failed".into()))?;
     String::from_utf8(plaintext)
         .map(Zeroizing::new)
@@ -261,10 +261,10 @@ pub fn save_telegram_api_hash(data_dir: &std::path::Path, value: &str) -> Result
     let key = load_or_create_named_key(data_dir, "connection-settings", "connection-settings.key")?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-    let mut nonce_bytes = [0_u8; NONCE_LENGTH];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce_bytes = random_bytes::<NONCE_LENGTH>()?;
+    let nonce = AesNonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(aes_gcm::Nonce::from_slice(&nonce_bytes), value.as_bytes())
+        .encrypt(&nonce, value.as_bytes())
         .map_err(|_| AppError::SecureStore("Telegram API hash encryption failed".into()))?;
     let mut payload = Vec::with_capacity(NONCE_LENGTH + ciphertext.len());
     payload.extend_from_slice(&nonce_bytes);
@@ -284,8 +284,7 @@ fn load_or_create_named_key(
             return Ok(key);
         }
 
-        let mut key = [0_u8; KEY_LENGTH];
-        OsRng.fill_bytes(&mut key);
+        let mut key = random_bytes::<KEY_LENGTH>()?;
         set_vault_named_key(vault, account, Some(key))?;
         if let Err(error) = store_mac_secret_vault(vault) {
             set_vault_named_key(vault, account, None)?;
@@ -558,10 +557,14 @@ fn load_or_create_named_key(
         fs::File::open(path)?.read_exact(&mut key)?;
         return Ok(key);
     }
-    let mut key = [0_u8; KEY_LENGTH];
-    OsRng.fill_bytes(&mut key);
+    let key = random_bytes::<KEY_LENGTH>()?;
     write_private(&path, &key)?;
     Ok(key)
+}
+
+fn random_bytes<const N: usize>() -> Result<[u8; N], AppError> {
+    <[u8; N]>::try_generate()
+        .map_err(|error| AppError::SecureStore(format!("secure random generation failed: {error}")))
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
@@ -584,6 +587,29 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::model::PersistedState;
+
+    #[test]
+    fn loads_job_store_written_by_aes_gcm_010() {
+        const AES_GCM_010_FIXTURE: &[u8] = &[
+            82, 84, 82, 67, 84, 48, 50, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 239,
+            11, 194, 18, 253, 131, 214, 66, 230, 179, 93, 246, 94, 231, 64, 115, 10, 226, 65, 34,
+            72, 162, 142, 51, 220, 155, 170, 220, 251, 58, 97, 241, 142, 68, 129, 108, 100,
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        fs::write(&path, AES_GCM_010_FIXTURE).unwrap();
+
+        let store = SecureJobStore::with_test_key_and_profile(
+            path,
+            [0x2a; KEY_LENGTH],
+            b"telegram-compatibility",
+        );
+        let state = store.load().unwrap();
+
+        assert!(state.plans.is_empty());
+        assert!(state.jobs.is_empty());
+        assert!(!store.loaded_legacy_unbound());
+    }
 
     #[test]
     fn round_trip_and_tamper_detection() {
