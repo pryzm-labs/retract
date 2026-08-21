@@ -15,6 +15,8 @@
     "build": "tsc && vite build",
     "screenshot:dev": "vite --mode screenshot",
     "verify:production-bundle": "sh scripts/verify-production-bundle.sh",
+    "test:release": "node --test scripts/release-metadata.test.mjs",
+    "package:unsigned": "sh scripts/package-unsigned-macos.sh",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
