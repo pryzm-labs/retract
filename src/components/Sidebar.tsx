@@ -21,7 +21,6 @@ interface SidebarProps {
   scope: ChatScope;
   chatQuery: string;
   accountLabel: string;
-  runtimeMode: string;
   pendingRemovalChatIds: Set<number>;
   onChatQueryChange: (value: string) => void;
   onSelectChat: (id: number | null) => void;
@@ -35,7 +34,6 @@ export function Sidebar({
   scope,
   chatQuery,
   accountLabel,
-  runtimeMode,
   pendingRemovalChatIds,
   onChatQueryChange,
   onSelectChat,
@@ -56,14 +54,14 @@ export function Sidebar({
       <div className="brand-row">
         <BrandLogo />
         <span className="brand-name">Retract</span>
-        <span className="runtime-pill">{runtimeMode === "demo" ? "DEMO" : "LIVE"}</span>
+        <span className="runtime-pill">TELEGRAM</span>
       </div>
 
       <button className="account-switcher" type="button" aria-label="Current account">
         <Avatar name={accountLabel} seed={3} size={30} />
         <span className="account-copy">
           <strong>{accountLabel}</strong>
-          <small>{runtimeMode === "demo" ? "Demo fixtures" : "Telegram connected"}</small>
+          <small>Telegram account</small>
         </span>
         <ChevronsUpDown size={15} aria-hidden="true" />
       </button>

@@ -11,6 +11,13 @@ describe("Retract desktop UI", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  it("never exposes fixture controls in the end-user shell", async () => {
+    render(<App />);
+    expect(await screen.findByText("Search every chat")).toBeInTheDocument();
+    expect(screen.queryByText(/Safe demo/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reset demo fixtures/i })).not.toBeInTheDocument();
+  });
+
   it("leaves the password gate before the full Telegram catalog finishes loading", async () => {
     const demoSnapshot = await api.snapshot();
     const demoSettings = await api.connectionSettings();
@@ -30,10 +37,7 @@ describe("Retract desktop UI", () => {
 
     vi.spyOn(api, "bootstrapSnapshot").mockResolvedValueOnce(waiting);
     vi.spyOn(api, "snapshot").mockImplementation(() => catalog);
-    vi.spyOn(api, "connectionSettings").mockResolvedValue({
-      ...demoSettings,
-      runtimeMode: "live"
-    });
+    vi.spyOn(api, "connectionSettings").mockResolvedValue(demoSettings);
     vi.spyOn(api, "catalogProgress").mockResolvedValue({
       phase: "loading",
       total: 531,
@@ -237,7 +241,6 @@ describe("Retract desktop UI", () => {
     await screen.findByText("Search every chat");
     fireEvent.click(screen.getByRole("button", { name: "Open connection settings" }));
     expect(await screen.findByRole("heading", { name: "Telegram connection" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Connect Telegram/ }));
     expect(screen.getByText("TDLib library")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
   });

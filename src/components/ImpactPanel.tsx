@@ -8,7 +8,6 @@ import {
   Info,
   LogOut,
   LoaderCircle,
-  RotateCcw,
   ShieldCheck,
   Trash2,
   Users
@@ -20,7 +19,6 @@ interface ImpactPanelProps {
   selected: MessageSnapshot[];
   activeChat?: ChatSummary;
   jobs: JobRecord[];
-  runtimeMode: string;
   busy: boolean;
   busyLabel: string | null;
   chatRemovalPending: boolean;
@@ -31,10 +29,9 @@ interface ImpactPanelProps {
   onSenderAction: (sender: MessageSnapshot) => void;
   onClearSelection: () => void;
   onCancelJob: (jobId: string) => void;
-  onResetDemo: () => void;
 }
 
-export function ImpactPanel({ selected, activeChat, jobs, runtimeMode, busy, busyLabel, chatRemovalPending, hiddenSelectionCount, onReview, onChatAction, onOwnMessagesAction, onSenderAction, onClearSelection, onCancelJob, onResetDemo }: ImpactPanelProps) {
+export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatRemovalPending, hiddenSelectionCount, onReview, onChatAction, onOwnMessagesAction, onSenderAction, onClearSelection, onCancelJob }: ImpactPanelProps) {
   const everyone = selected.filter((message) => message.deletionReach === "everyone").length;
   const selfOnly = selected.filter((message) => message.deletionReach === "self_only").length;
   const blocked = selected.filter((message) => message.deletionReach === "none").length;
@@ -175,11 +172,6 @@ export function ImpactPanel({ selected, activeChat, jobs, runtimeMode, busy, bus
         </section>
       </div>
 
-      {runtimeMode === "demo" && (
-        <button type="button" className="reset-demo" onClick={onResetDemo} disabled={busy}>
-          <RotateCcw size={13} /> Reset demo fixtures
-        </button>
-      )}
     </aside>
   );
 }

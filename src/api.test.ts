@@ -205,9 +205,9 @@ describe("browser demo API", () => {
     expect((await api.refreshChats([-1003])).map((chat) => chat.id)).toEqual([-1003]);
   });
 
-  it("exposes safe browser connection defaults without secrets", async () => {
+  it("exposes production-shaped browser connection defaults without secrets", async () => {
     const settings = await api.connectionSettings();
-    expect(settings.runtimeMode).toBe("demo");
+    expect(settings).not.toHaveProperty("runtimeMode");
     expect(settings.apiHashConfigured).toBe(false);
     expect(settings).not.toHaveProperty("apiHash");
   });

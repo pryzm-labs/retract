@@ -1,7 +1,7 @@
-import { Check, Database, FlaskConical, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, ShieldCheck, X } from "lucide-react";
+import { Check, Database, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ConnectionSettings, RuntimePreference, SaveConnectionSettingsResult } from "../types";
+import type { ConnectionSettings, SaveConnectionSettingsResult } from "../types";
 
 interface ConnectionSettingsDialogProps {
   settings: ConnectionSettings;
@@ -11,7 +11,6 @@ interface ConnectionSettingsDialogProps {
 }
 
 export function ConnectionSettingsDialog({ settings, required, onClose, onSaved }: ConnectionSettingsDialogProps) {
-  const [runtimeMode, setRuntimeMode] = useState<RuntimePreference>(settings.runtimeMode);
   const [tdlibPath, setTdlibPath] = useState(settings.tdlibPath || settings.detectedTdlibPath || "");
   const [apiId, setApiId] = useState(settings.apiId?.toString() || "");
   const [apiHash, setApiHash] = useState("");
@@ -32,7 +31,6 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
     setError(null);
     try {
       const result = await api.saveConnectionSettings({
-        runtimeMode,
         tdlibPath,
         apiId: apiId.trim() ? Number(apiId) : null,
         apiHash: apiHash.trim() || null,
@@ -47,8 +45,7 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
   };
 
   const hashReady = settings.apiHashConfigured || /^[a-fA-F0-9]{32}$/.test(apiHash.trim());
-  const liveReady = Boolean(tdlibPath.trim() && Number(apiId) > 0 && hashReady);
-  const saveReady = runtimeMode === "demo" || liveReady;
+  const saveReady = Boolean(tdlibPath.trim() && Number(apiId) > 0 && hashReady);
   const environmentControlled = settings.environmentOverrides.length > 0;
   const tdlibEnvironmentOverride = settings.environmentOverrides.includes("RETRACT_TDLIB_PATH");
 
@@ -66,7 +63,7 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
         <span className="connection-icon"><MonitorCog size={21} /></span>
         <div>
           <p className="eyebrow">{required ? "FIRST-RUN SETUP" : "CONNECTION SETTINGS"}</p>
-          <h2>{required ? "How should Retract start?" : "Telegram connection"}</h2>
+          <h2>{required ? "Connect Telegram" : "Telegram connection"}</h2>
         </div>
       </div>
       <p className="connection-lead">
@@ -87,21 +84,7 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
       )}
 
       <form onSubmit={save}>
-        <div className="connection-mode-grid">
-          <button type="button" aria-pressed={runtimeMode === "live"} className={`connection-mode ${runtimeMode === "live" ? "is-selected" : ""}`} onClick={() => setRuntimeMode("live")}>
-            <ShieldCheck size={19} />
-            <span><strong>Connect Telegram</strong><small>Use your real or test account locally</small></span>
-            <span className="mode-check">{runtimeMode === "live" && <Check size={12} />}</span>
-          </button>
-          <button type="button" aria-pressed={runtimeMode === "demo"} className={`connection-mode ${runtimeMode === "demo" ? "is-selected" : ""}`} onClick={() => setRuntimeMode("demo")}>
-            <FlaskConical size={19} />
-            <span><strong>Safe demo</strong><small>Disposable fixtures; no Telegram access</small></span>
-            <span className="mode-check">{runtimeMode === "demo" && <Check size={12} />}</span>
-          </button>
-        </div>
-
-        {runtimeMode === "live" && (
-          <div className="connection-fields">
+        <div className="connection-fields">
             {settings.bundledTdlibAvailable && !tdlibEnvironmentOverride ? (
               <div className="bundled-tdlib">
                 <PackageCheck size={19} />
@@ -139,19 +122,14 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
                 />
               </label>
             </div>
-            <p className="credential-help">For this development build, obtain both values from <strong>my.telegram.org → API development tools</strong>. The hash never enters browser storage or the settings JSON file.</p>
+            <p className="credential-help">Obtain both values from <strong>my.telegram.org → API development tools</strong>. The hash never enters browser storage or the settings JSON file.</p>
 
             <label className="test-dc-toggle">
               <input type="checkbox" checked={useTestDc} onChange={(event) => setUseTestDc(event.target.checked)} />
               <span className="custom-checkbox">{useTestDc && <Check size={12} />}</span>
               <span><strong>Use Telegram’s test server</strong><small>Separate disposable accounts and database. Recommended for the destructive integration gate, but not for testing with a normal Telegram contact.</small></span>
             </label>
-          </div>
-        )}
-
-        {runtimeMode === "demo" && (
-          <div className="demo-mode-note"><FlaskConical size={17} /><span>Retract will open its safe local fixture workspace. You can return here later to connect Telegram.</span></div>
-        )}
+        </div>
 
         {error && <div className="connection-error" role="alert">{error}</div>}
         {saved && <div className="connection-restarting" role="status"><Check size={16} /> Settings applied.</div>}

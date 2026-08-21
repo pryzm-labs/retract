@@ -76,7 +76,6 @@ export const api = {
       ? call("get_connection_settings")
       : Promise.resolve({
           setupComplete: true,
-          runtimeMode: "demo",
           tdlibPath: "",
           detectedTdlibPath: null,
           bundledTdlibAvailable: false,

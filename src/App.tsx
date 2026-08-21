@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, FlaskConical, LoaderCircle, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { AuthGate } from "./components/AuthGate";
@@ -550,34 +550,6 @@ export default function App() {
     }
   };
 
-  const resetDemo = async () => {
-    const generation = beginAction("Resetting demo fixtures…");
-    if (generation === null) return;
-    try {
-      const next = await api.resetDemo();
-      if (generation !== actionGeneration.current) return;
-      snapshotLoadGeneration.current += 1;
-      backgroundRefreshGeneration.current += 1;
-      setRefreshingCatalog(false);
-      setSettlingRemovalChatIds(new Set());
-      setCatalogProgress({ phase: "ready", total: next.chats.length, processed: next.chats.length });
-      setSnapshot(next);
-      setJobs([]);
-      setSelectedMessages(new Map());
-      setSelectedChatId(null);
-      setScope("all");
-      setChatQuery("");
-      setQuery("");
-      setPrivacyScan(false);
-      setSearchVersion((value) => value + 1);
-      setToast({ tone: "success", message: "Demo fixtures were restored." });
-    } catch (error) {
-      if (generation === actionGeneration.current) showError(error, setToast);
-    } finally {
-      endAction(generation);
-    }
-  };
-
   if (loading || !snapshot) {
     return (
       <StartupLoading />
@@ -607,7 +579,6 @@ export default function App() {
         scope={scope}
         chatQuery={chatQuery}
         accountLabel={snapshot.accountLabel}
-        runtimeMode={snapshot.runtimeMode}
         pendingRemovalChatIds={pendingRemovalChatIds}
         onChatQueryChange={setChatQuery}
         onSelectChat={setSelectedChatId}
@@ -616,13 +587,6 @@ export default function App() {
       />
 
       <main className="main-column">
-        {snapshot.runtimeMode === "demo" && (
-          <div className="mode-banner">
-            <FlaskConical size={14} />
-            <span><strong>Safe demo mode.</strong> {snapshot.modeReason}</span>
-            <button type="button" onClick={() => setSettingsOpen(true)}>Configure Telegram</button>
-          </div>
-        )}
         <SearchToolbar
           query={query}
           direction={direction}
@@ -656,7 +620,6 @@ export default function App() {
         selected={selected}
         activeChat={activeChat}
         jobs={jobs}
-        runtimeMode={snapshot.runtimeMode}
         busy={busy}
         busyLabel={busyLabel}
         chatRemovalPending={activeChat ? pendingRemovalChatIds.has(activeChat.id) : false}
@@ -667,7 +630,6 @@ export default function App() {
         onSenderAction={prepareSenderAction}
         onClearSelection={() => setSelectedMessages(new Map())}
         onCancelJob={cancelJob}
-        onResetDemo={resetDemo}
       />
 
       {plan && (

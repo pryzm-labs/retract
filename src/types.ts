@@ -201,11 +201,8 @@ export interface CommandError {
   message?: string;
 }
 
-export type RuntimePreference = "demo" | "live";
-
 export interface ConnectionSettings {
   setupComplete: boolean;
-  runtimeMode: RuntimePreference;
   tdlibPath: string;
   detectedTdlibPath?: string | null;
   bundledTdlibAvailable: boolean;
@@ -218,7 +215,6 @@ export interface ConnectionSettings {
 }
 
 export interface SaveConnectionSettingsRequest {
-  runtimeMode: RuntimePreference;
   tdlibPath: string;
   apiId: number | null;
   apiHash: string | null;

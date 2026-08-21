@@ -6,7 +6,6 @@ import { ConnectionSettingsDialog } from "./ConnectionSettingsDialog";
 
 const bundledSettings: ConnectionSettings = {
   setupComplete: false,
-  runtimeMode: "demo",
   tdlibPath: "/Applications/Retract.app/Contents/Resources/lib/libtdjson.dylib",
   detectedTdlibPath: "/Applications/Retract.app/Contents/Resources/lib/libtdjson.dylib",
   bundledTdlibAvailable: true,
@@ -21,38 +20,43 @@ const bundledSettings: ConnectionSettings = {
 describe("ConnectionSettingsDialog", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("uses the bundled TDLib without asking an end user for a library path", () => {
+  it("requires real Telegram credentials without offering fixture mode", () => {
     render(<ConnectionSettingsDialog settings={bundledSettings} required onClose={vi.fn()} onSaved={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Connect Telegram/ }));
-
+    expect(screen.getByRole("heading", { name: "Connect Telegram" })).toBeInTheDocument();
+    expect(screen.queryByText("Safe demo")).not.toBeInTheDocument();
     expect(screen.getByText("TDLib 1.8.64 included")).toBeInTheDocument();
     expect(screen.getByText("READY")).toBeInTheDocument();
-    expect(screen.getByLabelText("Telegram API ID")).toHaveAttribute("type", "text");
-    expect(screen.queryByPlaceholderText("/absolute/path/to/libtdjson.dylib")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Telegram API ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("Telegram API hash")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
   });
 
-  it("applies Safe demo without requesting a process restart", async () => {
-    const result: SaveConnectionSettingsResult = {
+  it("saves only real Telegram connection fields", async () => {
+    const liveResult: SaveConnectionSettingsResult = {
       connectionSettings: { ...bundledSettings, setupComplete: true },
       snapshot: {
-        runtimeMode: "demo",
-        accountLabel: "Local demo",
-        modeReason: "Disposable fixtures",
+        runtimeMode: "live",
+        accountLabel: "Telegram account",
+        modeReason: "Connected locally",
         chats: [],
         recentJobs: [],
-        safetyNotice: "Demo only",
+        safetyNotice: "Deletion plans are capability checked.",
         auth: { stage: "ready" }
       }
     };
-    const save = vi.spyOn(api, "saveConnectionSettings").mockResolvedValue(result);
-    const onSaved = vi.fn();
-    render(<ConnectionSettingsDialog settings={bundledSettings} required onClose={vi.fn()} onSaved={onSaved} />);
+    const save = vi.spyOn(api, "saveConnectionSettings").mockResolvedValue(liveResult);
+    render(<ConnectionSettingsDialog settings={bundledSettings} required onClose={vi.fn()} onSaved={vi.fn()} />);
 
+    fireEvent.change(screen.getByLabelText("Telegram API ID"), { target: { value: "12345678" } });
+    fireEvent.change(screen.getByLabelText("Telegram API hash"), { target: { value: "0123456789abcdef0123456789abcdef" } });
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
-    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(result));
-    expect(save).toHaveBeenCalledWith(expect.objectContaining({ runtimeMode: "demo" }));
-    expect(screen.getByText("Settings applied.")).toBeInTheDocument();
+    await waitFor(() => expect(save).toHaveBeenCalledWith({
+      tdlibPath: bundledSettings.tdlibPath,
+      apiId: 12345678,
+      apiHash: "0123456789abcdef0123456789abcdef",
+      useTestDc: false
+    }));
   });
 });
