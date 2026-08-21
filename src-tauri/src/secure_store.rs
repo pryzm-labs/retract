@@ -586,6 +586,30 @@ mod tests {
     use crate::model::PersistedState;
 
     #[test]
+    fn loads_job_store_written_by_aes_gcm_010() {
+        const AES_GCM_010_FIXTURE: &[u8] = &[
+            82, 84, 82, 67, 84, 48, 50, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+            17, 239, 11, 194, 18, 253, 131, 214, 66, 230, 179, 93, 246, 94, 231, 64, 115,
+            10, 226, 65, 34, 72, 162, 142, 51, 220, 155, 170, 220, 251, 58, 97, 241, 142,
+            68, 129, 108, 100,
+        ];
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        fs::write(&path, AES_GCM_010_FIXTURE).unwrap();
+
+        let store = SecureJobStore::with_test_key_and_profile(
+            path,
+            [0x2a; KEY_LENGTH],
+            b"telegram-compatibility",
+        );
+        let state = store.load().unwrap();
+
+        assert!(state.plans.is_empty());
+        assert!(state.jobs.is_empty());
+        assert!(!store.loaded_legacy_unbound());
+    }
+
+    #[test]
     fn round_trip_and_tamper_detection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.enc");
