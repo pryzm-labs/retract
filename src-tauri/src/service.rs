@@ -855,21 +855,6 @@ impl CleanerService {
         jobs
     }
 
-    pub async fn reset_demo(&self) -> Result<(), AppError> {
-        if self.gateway.info().mode != "demo" {
-            return Err(AppError::InvalidRequest(
-                "reset is only available in demo mode".into(),
-            ));
-        }
-        self.gateway.reset_demo().await?;
-        self.plans.write().await.clear();
-        self.jobs.write().await.clear();
-        self.cancellation.lock().await.clear();
-        self.system_grants.lock().await.clear();
-        self.store.erase()?;
-        Ok(())
-    }
-
     pub async fn request_qr_auth(&self) -> Result<(), AppError> {
         self.gateway.request_qr_auth().await
     }

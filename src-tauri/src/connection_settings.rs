@@ -14,8 +14,8 @@ const SETTINGS_FILE: &str = "connection-settings.json";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePreference {
-    #[default]
     Demo,
+    #[default]
     Live,
 }
 
@@ -41,7 +41,7 @@ impl Default for StoredConnectionSettings {
         Self {
             schema_version: settings_schema_version(),
             setup_complete: false,
-            runtime_mode: RuntimePreference::Demo,
+            runtime_mode: RuntimePreference::Live,
             tdlib_path: None,
             api_id: None,
             use_test_dc: false,
@@ -53,7 +53,6 @@ impl Default for StoredConnectionSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSettingsView {
     pub setup_complete: bool,
-    pub runtime_mode: RuntimePreference,
     pub tdlib_path: String,
     pub detected_tdlib_path: Option<String>,
     pub bundled_tdlib_available: bool,
@@ -68,7 +67,6 @@ pub struct ConnectionSettingsView {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveConnectionSettingsRequest {
-    pub runtime_mode: RuntimePreference,
     #[serde(default)]
     pub tdlib_path: String,
     pub api_id: Option<i32>,
@@ -110,7 +108,7 @@ pub fn get_view(app: &AppHandle) -> Result<ConnectionSettingsView, AppError> {
         .ok()
         .and_then(|value| value.parse().ok())
         .or(stored.api_id);
-    let should_check_keychain = env_requests_live || stored.runtime_mode == RuntimePreference::Live;
+    let should_check_keychain = env_requests_live || public_setup_complete(&stored);
     let api_hash_configured = std::env::var("RETRACT_TELEGRAM_API_HASH")
         .is_ok_and(|value| !value.trim().is_empty())
         || (should_check_keychain && secure_store::load_telegram_api_hash(&data_dir)?.is_some());
@@ -119,12 +117,7 @@ pub fn get_view(app: &AppHandle) -> Result<ConnectionSettingsView, AppError> {
         .unwrap_or(stored.use_test_dc);
 
     Ok(ConnectionSettingsView {
-        setup_complete: stored.setup_complete || env_requests_live,
-        runtime_mode: if env_requests_live {
-            RuntimePreference::Live
-        } else {
-            stored.runtime_mode
-        },
+        setup_complete: public_setup_complete(&stored) || env_requests_live,
         tdlib_path,
         detected_tdlib_path: detected.map(|path| path.to_string_lossy().into_owned()),
         bundled_tdlib_available: bundled.is_some(),
@@ -156,16 +149,14 @@ pub fn save(app: &AppHandle, request: SaveConnectionSettingsRequest) -> Result<(
     } else {
         Some(PathBuf::from(tdlib_path))
     };
-    if request.runtime_mode == RuntimePreference::Live {
-        validate_live_fields(
-            &resolved_tdlib
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            request.api_id,
-            supplied_hash.is_some() || secure_store::load_telegram_api_hash(&data_dir)?.is_some(),
-        )?;
-    }
+    validate_live_fields(
+        &resolved_tdlib
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        request.api_id,
+        supplied_hash.is_some() || secure_store::load_telegram_api_hash(&data_dir)?.is_some(),
+    )?;
 
     if let Some(api_hash) = supplied_hash {
         validate_api_hash(api_hash)?;
@@ -175,7 +166,7 @@ pub fn save(app: &AppHandle, request: SaveConnectionSettingsRequest) -> Result<(
     let settings = StoredConnectionSettings {
         schema_version: settings_schema_version(),
         setup_complete: true,
-        runtime_mode: request.runtime_mode,
+        runtime_mode: RuntimePreference::Live,
         tdlib_path: resolved_tdlib.filter(|path| detected_tdlib.as_ref() != Some(path)),
         api_id: request.api_id.or(existing.api_id),
         use_test_dc: request.use_test_dc,
@@ -190,7 +181,7 @@ pub fn effective_live(app: &AppHandle) -> Result<Option<EffectiveLiveSettings>, 
         .map_err(|error| AppError::SecureStore(error.to_string()))?;
     let stored = load(&data_dir)?;
     let env_requests_live = environment_requests_live();
-    if !env_requests_live && stored.runtime_mode != RuntimePreference::Live {
+    if !env_requests_live && !public_setup_complete(&stored) {
         return Ok(None);
     }
 
@@ -313,6 +304,10 @@ fn validate_api_hash(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn public_setup_complete(settings: &StoredConnectionSettings) -> bool {
+    settings.setup_complete && settings.runtime_mode == RuntimePreference::Live
+}
+
 fn environment_overrides() -> Vec<String> {
     [
         "RETRACT_TDLIB_PATH",
@@ -395,5 +390,14 @@ mod tests {
     fn rejects_malformed_api_hashes() {
         assert!(validate_api_hash("not-a-secret").is_err());
         assert!(validate_api_hash("0123456789abcdef0123456789abcdef").is_ok());
+    }
+
+    #[test]
+    fn legacy_demo_settings_are_treated_as_unconfigured() {
+        let stored: StoredConnectionSettings = serde_json::from_str(
+            r#"{"schemaVersion":1,"setupComplete":true,"runtimeMode":"demo"}"#,
+        )
+        .unwrap();
+        assert!(!public_setup_complete(&stored));
     }
 }

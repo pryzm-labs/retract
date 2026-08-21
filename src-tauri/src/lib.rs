@@ -1,4 +1,5 @@
 mod connection_settings;
+#[cfg(test)]
 mod demo_gateway;
 mod error;
 mod gateway;
@@ -7,6 +8,7 @@ mod local_auth;
 mod model;
 mod secure_store;
 mod service;
+mod setup_gateway;
 mod tdjson;
 
 use std::sync::{
@@ -15,7 +17,6 @@ use std::sync::{
 };
 
 use cleaner_domain::ChatSummary;
-use demo_gateway::DemoGateway;
 use error::{AppError, CommandError};
 use model::{
     AppSnapshot, AuthSnapshot, AuthValueRequest, AuthorizePlanRequest, CatalogProgress,
@@ -23,6 +24,7 @@ use model::{
     PrepareSenderActionRequest, SearchRequest, SearchResponse,
 };
 use service::CleanerService;
+use setup_gateway::SetupGateway;
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -247,13 +249,6 @@ async fn cancel_job(
 }
 
 #[tauri::command]
-async fn reset_demo(runtime: State<'_, Arc<RuntimeState>>) -> Result<AppSnapshot, CommandError> {
-    let service = runtime.current().await;
-    service.reset_demo().await.map_err(CommandError::from)?;
-    service.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
 fn get_connection_settings(
     app: AppHandle,
 ) -> Result<connection_settings::ConnectionSettingsView, CommandError> {
@@ -324,25 +319,18 @@ fn create_service(app: &AppHandle) -> Result<Arc<CleanerService>, AppError> {
             })
         })
     });
-    let (gateway, profile_dir, is_demo): (Arc<dyn gateway::TelegramGateway>, _, _) = match live {
-        Some(Ok(gateway)) => (gateway, live_profile, false),
+    let (gateway, store): (Arc<dyn gateway::TelegramGateway>, _) = match live {
+        Some(Ok(gateway)) => (gateway, secure_store::SecureJobStore::open(live_profile)?),
         Some(Err(error)) => (
-            Arc::new(DemoGateway::with_reason(format!(
-                "Live mode could not start: {error}. Open Settings to correct the connection. Destructive actions remain confined to fixtures."
-            ))),
-            base_data_dir.join("demo"),
-            true,
+            SetupGateway::new(format!(
+                "Telegram could not start: {error}. Open connection settings and verify the configuration."
+            )),
+            secure_store::SecureJobStore::open_setup(base_data_dir.join("setup"))?,
         ),
         None => (
-            Arc::new(DemoGateway::new()),
-            base_data_dir.join("demo"),
-            true,
+            SetupGateway::new("Configure Telegram to start using Retract."),
+            secure_store::SecureJobStore::open_setup(base_data_dir.join("setup"))?,
         ),
-    };
-    let store = if is_demo {
-        secure_store::SecureJobStore::open_demo(profile_dir)?
-    } else {
-        secure_store::SecureJobStore::open(profile_dir)?
     };
     CleanerService::new(gateway, store)
 }
@@ -380,7 +368,6 @@ pub fn run() {
             start_execution,
             get_jobs,
             cancel_job,
-            reset_demo,
             get_connection_settings,
             save_connection_settings
         ])

@@ -1689,12 +1689,6 @@ impl TelegramGateway for LiveGateway {
         .map_err(|_| AppError::Gateway("TDLIB_CLOSE_TIMEOUT".into()))??;
         Ok(())
     }
-
-    async fn reset_demo(&self) -> Result<(), AppError> {
-        Err(AppError::InvalidRequest(
-            "reset is only available in demo mode".into(),
-        ))
-    }
 }
 
 fn append_raw_messages(destination: &mut Vec<Value>, response: &Value) {

@@ -61,13 +61,11 @@ impl SecureJobStore {
         })
     }
 
-    pub fn open_demo(data_dir: PathBuf) -> Result<Self, AppError> {
+    pub fn open_setup(data_dir: PathBuf) -> Result<Self, AppError> {
         fs::create_dir_all(&data_dir)?;
         Ok(Self {
-            // Demo records contain fixture IDs and counters only. Keeping this profile
-            // independent of Keychain makes it disposable and stable across ad-hoc builds.
-            key: [0xD3; KEY_LENGTH],
-            path: data_dir.join("demo-jobs.enc"),
+            key: [0x53; KEY_LENGTH],
+            path: data_dir.join("setup-jobs.enc"),
         })
     }
 
@@ -119,14 +117,6 @@ impl SecureJobStore {
         write_private(&temporary, &payload)?;
         fs::rename(temporary, &self.path)?;
         Ok(())
-    }
-
-    pub fn erase(&self) -> Result<(), AppError> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
     }
 }
 

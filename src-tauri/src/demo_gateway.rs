@@ -50,17 +50,6 @@ impl DemoGateway {
         }
     }
 
-    pub fn with_reason(reason: impl Into<String>) -> Self {
-        Self {
-            data: RwLock::new(seed_data()),
-            reason: reason.into(),
-            #[cfg(test)]
-            chat_list_reads: AtomicUsize::new(0),
-            #[cfg(test)]
-            direct_chat_reads: AtomicUsize::new(0),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn chat_read_counts(&self) -> (usize, usize) {
         (
@@ -400,11 +389,6 @@ impl TelegramGateway for DemoGateway {
         Err(demo_auth_error())
     }
     async fn close(&self) -> Result<(), AppError> {
-        Ok(())
-    }
-
-    async fn reset_demo(&self) -> Result<(), AppError> {
-        *self.data.write().await = seed_data();
         Ok(())
     }
 }

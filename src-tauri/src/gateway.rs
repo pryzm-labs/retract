@@ -48,5 +48,4 @@ pub trait TelegramGateway: Send + Sync {
     async fn submit_code(&self, code: &str) -> Result<(), AppError>;
     async fn submit_password(&self, password: &str) -> Result<(), AppError>;
     async fn close(&self) -> Result<(), AppError>;
-    async fn reset_demo(&self) -> Result<(), AppError>;
 }

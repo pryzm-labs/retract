@@ -51,6 +51,7 @@ pub struct AuthSnapshot {
 }
 
 impl AuthSnapshot {
+    #[cfg(test)]
     pub fn ready() -> Self {
         Self {
             stage: AuthStage::Ready,
