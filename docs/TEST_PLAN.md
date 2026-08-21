@@ -4,7 +4,7 @@
 
 No production Telegram account may be used until every applicable test below passes against Telegram’s test data center with disposable accounts and groups. Record the Retract commit, TDLib source commit and SHA-256, macOS version, architecture, account role, request, TDLib result, and observed postcondition for each case.
 
-Set `RETRACT_TELEGRAM_TEST_DC=1`. Confirm the UI reports live mode and TDLib 1.8.64; a demo fallback is a failed setup, not a passing live test.
+Set `RETRACT_TELEGRAM_TEST_DC=1`. Confirm the UI reports the intended Telegram account and TDLib 1.8.64; an unconfigured setup state is not a passing live test.
 
 ## Automated gate
 

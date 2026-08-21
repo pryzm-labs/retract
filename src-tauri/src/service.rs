@@ -94,8 +94,8 @@ impl CleanerService {
     }
 
     /// Return enough state to render the correct shell without waiting for the
-    /// complete Telegram catalog. Demo mode keeps its in-memory chat list so
-    /// browser previews and safe-demo launches remain instantaneous and useful.
+    /// complete Telegram catalog. Test gateways keep their in-memory chat list
+    /// so automated checks remain instantaneous and deterministic.
     pub async fn bootstrap_snapshot(&self) -> Result<AppSnapshot, AppError> {
         let info = self.gateway.info();
         let chats = if info.mode == "live" {

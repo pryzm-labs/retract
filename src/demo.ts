@@ -231,8 +231,8 @@ export async function demoSnapshot(): Promise<AppSnapshot> {
   await delay();
   return {
     runtimeMode: "demo",
-    accountLabel: "Private demo account",
-    modeReason: "No Telegram session is connected. Destructive actions affect demo fixtures only.",
+    accountLabel: "Retract Preview",
+    modeReason: "Synthetic data for automated tests and documentation screenshots.",
     chats: structuredClone(chats.map((chat) => ({
       ...chat,
       conversationState: conversationState(chat)

@@ -1,10 +1,12 @@
 [package]
 name = "retract"
 version = "0.1.0"
-description = "Local-first chat history cleanup utility"
-authors = ["Retract contributors"]
+description = "Local-first Telegram history search, cleanup, and redaction for macOS"
+authors = ["Pryzm Labs"]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/Pryzm-Labs/retract"
+homepage = "https://github.com/Pryzm-Labs/retract"
 
 [lib]
 name = "retract_lib"

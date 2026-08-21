@@ -16,7 +16,7 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 
 1. **React webview:** untrusted for destructive authorization. It displays plans and gathers intent but cannot mint a valid backend plan or system-authentication grant.
 2. **Rust core:** trusted enforcement boundary. It validates IDs and capabilities, freezes plans, checks confirmation proofs, consumes system grants, persists jobs, and calls the gateway.
-3. **TDLib dynamic library:** trusted native dependency pinned by version and exact release commit. The normal consumer build bundles it as an app resource; the build verifies its recorded SHA-256 and the adapter verifies the loaded version. A substituted library still executes inside the application process, so release artifacts must be signed and notarized.
+3. **TDLib dynamic library:** trusted native dependency pinned by version and exact release commit. The normal consumer build bundles it as an app resource; the build verifies its recorded SHA-256 and the adapter verifies the loaded version. A substituted library still executes inside the application process, so users must verify preview provenance or build from reviewed source.
 4. **Telegram service:** authoritative for current permissions and deletion outcomes. Capabilities may change between preview and execution.
 5. **macOS Keychain and LocalAuthentication:** trusted for secret storage and fresh device-owner verification.
 6. **Local filesystem:** considered observable or modifiable by other software running as the user; confidential job data is authenticated encryption, while app binaries and configuration require normal code-signing protection.
@@ -34,7 +34,7 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 - Chat-wide operations re-resolve the immutable chat ID and current capability immediately before the call.
 - Cancelling prevents later calls; a currently in-flight TDLib call may still complete.
 - Restarted nonterminal jobs resume from durable batch progress.
-- Demo, test-DC, and production plans/databases use separate app-data profiles, preventing cross-environment job resumption.
+- Test-DC and production plans/databases use separate app-data profiles, preventing cross-environment job resumption. The synthetic gateway is test-only, and the production frontend boundary excludes fixture modules.
 - Stored plans intentionally retain only IDs, reach expectations, titles needed for confirmation, counters, and timestamps—not message text or media.
 
 ## Threats and mitigations
@@ -48,7 +48,7 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 | Wrong group destroyed | Separate critical UI, immutable chat ID, exact title, irreversible acknowledgement, fresh system authentication | Similar Unicode chat titles can still confuse a user; show IDs in a future expert view |
 | Secret leakage from logs | No message bodies in jobs, zeroized in-memory credentials, frontend never receives API secrets | TDLib and OS diagnostic logs are separate components and need release review |
 | Tampered job file | AES-GCM authentication; malformed or modified stores fail closed | Deleting the store loses local progress but cannot create Telegram authority |
-| Malicious TDLib library path | Bundled artifact from an exact source commit, build-time SHA-256 check, loaded-version check, and app-bundle signing | Developer environment overrides intentionally permit a custom path; public artifacts still require notarization and independent provenance verification |
+| Malicious TDLib library path | Bundled artifact from an exact source commit, build-time SHA-256 check, loaded-version check, and ad-hoc app-bundle signature | Developer overrides intentionally permit a custom path; unsigned previews lack Apple notarization, so checksum/provenance verification or a source build remains necessary |
 | Compromised build dependency targets the developer host | Integrity-checked lockfiles, npm lifecycle scripts disabled during install, non-root container user, secrets and local state excluded from context, no Docker socket mount, and network disabled for build/test commands | Docker daemon/base images and online dependency acquisition remain trusted; malicious code can still corrupt the produced artifact |
 | Compromised GitHub Action or overprivileged workflow | Official actions pinned to full commit SHAs, read-only repository permission, checkout credentials removed, no Telegram/release secrets, and native packaging gated on both container architectures | GitHub-hosted runner images and the pinned action commits remain trusted; release signing will require a separately protected workflow |
 
@@ -58,10 +58,10 @@ A screenshot, photo, document, caption, or other media attached to a Telegram me
 
 Sensitive-data detection is heuristic. It can miss novel formats, context-dependent identifiers, personal names, text embedded in media pixels, and document bodies, and it can produce false positives. Users must review every result. A full privacy scan may ask TDLib to page through substantial history; message bodies remain in memory only as needed for matching and are not written to Retract’s job log, but TDLib’s encrypted local database remains part of the trusted local boundary.
 
-## Release hardening still required
+## Preview residual risks and future release hardening
 
 - Independently reproduce the pinned TDLib build in CI and compare the reviewed artifact/provenance.
-- Sign with the release identity, harden, notarize, and staple the macOS build; test Keychain behavior under the final application identity.
+- Preview archives use hardened runtime and an ad-hoc signature but are not Apple-notarized. A future officially signed distribution should test Keychain behavior under its final application identity, notarize, and staple the build.
 - Review TDLib logging configuration and verify no content-bearing logs persist.
 - Add a dependency/SBOM and native-library vulnerability scan to CI.
 - Run the entire test-DC matrix and an independent destructive-action security review.

@@ -2,6 +2,20 @@
   "name": "retract",
   "private": true,
   "version": "0.1.0",
+  "description": "Local-first Telegram history search, cleanup, and redaction for macOS",
+  "license": "MIT",
+  "author": "Pryzm Labs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pryzm-Labs/retract.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Pryzm-Labs/retract/issues"
+  },
+  "homepage": "https://github.com/Pryzm-Labs/retract#readme",
+  "engines": {
+    "node": "24.19.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +29,8 @@
     "build": "tsc && vite build",
     "screenshot:dev": "vite --mode screenshot",
     "verify:production-bundle": "sh scripts/verify-production-bundle.sh",
-    "test:release": "node --test scripts/release-metadata.test.mjs",
+    "test:release": "node --test scripts/release-metadata.node-test.mjs",
+    "check:public-repo": "node scripts/check-public-repo.mjs",
     "package:unsigned": "sh scripts/package-unsigned-macos.sh",
     "preview": "vite preview",
     "test": "vitest run",

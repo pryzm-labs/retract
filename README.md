@@ -1,143 +1,134 @@
-# Retract
+<p align="center">
+  <img src="assets/retract-icon.png" alt="Retract app icon" width="144">
+</p>
 
-Retract is a local-first macOS desktop utility for finding and removing Telegram history with an explicit **delete for everyone** guarantee. It searches keywords across normal and secret chats, handles messages and media uniformly, makes cleanup authority visible, and supports selected-message deletion, whole-history clearing, explicit self-only chat-list removal, sender-wide moderation, and permanent group deletion when Telegram reports that the signed-in account has the exact capability. Dedicated **No reply sent** and **Empty** shortlists help surface likely spam or abandoned conversations for review.
+<h1 align="center">Retract</h1>
 
-The optional local **Privacy scan** walks message history in the selected scope without requiring a keyword. It flags likely email addresses, phone numbers, postal addresses, coordinates/location messages, contact cards, personal identifiers such as date-of-birth or record-ID language, identity-document references, checksum-valid payment cards and IBAN-like accounts, common cryptocurrency wallet formats—including Ethereum hex addresses, checksum-valid Bitcoin legacy and SegWit addresses, and context-associated 32-byte Solana public keys—IP addresses, and credential or recovery-phrase language. Findings are heuristics for human review: they can produce false positives and cannot guarantee that every sensitive item is found.
+<p align="center"><strong>Find sensitive Telegram history and remove as much of it as Telegram still permits.</strong></p>
 
-Retract never substitutes “delete for me” when an everyone-scoped deletion is unavailable or rejected.
+<p align="center">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2cbf9b.svg"></a>
+  <a href="https://github.com/Pryzm-Labs/retract/actions/workflows/secure-build.yml"><img alt="Secure build" src="https://github.com/Pryzm-Labs/retract/actions/workflows/secure-build.yml/badge.svg"></a>
+  <img alt="macOS 12 or newer" src="https://img.shields.io/badge/macOS-12%2B-9baab2.svg">
+  <img alt="Apple silicon" src="https://img.shields.io/badge/architecture-Apple%20silicon-9baab2.svg">
+</p>
 
-## Current status
+> [!WARNING]
+> Retract is destructive pre-release software. Review every frozen plan and begin with a new disposable conversation. Preview archives are ad-hoc signed but are **not Apple-notarized**. Build from source if you do not want to run an unsigned download.
 
-The application, safe fixture mode, TDLib adapter, encrypted job state, resumable execution, and confirmation flows are implemented. TDLib 1.8.64 is included for Apple silicon, loaded by an automated integration test, and placed in the macOS app bundle by the normal build. Live destructive behavior has not been exercised with Telegram credentials in this development environment, so it must pass [the test-DC release gate](docs/TEST_PLAN.md) before anyone uses a valuable production account.
+![Retract showing a synthetic Design Team conversation](docs/images/retract-overview.png)
 
-A screenshot, photo, document, caption, or other attachment sent as a Telegram message is deleted with that message when Telegram accepts an everyone-scoped deletion. Separately saved screenshots/files, exports, quoted copies, forwards, notification history, third-party backups, and other copies outside Telegram may remain. Retract reduces the history Telegram still lets the current account revoke; it does not promise total erasure from the internet.
+*Synthetic fixture data shown; no real Telegram account or conversation is pictured.*
 
-Privacy scanning examines message text, captions, filenames, contact-card fields, and Telegram location data. It does not currently download or OCR pixels inside images and videos, inspect document bodies, perform face/name recognition, or inspect copies outside Telegram.
+Retract is a local-first macOS desktop app for searching and cleaning Telegram history. Telegram credentials, sessions, message search, sensitive-data detection, and deletion execution stay on your Mac. There is no Retract cloud service or telemetry.
 
-## Safety model
+## What Retract can do
 
-- Plans freeze immutable chat/message IDs and a cryptographic fingerprint before confirmation.
-- The Rust backend rechecks server-reported capability immediately before every selected-message deletion attempt.
-- High and critical live actions require the exact chat title plus a fresh Touch ID or Mac login-password check. Its plan-bound grant expires after 60 seconds and is single-use.
-- Everyone-scoped deletion requests use `revoke: true`; they never fall back to self-only deletion.
-- **Remove chat for me** is a separate, explicitly confirmed operation. It uses `deleteChatHistory(remove_from_chat_list: true, revoke: false)` only when Telegram reports `can_be_deleted_only_for_self`; it removes history and the list entry only for the signed-in account.
-- Whole-history cleanup also asks Telegram to remove the conversation from the current account’s chat list. A later message can recreate a DM, and clearing a group’s history does not itself dissolve the group.
-- Group/channel leave cleanup favors the broadest authority Telegram currently reports. A whole-history-capable admin gets **Clear all history & leave**; otherwise an admin who can delete others’ messages gets **Delete all possible history & leave**, which freezes every enumerated message ID and deletes each still-eligible item in batches. Regular members get **Revoke my messages & leave**, scoped only to their outgoing IDs. All three paths clean first and leave second. Protected or rejected messages are reported without a self-only fallback, and **Delete group permanently** remains a separate owner-only critical action.
-- Batches are capped at 100 messages. Telegram flood waits persist and resume, and jobs can be cancelled between calls.
-- Job state is AES-256-GCM authenticated and encrypted. The API hash, job-store key, and TDLib database key share one versioned macOS Keychain vault that Retract reads once and retains only in zeroizing process memory. The first launch after upgrading from the legacy three-item layout may request access to each old entry once while migrating them; later launches access only the consolidated vault.
-- Job records contain IDs, counters, states, and normalized errors—not message bodies.
-- Privacy findings are computed locally and attached only to the in-memory search result; matched values are not added to job logs.
-- The webview has a strict content-security policy and only Tauri core permissions.
+- Search keywords across accessible normal and secret chats, including text, captions, filenames, and common media metadata.
+- Find likely sensitive data such as email addresses, phone numbers, locations, identity-document language, payment details, IP addresses, recovery phrases, and Ethereum, checksum-valid Bitcoin, and context-associated Solana wallet formats.
+- Filter chats that are empty or have no message sent by your account, making abandoned and spam-like conversations easier to review.
+- Explain whether each selected item can be deleted for everyone, only for you, or not at all.
+- Revoke selected messages, your own history, or the broadest history an administrator can remove before leaving a group.
+- Clear or remove a conversation from your own chat list even when there is nothing you can revoke for the other participant.
+- Permanently delete a group only when Telegram reports that the signed-in owner has that capability, through a separate critical action.
+- Resume bounded cleanup jobs after a flood wait or restart without expanding the reviewed target set.
 
-See [THREAT_MODEL.md](docs/THREAT_MODEL.md) for the trust boundaries and residual risks.
+Text, photos, videos, documents, voice messages, albums, captions, and other attachments are deleted with their Telegram message when Telegram accepts the request.
 
-## Run safe demo mode
+## Important limits
 
-Requirements: Apple-silicon macOS 12+, Node.js 20+ with npm, a current stable Rust toolchain, and the Xcode Command Line Tools. No manual TDLib build or library-path configuration is required.
+Retract can request only the deletion scope Telegram currently grants your account. It never converts a failed **delete for everyone** operation into **delete only for me**.
+
+Telegram deletion is not global erasure. Forwarded messages, quoted copies, screenshots, downloaded files, exports, notification history, moderation records, backups, and other copies outside Telegram may remain. Sensitive-data detection is heuristic: it can miss data and produce false positives. Retract does not OCR images or inspect document contents.
+
+## Install an unsigned preview
+
+The v0.1.x preview supports Apple-silicon Macs running macOS 12 or newer.
+
+1. Download the `.app.zip` and matching `.sha256` from the [latest release](https://github.com/Pryzm-Labs/retract/releases/latest).
+2. Verify the checksum from the download directory:
+
+   ```sh
+   shasum -a 256 -c Retract-v0.1.0-macos-arm64.app.zip.sha256
+   ```
+
+3. Extract the archive and move **Retract.app** to Applications.
+4. Attempt to open Retract. macOS will warn that the app is not notarized.
+5. Open **System Settings → Privacy & Security**, find the blocked-app message, choose **Open Anyway**, and confirm only if you trust the downloaded source and checksum.
+
+Do not disable Gatekeeper globally. Each release also publishes a manifest tying the archive to its source tag.
+
+## Build from source
+
+Requirements: Apple-silicon macOS 12+, [Node.js 24.19.0](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 library; a normal build does not require you to compile TDLib manually.
 
 ```sh
-npm install
+git clone https://github.com/Pryzm-Labs/retract.git
+cd retract
+npm ci --ignore-scripts
 npm run tauri dev
 ```
 
-On first launch, choose **Safe demo** in Retract's setup window. The app is then confined to disposable local fixtures. The fixtures include an untouched spam-like DM and a confirmed-empty DM so the new cleanup shortlists can be tested safely. The browser-only UI can be run with `npm run dev`, but native storage, TDLib, Keychain, and macOS owner authentication are available only in the Tauri app.
+`npm run tauri dev` verifies the bundled TDLib checksum and architecture before launch. If the artifact is absent or for another architecture, the ensure script can rebuild the exact pinned TDLib revision; only that exceptional path needs CMake, gperf, and OpenSSL 3.
 
-For the first end-to-end verification with another person, follow [LOCAL_LIVE_TEST.md](docs/LOCAL_LIVE_TEST.md). A new two-person private group is safer than using an existing DM because it contains no unrelated history.
+Environment variables in [`.env.example`](.env.example) are optional developer and CI overrides—not end-user setup. Do not use `VITE_*` variables for Telegram secrets and never commit an `.env` file.
 
-## Connect Telegram from the UI
+## Connect Telegram
 
-Retract includes TDLib **1.8.64** built from the exact official commit recorded in `vendor/tdlib-dist/build-stamp.txt`. `npm run tauri dev`, `npm run tauri build`, and `npm run check` verify the bundled library's architecture and SHA-256 automatically. If the artifact is absent or does not match the current Mac architecture, `scripts/ensure-tdlib.sh` fetches that exact source revision and rebuilds it; only that uncommon rebuild path needs CMake, gperf, and Homebrew OpenSSL 3.
+On first launch, Retract opens **Connect Telegram**. There is no fixture or demo option in the end-user app.
 
-Obtain your own application ID/hash from [Telegram’s application page](https://my.telegram.org), then launch Retract normally:
+1. Sign in to [my.telegram.org](https://my.telegram.org) and open **API development tools**.
+2. Create an application if needed, then copy its numeric API ID and 32-character API hash.
+3. Enter both values in Retract. Enable Telegram's test server only when using disposable test-DC accounts.
+4. Save settings and complete QR, phone/code, and two-step verification as requested by Telegram.
 
-```sh
-npm run tauri dev
-```
+The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory. Message contents are not written to Retract's job log.
 
-In the first-run window, choose **Connect Telegram**. The screen should show **TDLib 1.8.64 included — READY**. Enter:
+## Make the first deletion safely
 
-1. The numeric Telegram API ID.
-2. The 32-character Telegram API hash.
-3. Whether to use Telegram's separate test server.
+Do not begin with an old or valuable chat. Follow the complete [local live-test guide](docs/LOCAL_LIVE_TEST.md); the short version is:
 
-Choose **Save settings**, then authorize with the recommended QR flow or your phone/code/2FA flow. The new profile is applied without terminating the app. The API hash is stored in macOS Keychain. The ordinary settings file contains only the mode, API ID, test-server choice, and any advanced custom-library override—not the API hash. The Settings button beside **CHATS** and the **Configure Telegram** demo banner reopen this screen.
+1. Prefer Telegram's test DC. Otherwise create a new private group with one informed participant.
+2. Send a unique harmless text message, a disposable image, and a disposable file from your own account.
+3. Search the unique token in Retract and filter to **Mine**.
+4. Select only those fixtures and confirm the impact panel says **Delete for everyone** for every item.
+5. Review the immutable plan, run it, and have the other participant verify that each Telegram message disappeared.
 
-Environment variables remain optional developer/CI overrides and take precedence when present. `.env.example` documents them; Vite does not inject these values into the frontend. Do not prefix them with `VITE_`, commit them, or pass them to browser code. Retract automatically isolates demo, test-DC, and production databases and durable job stores.
+Stop if the displayed reach is not what you expect. Test chat-wide, leave, administrator, and group-destruction actions only after selected-message deletion succeeds. The full release gate is in [docs/TEST_PLAN.md](docs/TEST_PLAN.md).
 
-Live authorization supports QR login and phone/email/code/2FA states. TDLib session data is written under the operating system’s app-local-data directory with database encryption enabled.
+## Verify in Docker
 
-## Verification
-
-The default isolated verification path is Docker BuildKit. It uses
-digest-pinned official Node 24.19.0 and Rust 1.97.1 images, installs from the
-committed npm and Cargo lockfiles, disables npm dependency lifecycle scripts,
-and runs every project build, test, format, and lint command as a non-root user
-with networking disabled:
+The preferred project check runs pinned Node and Rust toolchains as a non-root BuildKit user. Project-controlled build and test commands run without network access, and the target uses a cache-only exporter so it does not leave a multi-gigabyte runnable image.
 
 ```sh
 npm run container:check
 ```
 
-The check target uses Docker's cache-only exporter, so it never leaves a
-multi-gigabyte runnable test image behind. npm downloads and Cargo dependencies
-use named BuildKit caches, while architecture-specific Rust target output stays
-in one reusable cache instead of being copied into a new immutable layer after
-every source edit. CI checks also omit incremental compilation and debug symbols,
-which are unnecessary for lint/test validation and substantially reduce disk
-usage. Inspect Docker's current footprint at any time with `docker system df`.
-Retract does not automatically prune Docker because the cache may be shared with
-other projects; Docker's normal BuildKit garbage collection remains in control.
-To inspect only Retract's named caches, run `npm run container:cache:status`. If
-you no longer need the faster rebuild cache, `npm run container:cache:prune`
-offers an interactive, project-scoped cleanup and leaves other projects' cache
-mounts alone.
+Docker reduces host toolchain exposure but is not a complete supply-chain sandbox: the Docker daemon, base images, online dependency acquisition, and produced artifacts remain trusted. Review lockfile and base-image digest changes like source changes.
 
-To export the compiled frontend from the same verified container stage:
+Useful disk commands:
 
 ```sh
-npm run container:build
+docker system df
+npm run container:cache:status
+npm run container:cache:prune
 ```
 
-The files are written to `artifacts/frontend/`. No Telegram credentials, `.env`
-files, local databases, TDLib session data, Docker socket, or host directories
-are included in the build context. Do not pass Telegram credentials as Docker
-build arguments; neither verification nor packaging needs them.
+The prune command is interactive and scoped to Retract's named BuildKit caches. Retract never prunes unrelated Docker data automatically. Native macOS packaging still runs on macOS because Xcode and Apple frameworks cannot run in a Linux container.
 
-Docker substantially isolates dependency and compiler execution from the host,
-but it cannot prevent every toolchain or supply-chain issue: the Docker daemon,
-base-image contents, Debian package repository, and build output remain trusted.
-A compromised dependency could still alter the artifact even though it cannot
-reach the host or network during compilation. Rootless Docker is recommended on
-Linux. Review lockfile changes and container base-image digest updates like
-source changes.
+## Security and architecture
 
-Native desktop packaging remains OS-specific. Docker verifies the portable
-frontend and Rust/Tauri code on both amd64 and arm64 Linux; GitHub Actions then
-builds the macOS `.app` on an ephemeral Apple-silicon runner because Xcode,
-Apple frameworks, signing, and notarization cannot run in a Linux container.
-The workflow has read-only repository permission, persists no checkout token,
-uses full-SHA-pinned actions, receives no Telegram secrets, and only starts the
-native package after both container architectures pass. Windows and Linux
-installers are not release targets yet because Retract's high-impact
-device-owner authentication is deliberately macOS-only.
+- React and TypeScript render the three-pane UI; the webview cannot authorize a destructive operation.
+- Rust freezes plans, rechecks Telegram capabilities, owns confirmations, batches, encrypted state, retries, and cancellation.
+- High-impact actions require the exact chat title and fresh Touch ID or Mac login-password verification.
+- TDLib is pinned by source commit and SHA-256, bundled as a native app resource, and checked before use.
+- The webview uses a strict content security policy and a minimal Tauri capability allowlist.
+- Production bundles resolve only the desktop IPC adapter. Synthetic fixture data is compiled only for tests and the dedicated screenshot build.
 
-For faster host-native development checks, the existing commands remain:
+Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for trust boundaries and residual risks. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Never attach Telegram credentials, sessions, exports, databases, or private screenshots to a public issue.
 
-```sh
-npm run check
-cargo clippy --manifest-path crates/cleaner-domain/Cargo.toml --all-targets -- -D warnings
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-npm audit --audit-level=high
-```
+## Contributing
 
-The complete manual destructive matrix is in [TEST_PLAN.md](docs/TEST_PLAN.md). Do not treat a successful compile or fixture test as evidence that Telegram accepted an operation.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Contributions must use synthetic data and preserve the invariant that everyone-scoped deletion never silently becomes self-only deletion.
 
-## Architecture
-
-- React + TypeScript renders the keyboard-accessible three-pane UI.
-- Tauri 2 exposes a small local IPC command surface.
-- Rust owns plan validation, confirmations, encrypted durability, retries, cancellation, and all deletion calls.
-- `cleaner-domain` is a Telegram-independent crate containing capability and plan invariants.
-- TDLib is accessed through its JSON C interface; message IDs make deletion content-agnostic across text, photos, video, files, voice, audio, animation, stickers, polls, locations, contacts, and service content.
-
-The detailed product and engineering rationale remains in [PLAN.md](PLAN.md).
+Retract is licensed under the [MIT License](LICENSE). Bundled dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Release history is in [CHANGELOG.md](CHANGELOG.md), and the original product rationale remains in [PLAN.md](PLAN.md).

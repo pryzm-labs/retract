@@ -1,13 +1,13 @@
 # Local setup and first live deletion test
 
-This guide verifies Retract without exposing valuable history. Complete the safe demo first, then use Telegram’s test environment where practical. Telegram recommends validating authorization in test DCs before production.
+This guide verifies Retract without exposing valuable history. Run the automated synthetic checks first, then use Telegram’s test environment where practical. Telegram recommends validating authorization in test DCs before production.
 
 ## 1. Verify the local toolchain
 
 From Terminal:
 
 ```sh
-cd /Users/aaron/dev/tg-cleaner
+cd retract
 node --version
 rustc --version
 xcode-select -p
@@ -21,23 +21,22 @@ xcode-select --install
 
 The project already includes the Apple-silicon TDLib library. CMake, gperf, and OpenSSL are needed only if that artifact is missing or you are rebuilding for a different architecture; the automated script reports the exact missing prerequisite.
 
-## 2. Run the safe demo
+## 2. Run the synthetic automated checks
 
 ```sh
-cd /Users/aaron/dev/tg-cleaner
-npm install
-npm run check
-npm run tauri dev
+npm ci --ignore-scripts
+npm test
+npm run verify:production-bundle
+npm run container:check
 ```
 
-On the first-run screen, choose **Safe demo**, then **Save settings**. The dialog should close immediately without terminating the app. Confirm the top banner says **Safe demo mode**. Test keyword search, filters, albums, hidden selections, admin badges, review dialogs, fixture deletion, and **Reset demo fixtures**. The **No reply sent** shortlist should contain `Prize Support`; **Empty** should contain `Empty invite`. Turn on **Privacy scan** and confirm findings are labeled with reasons such as **Email**, **Crypto wallet**, **Address**, and **Location**. Nothing in this mode reaches a Telegram account.
+These checks exercise keyword search, filters, albums, hidden selections, admin badges, review dialogs, deletion planning, the **No reply sent** and **Empty** shortlists, and privacy findings using synthetic fixtures. They also verify that the production bundle cannot import those fixtures. Nothing in this step reaches a Telegram account.
 
-With **All chats** selected, ordinary text in the search box searches every available normal and secret chat. **Privacy scan** instead walks the current scope without requiring a keyword and can take substantially longer on a large account. Keep the app open until it finishes.
+The fixture UI exists only in the automated tests and the dedicated `npm run screenshot:dev` documentation mode. The normal Tauri app always requires a real Telegram connection.
 
 ## 3. Verify the included TDLib library
 
 ```sh
-cd /Users/aaron/dev/tg-cleaner
 npm run tdlib:ensure
 ```
 
@@ -58,15 +57,15 @@ Telegram’s test environment is separate from normal Telegram. Create two dispo
 
 Retract signs in only to an existing account, so create/register the two test accounts with an official client configured for Telegram’s test environment before signing one into Retract.
 
-Open Retract's **Connection Settings**, choose **Connect Telegram**, and confirm **TDLib 1.8.64 included — READY** is visible. Enter the API ID and API hash, turn on **Use Telegram's test server**, then choose **Save settings**.
+Launch `npm run tauri dev`. In **Connect Telegram**, confirm **TDLib 1.8.64 included — READY** is visible. Enter the API ID and API hash, turn on **Use Telegram's test server**, then choose **Save settings**.
 
-If Retract displays **Safe demo mode**, live configuration failed; stop instead of continuing.
+If Retract does not begin Telegram authorization, setup failed; stop instead of continuing.
 
 ## 5B. Controlled production smoke test
 
-Only do this after the demo and preferably the test-DC checks. Open **Connection Settings**, keep **Connect Telegram** selected, turn off **Use Telegram's test server**, and choose **Save settings**. Leave the API-hash field blank to keep the value already stored in Keychain.
+Only do this after the automated and preferably the test-DC checks. Open **Connection Settings**, turn off **Use Telegram's test server**, and choose **Save settings**. Leave the API-hash field blank to keep the value already stored in Keychain.
 
-Retract automatically keeps demo, test-DC, and production databases/job stores in separate app-data profiles.
+Retract keeps test-DC and production databases and job stores in separate app-data profiles.
 
 ### Optional environment overrides
 
@@ -87,7 +86,7 @@ A fresh private group is safer than an existing DM.
 
 ## 7. Delete only those fixtures
 
-1. Open Retract and confirm it says **LIVE**, not **DEMO**.
+1. Open Retract and confirm the intended Telegram account is shown in the sidebar.
 2. Select the new verification group in the left pane. Confirm it shows **Owner** and the expected capabilities.
 3. Search for the unique `RETRACT-VERIFY-<random>` token.
 4. Set the direction filter to **Mine**.

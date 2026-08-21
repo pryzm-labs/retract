@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem using synthetic or fully redacted data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Retract.
+
+        **Do not upload chat exports, credentials, session files, TDLib databases, or unredacted conversations.** Use synthetic data and redact local usernames and paths.
+  - type: input
+    id: version
+    attributes:
+      label: Retract version
+      description: Provide the release tag or commit SHA.
+      placeholder: v0.1.0 or 0123abcd
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Include macOS version and Mac architecture.
+      placeholder: macOS 15.6, Apple M2
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: State the expected deletion scope explicitly.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Describe what happened without including private Telegram data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Safe reproduction
+      description: Use a synthetic fixture, Telegram test DC, or new disposable chat.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, session data, chat exports, private messages, and identifying screenshots.
+          required: true
+        - label: This is not a security vulnerability; security reports belong in private vulnerability reporting.
+          required: true

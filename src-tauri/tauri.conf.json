@@ -52,9 +52,9 @@
       "../vendor/tdlib-dist/build-stamp.txt": "licenses/TDLib-build-stamp.txt"
     },
     "category": "Utility",
-    "shortDescription": "Local-first chat history cleanup",
-    "longDescription": "Review and remove old chat history using explicit, capability-checked deletion plans.",
-    "copyright": "Copyright © 2026 Retract contributors",
+    "shortDescription": "Local-first Telegram history cleanup",
+    "longDescription": "Search and remove Telegram history using explicit, capability-checked deletion plans.",
+    "copyright": "Copyright © 2026 Pryzm Labs",
     "macOS": {
       "minimumSystemVersion": "12.0",
       "signingIdentity": "-",

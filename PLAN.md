@@ -1,6 +1,6 @@
 # Chat History Cleaner — Product and Engineering Plan
 
-Status: implemented baseline on 2026-08-16. Safe demo mode and automated checks pass; a pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Live destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`.
+Status: open-source preview candidate on 2026-08-20. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`.
 
 ## 1. Product direction
 
@@ -246,7 +246,7 @@ This application is unusually sensitive because it can read private history and 
 - Disable telemetry in MVP. If ever added, make it opt-in and prohibit message/chat/sender content.
 - Use a strict Content Security Policy, no remote scripts, a minimal Tauri capability allowlist, and no general shell/filesystem command exposed to the WebView.
 - Validate IPC payload sizes, chat/message IDs, account ownership, and operation type in Rust.
-- Sign and notarize macOS builds; make updates signed and reproducible.
+- Preview archives must be reproducible, manifest-verified, checksummed, hardened, and ad-hoc signed. A future official distribution should add Apple Developer signing, notarization, and signed updates.
 - Publish a threat model covering malicious message content, compromised WebView dependencies, local database theft, forged IPC, update compromise, and accidental mass deletion.
 - Never use Telegram-derived data for AI/ML training; Telegram's terms explicitly prohibit it.
 
@@ -254,7 +254,7 @@ This application is unusually sensitive because it can read private history and 
 
 Before a public release:
 
-1. Register and use the product's own `api_id` and `api_hash`; do not ask ordinary users to paste theirs into the app.
+1. The source-first preview asks users to supply their own `api_id` and `api_hash` through the local UI. Before broad consumer distribution, review Telegram policy and whether Pryzm Labs should provide product credentials instead.
 2. Prominently disclose in onboarding and store copy that this is an independent third-party app using the Telegram API.
 3. Do not use "Telegram" in the name unless prefixed by "Unofficial," and do not use the official logo.
 4. Review the requirement that third-party clients implement Telegram's basic functionality correctly. A deletion-only utility may be considered a specialized client, so obtain written guidance from Telegram before broad distribution.
@@ -262,7 +262,7 @@ Before a public release:
 6. If channel content is displayed, evaluate Telegram's sponsored-message requirement for third-party clients.
 7. Test authorization and destructive flows on Telegram's test DC first. Production client logins are monitored and abuse/flooding can lead to account or API restrictions.
 
-For the first usable build, distribute a signed/notarized macOS DMG outside the App Store. App sandboxing and native-library packaging should be validated before choosing a Mac App Store release. Windows (MSI) and Linux (AppImage/deb) can follow from the same Tauri/TDLib core, but native TDLib builds, credential stores, packaging, signing, and end-to-end tests are still per-platform work—not a free checkbox.
+For the open-source preview, publish source plus a clearly labeled unsigned/unnotarized Apple-silicon `.app.zip` with checksum and provenance. Users can build locally or use macOS's per-app **Open Anyway** path. App sandboxing and native-library packaging should be validated before any future Mac App Store release. Windows and Linux can follow from the same Tauri/TDLib core, but native TDLib builds, credential stores, packaging, signing, and end-to-end tests are still per-platform work—not a free checkbox.
 
 ## 10. Additional features worth adding
 

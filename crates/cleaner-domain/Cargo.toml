@@ -1,8 +1,11 @@
 [package]
 name = "cleaner-domain"
 version = "0.1.0"
+description = "Capability and deletion-plan invariants for Retract"
+authors = ["Pryzm Labs"]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/Pryzm-Labs/retract"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

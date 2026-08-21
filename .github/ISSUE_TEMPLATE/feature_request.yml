@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a focused improvement to Retract.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the cleanup problem, Telegram capability, and safest expected behavior.
+
+        **Do not include chat exports, credentials, session files, TDLib databases, or unredacted conversations.** Use synthetic examples only.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cleanup task is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the UI, deletion scope, and failure behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Intended deletion scope
+      options:
+        - No deletion; discovery or review only
+        - Delete only for the signed-in account
+        - Delete for everyone when Telegram authorizes it
+        - Administrator or owner action
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: How should Retract prevent accidental or scope-downgraded deletion?
+    validations:
+      required: true
