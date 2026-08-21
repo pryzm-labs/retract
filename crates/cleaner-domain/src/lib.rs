@@ -604,7 +604,13 @@ fn fingerprint(
         digest.update(item.message_id.to_be_bytes());
         digest.update([item.expected_reach as u8]);
     }
-    format!("{:x}", digest.finalize())
+    let hash = digest.finalize();
+    let mut fingerprint = String::with_capacity(hash.len() * 2);
+    for byte in hash {
+        std::fmt::Write::write_fmt(&mut fingerprint, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    fingerprint
 }
 
 #[cfg(test)]
@@ -750,6 +756,10 @@ mod tests {
         let renamed = DeletionPlan::by_sender(&chat, 77, "Different sender".into()).unwrap();
         assert_ne!(first.fingerprint, second.fingerprint);
         assert_ne!(first.fingerprint, renamed.fingerprint);
+        assert_eq!(
+            first.fingerprint,
+            "b360e553cd8899b3ac37198c195ef0617250882b1d685f2740d09aeb1f9afc92"
+        );
         assert_eq!(first.target_sender_id, Some(77));
     }
 
