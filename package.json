@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
-    "lucide-react": "^0.539.0",
+    "lucide-react": "^1.31.0",
     "nanoid": "file:vendor/nanoid",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
