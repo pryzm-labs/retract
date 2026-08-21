@@ -1,0 +1,40 @@
+[package]
+name = "retract"
+version = "0.1.0"
+description = "Local-first chat history cleanup utility"
+authors = ["Retract contributors"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "retract_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aes-gcm = "0.10"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+cleaner-domain = { path = "../crates/cleaner-domain" }
+futures-util = "0.3"
+libloading = "0.7.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.1"
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "block2"] }
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"

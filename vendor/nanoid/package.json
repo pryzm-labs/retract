@@ -1,0 +1,26 @@
+{
+  "name": "nanoid",
+  "version": "3.3.18",
+  "description": "Locally patched Nano ID compatibility package",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.cjs",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    },
+    "./non-secure": {
+      "types": "./index.d.ts",
+      "import": "./non-secure.js",
+      "require": "./non-secure.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=14.13"
+  }
+}

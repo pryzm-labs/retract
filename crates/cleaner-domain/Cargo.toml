@@ -1,0 +1,13 @@
+[package]
+name = "cleaner-domain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+regex = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }

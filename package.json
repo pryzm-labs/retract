@@ -1,0 +1,43 @@
+{
+  "name": "retract",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "container:check": "docker buildx build --target checks --output type=cacheonly --progress plain .",
+    "container:build": "docker buildx build --target frontend-artifact --output type=local,dest=artifacts/frontend .",
+    "container:cache:status": "docker buildx du --filter type=exec.cachemount --filter description~=retract-",
+    "container:cache:prune": "docker buildx prune --filter type=exec.cachemount --filter description~=retract-",
+    "tdlib:ensure": "sh scripts/ensure-tdlib.sh",
+    "desktop:dev": "npm run tdlib:ensure && vite",
+    "desktop:build": "npm run tdlib:ensure && npm run build",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run tdlib:ensure && npm run test && npm run build && cargo test --manifest-path crates/cleaner-domain/Cargo.toml && RETRACT_TEST_TDLIB_PATH=$PWD/vendor/tdlib-dist/libtdjson.dylib cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri": "npm run tdlib:ensure && tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "lucide-react": "^0.539.0",
+    "nanoid": "file:vendor/nanoid",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.4",
+    "@testing-library/jest-dom": "^6.6.4",
+    "@testing-library/react": "^16.3.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4"
+  }
+}
