@@ -1,11 +1,8 @@
 .git
-.github
 .DS_Store
 .env
 .env.*
-docs
-PLAN.md
-README.md
+!.env.example
 *.db
 *.db-shm
 *.db-wal
