@@ -17,6 +17,7 @@ const requiredFiles = [
   ".github/PULL_REQUEST_TEMPLATE.md",
   ".github/dependabot.yml",
   "scripts/verify-app-contents.sh",
+  "scripts/verify-codesign-details.sh",
   "scripts/verify-production-bundle-contents.sh",
   "docs/images/retract-overview.png"
 ];

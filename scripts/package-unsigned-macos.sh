@@ -9,7 +9,7 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   exit 1
 fi
 
-for tool in codesign ditto file node npm otool rg shasum; do
+for tool in codesign ditto file grep node npm otool shasum; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Missing required release tool: $tool" >&2
     exit 1
@@ -38,14 +38,7 @@ verify_app() {
 
   codesign --verify --deep --strict "$verify_path"
   codesign -dv --verbose=4 "$verify_path" >"$verify_details" 2>&1
-  if ! rg --line-regexp 'Signature=adhoc' "$verify_details" >/dev/null; then
-    echo "Retract.app is not ad-hoc signed." >&2
-    exit 1
-  fi
-  if ! rg '^CodeDirectory .* flags=.*\(.*runtime.*\)' "$verify_details" >/dev/null; then
-    echo "Retract.app does not enable the hardened runtime." >&2
-    exit 1
-  fi
+  sh scripts/verify-codesign-details.sh "$verify_details"
 
   binary_description=$(file "$verify_path/$APP_BINARY_REL")
   case "$binary_description" in

@@ -44,6 +44,12 @@ function verifyProductionBundle(root) {
   });
 }
 
+function verifyCodesignDetails(path) {
+  return spawnSync("sh", [resolve("scripts/verify-codesign-details.sh"), path], {
+    encoding: "utf8"
+  });
+}
+
 test("rejects inconsistent application versions", () => {
   assert.throws(() => assertVersionConsistency({
     packageVersion: "0.1.0",
@@ -119,6 +125,38 @@ test("production bundle validator rejects fixture data without nonstandard tools
     const contaminatedResult = verifyProductionBundle(contaminated);
     assert.notEqual(contaminatedResult.status, 0);
     assert.match(contaminatedResult.stderr, /forbidden fixture marker: reset_demo/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("codesign validator requires an ad-hoc signature with hardened runtime", () => {
+  const directory = mkdtempSync(join(tmpdir(), "retract-codesign-test-"));
+  try {
+    const valid = join(directory, "valid.txt");
+    writeFileSync(valid,
+      "CodeDirectory v=20500 size=106260 flags=0x10002(adhoc,runtime) hashes=3314+3 location=embedded\n" +
+      "Signature=adhoc\n"
+    );
+    assert.equal(verifyCodesignDetails(valid).status, 0);
+
+    const signed = join(directory, "signed.txt");
+    writeFileSync(signed,
+      "CodeDirectory v=20500 size=106260 flags=0x10000(runtime) hashes=3314+3 location=embedded\n" +
+      "Authority=Developer ID Application: Example\n"
+    );
+    const signedResult = verifyCodesignDetails(signed);
+    assert.notEqual(signedResult.status, 0);
+    assert.match(signedResult.stderr, /not ad-hoc signed/i);
+
+    const unhardened = join(directory, "unhardened.txt");
+    writeFileSync(unhardened,
+      "CodeDirectory v=20400 size=106260 flags=0x2(adhoc) hashes=3314+3 location=embedded\n" +
+      "Signature=adhoc\n"
+    );
+    const unhardenedResult = verifyCodesignDetails(unhardened);
+    assert.notEqual(unhardenedResult.status, 0);
+    assert.match(unhardenedResult.stderr, /hardened runtime/i);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
