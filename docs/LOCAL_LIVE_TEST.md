@@ -93,11 +93,11 @@ A fresh private group is safer than an existing DM.
 5. Confirm the result list contains only the three disposable fixtures.
 6. Select each result. The right pane must report all three as **Delete for everyone**. Stop if any item says **Only removable for you** or **Cannot delete**.
 7. Choose **Review deletion**. Confirm the frozen count, media types, and plan fingerprint.
-8. Check the irreversible acknowledgement and choose **Delete for everyone**.
+8. Check the irreversible acknowledgement and choose **Delete for everyone**. Approve macOS authentication only after its native reason identifies the expected chat ID, message count, and plan token.
 9. Ask the partner to confirm the text, screenshot message/caption, and file message disappear. Also refresh/reopen the chat on their side.
 10. Record Retract’s completed job counters. Do not interpret a previously downloaded external copy as a failed message deletion.
 
-Start with selected messages only. Do not test **Revoke history & remove chat** or **Delete group permanently** until this path succeeds and the partner confirms the result. Those high-impact actions additionally require the exact group title and macOS device-owner authentication.
+Start with selected messages only. Do not test **Revoke history & remove chat** or **Delete group permanently** until this path succeeds and the partner confirms the result. Every destructive action requires macOS device-owner authentication; high-impact actions also require the exact group title.
 
 Before testing the chat-wide action, verify that both people understand its scope: Retract requests revocation of the available history and removes the conversation from your own chat list. A later DM can recreate the conversation, and clearing a group’s history does not dissolve the group or remove its members.
 

@@ -34,6 +34,8 @@ verify_app() {
   verify_details="$RELEASE_TMP/codesign-details.txt"
   verify_deps="$RELEASE_TMP/tdlib-dependencies.txt"
 
+  sh scripts/verify-app-contents.sh "$verify_path"
+
   codesign --verify --deep --strict "$verify_path"
   codesign -dv --verbose=4 "$verify_path" >"$verify_details" 2>&1
   if ! rg --line-regexp 'Signature=adhoc' "$verify_details" >/dev/null; then
@@ -80,6 +82,7 @@ verify_app() {
 }
 
 npm run tauri build -- --bundles app
+npm run verify:production-bundle -- --existing
 verify_app "$APP_PATH"
 
 node scripts/release-metadata.mjs "$MANIFEST_PATH"

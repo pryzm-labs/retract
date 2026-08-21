@@ -8,9 +8,7 @@ use std::{
 };
 
 use chrono::Utc;
-use cleaner_domain::{
-    ChatSummary, ConfirmationProof, ConfirmationTier, DeletionPlan, DeletionReach, PlanOperation,
-};
+use cleaner_domain::{ChatSummary, ConfirmationProof, DeletionPlan, DeletionReach, PlanOperation};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -49,6 +47,7 @@ impl CleanerService {
         store: SecureJobStore,
     ) -> Result<Arc<Self>, AppError> {
         let persisted = store.load()?;
+        let legacy_unbound = store.loaded_legacy_unbound();
         let plans: HashMap<Uuid, DeletionPlan> = persisted
             .plans
             .into_iter()
@@ -61,7 +60,32 @@ impl CleanerService {
                 if let Some(plan) = plans.get(&job.plan_id) {
                     job.backfill_target_chat_ids(plan);
                 }
-                if matches!(job.status, JobStatus::Running) {
+                if legacy_unbound && matches!(job.status, JobStatus::Queued | JobStatus::Running) {
+                    job.status = if job.deleted > 0 {
+                        JobStatus::Partial
+                    } else {
+                        JobStatus::Failed
+                    };
+                    job.retry_after_seconds = None;
+                    push_error_once(&mut job, "legacy_store_requires_new_review");
+                } else if matches!(job.status, JobStatus::Queued | JobStatus::Running)
+                    && matches!(
+                        job.operation,
+                        PlanOperation::ClearHistory
+                            | PlanOperation::ClearHistoryAndLeave
+                            | PlanOperation::RemoveChatForSelf
+                            | PlanOperation::DeleteBySender
+                            | PlanOperation::DeleteGroup
+                    )
+                {
+                    job.status = if job.deleted > 0 {
+                        JobStatus::Partial
+                    } else {
+                        JobStatus::Failed
+                    };
+                    job.retry_after_seconds = None;
+                    push_error_once(&mut job, "restart_requires_new_review");
+                } else if matches!(job.status, JobStatus::Running) {
                     job.status = JobStatus::Queued;
                     push_error_once(&mut job, "resumed_after_restart");
                 }
@@ -279,7 +303,8 @@ impl CleanerService {
             .lookup_chat_with_timeout(request.chat_id, "sender authority check")
             .await?
             .ok_or(AppError::NotFound)?;
-        let plan = DeletionPlan::by_sender(&chat, request.sender_id, request.sender_name)?;
+        let sender_name = self.gateway.sender_name(request.sender_id).await?;
+        let plan = DeletionPlan::by_sender(&chat, request.sender_id, sender_name)?;
         let view = PlanView::from(&plan);
         self.plans.write().await.insert(plan.id, plan);
         self.persist().await?;
@@ -303,22 +328,20 @@ impl CleanerService {
             typed_chat_title: request.typed_chat_title,
         })?;
 
-        if requires_system_auth(plan.confirmation_tier) {
-            let grant = self
-                .system_grants
-                .lock()
-                .await
-                .remove(&plan.id)
-                .ok_or_else(|| {
-                    AppError::SystemAuthentication(
-                        "confirm this frozen plan with macOS immediately before execution".into(),
-                    )
-                })?;
-            if grant.fingerprint != plan.fingerprint || grant.expires_at < Instant::now() {
-                return Err(AppError::SystemAuthentication(
-                    "the plan-bound authentication grant is invalid or expired".into(),
-                ));
-            }
+        let grant = self
+            .system_grants
+            .lock()
+            .await
+            .remove(&plan.id)
+            .ok_or_else(|| {
+                AppError::SystemAuthentication(
+                    "confirm this frozen plan with macOS immediately before execution".into(),
+                )
+            })?;
+        if grant.fingerprint != plan.fingerprint || grant.expires_at < Instant::now() {
+            return Err(AppError::SystemAuthentication(
+                "the plan-bound authentication grant is invalid or expired".into(),
+            ));
         }
 
         let job = JobRecord::new(&plan);
@@ -354,34 +377,9 @@ impl CleanerService {
                 "the authorization request does not match the frozen plan".into(),
             ));
         }
-        if !requires_system_auth(plan.confirmation_tier) {
-            return Ok(());
-        }
         if self.gateway.info().mode == "live" {
-            let reason = match plan.operation {
-                PlanOperation::DeleteGroup => "permanently delete this Telegram group",
-                PlanOperation::ClearHistoryAndLeave => {
-                    "clear all Telegram history for everyone, leave this chat, and remove it locally"
-                }
-                PlanOperation::DeleteAllMessagesAndLeave => {
-                    "delete every permitted Telegram message, leave this chat, and remove it locally"
-                }
-                PlanOperation::LeaveChat => {
-                    "revoke your Telegram messages, leave this chat, and remove it locally"
-                }
-                PlanOperation::ClearHistory => "clear this Telegram chat history for everyone",
-                PlanOperation::RemoveChatForSelf => {
-                    "remove this Telegram chat history only for this account"
-                }
-                PlanOperation::DeleteBySender => {
-                    "delete this sender's Telegram messages for everyone"
-                }
-                PlanOperation::DeleteMyMessages => {
-                    "delete all of your Telegram messages from this group"
-                }
-                PlanOperation::SelectedMessages => "delete Telegram messages for everyone",
-            };
-            crate::local_auth::authenticate(reason).await?;
+            let reason = authorization_reason(&plan);
+            crate::local_auth::authenticate(&reason).await?;
         }
         self.system_grants.lock().await.insert(
             plan.id,
@@ -394,6 +392,9 @@ impl CleanerService {
     }
 
     pub async fn resume_incomplete(self: &Arc<Self>) {
+        // Constructor-time restart policy may have stopped non-idempotent
+        // broad jobs. Seal that decision before any safe frozen-ID job resumes.
+        let _ = self.persist().await;
         let ids: Vec<_> = self
             .jobs
             .read()
@@ -496,44 +497,55 @@ impl CleanerService {
                     self.finish_cancelled(job_id).await?;
                     return Ok(());
                 }
-                let result = async {
-                    let chat_id = if matches!(
-                        operation,
-                        PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat
-                    ) {
-                        self.resolve_leave_membership_chat(&plan).await?
-                    } else {
-                        self.resolve_plan_chat(&plan).await?
-                    };
-                    match operation {
-                        PlanOperation::ClearHistory => {
-                            self.gateway.clear_history_for_everyone(chat_id).await
-                        }
-                        PlanOperation::RemoveChatForSelf => {
-                            self.gateway.remove_chat_for_self(chat_id).await
-                        }
-                        PlanOperation::DeleteGroup => self.gateway.delete_group(chat_id).await,
-                        PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat => {
-                            self.gateway.leave_chat(chat_id).await
-                        }
-                        PlanOperation::DeleteBySender => {
-                            let sender_id = plan.target_sender_id.ok_or_else(|| {
-                                AppError::InvalidRequest(
-                                    "sender-scoped plan is missing its sender ID".into(),
-                                )
-                            })?;
-                            self.gateway
-                                .delete_messages_by_sender(chat_id, sender_id)
-                                .await
-                        }
-                        PlanOperation::SelectedMessages
-                        | PlanOperation::DeleteMyMessages
-                        | PlanOperation::ClearHistoryAndLeave => {
-                            unreachable!()
+                let chat_id = if matches!(
+                    operation,
+                    PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat
+                ) {
+                    plan.target_chat_id.ok_or_else(|| {
+                        AppError::InvalidRequest(
+                            "leave plan is missing its immutable chat ID".into(),
+                        )
+                    })?
+                } else {
+                    self.resolve_plan_chat(&plan).await?
+                };
+                if self.stop_if_cancelled(job_id, &cancellation).await? {
+                    return Ok(());
+                }
+                let result = match operation {
+                    PlanOperation::ClearHistory => {
+                        self.gateway.clear_history_for_everyone(chat_id).await
+                    }
+                    PlanOperation::RemoveChatForSelf => {
+                        self.gateway.remove_chat_for_self(chat_id).await
+                    }
+                    PlanOperation::DeleteGroup => self.gateway.delete_group(chat_id).await,
+                    PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat => {
+                        match self
+                            .leave_and_remove_chat(job_id, chat_id, &cancellation)
+                            .await
+                        {
+                            Ok(true) => return Ok(()),
+                            Ok(false) => Ok(()),
+                            Err(error) => Err(error),
                         }
                     }
-                }
-                .await;
+                    PlanOperation::DeleteBySender => {
+                        let sender_id = plan.target_sender_id.ok_or_else(|| {
+                            AppError::InvalidRequest(
+                                "sender-scoped plan is missing its sender ID".into(),
+                            )
+                        })?;
+                        self.gateway
+                            .delete_messages_by_sender(chat_id, sender_id)
+                            .await
+                    }
+                    PlanOperation::SelectedMessages
+                    | PlanOperation::DeleteMyMessages
+                    | PlanOperation::ClearHistoryAndLeave => {
+                        unreachable!()
+                    }
+                };
                 match result {
                     Ok(()) => break,
                     Err(error) => {
@@ -603,6 +615,10 @@ impl CleanerService {
                     }
                 }
 
+                if self.stop_if_cancelled(job_id, cancellation).await? {
+                    return Ok(true);
+                }
+
                 let failed_count = if reach_error.is_some() {
                     batch.message_ids.len().saturating_sub(skipped)
                 } else {
@@ -668,6 +684,9 @@ impl CleanerService {
                     return Ok(true);
                 }
                 let chat_id = self.resolve_plan_chat(plan).await?;
+                if self.stop_if_cancelled(job_id, cancellation).await? {
+                    return Ok(true);
+                }
                 match self
                     .gateway
                     .clear_history_for_everyone_keep_chat(chat_id)
@@ -700,9 +719,14 @@ impl CleanerService {
                 self.finish_cancelled(job_id).await?;
                 return Ok(true);
             }
-            let chat_id = self.resolve_leave_membership_chat(plan).await?;
-            match self.gateway.leave_chat(chat_id).await {
-                Ok(()) => return Ok(false),
+            let chat_id = plan.target_chat_id.ok_or_else(|| {
+                AppError::InvalidRequest("leave plan is missing its immutable chat ID".into())
+            })?;
+            match self
+                .leave_and_remove_chat(job_id, chat_id, cancellation)
+                .await
+            {
+                Ok(cancelled) => return Ok(cancelled),
                 Err(error) => {
                     if let Some(seconds) = telegram_retry_after(&error) {
                         if self.wait_for_retry(job_id, cancellation, seconds).await? {
@@ -716,18 +740,49 @@ impl CleanerService {
         }
     }
 
-    async fn resolve_leave_membership_chat(&self, plan: &DeletionPlan) -> Result<i64, AppError> {
-        let target_chat_id = plan.target_chat_id.ok_or_else(|| {
-            AppError::InvalidRequest("leave plan is missing its immutable chat ID".into())
-        })?;
+    async fn leave_and_remove_chat(
+        &self,
+        job_id: Uuid,
+        chat_id: i64,
+        cancellation: &AtomicBool,
+    ) -> Result<bool, AppError> {
         let current = self
-            .lookup_chat_with_timeout(target_chat_id, "execution-time membership check")
-            .await?
-            .ok_or(AppError::NotFound)?;
-        if !current.capabilities.can_leave_chat {
-            return Err(AppError::Gateway("CHAT_MEMBER_REQUIRED".into()));
+            .lookup_chat_with_timeout(chat_id, "leave-and-remove state check")
+            .await?;
+        if self.stop_if_cancelled(job_id, cancellation).await? {
+            return Ok(true);
         }
-        Ok(target_chat_id)
+
+        let Some(current) = current else {
+            return Ok(false);
+        };
+
+        let refreshed = if current.capabilities.can_leave_chat {
+            self.gateway.leave_chat(chat_id).await?;
+            if self.stop_if_cancelled(job_id, cancellation).await? {
+                return Ok(true);
+            }
+
+            self.lookup_chat_with_timeout(chat_id, "post-leave cleanup check")
+                .await?
+        } else if current.capabilities.can_remove_for_self {
+            Some(current)
+        } else {
+            return Err(AppError::Gateway("CHAT_MEMBER_REQUIRED".into()));
+        };
+
+        if self.stop_if_cancelled(job_id, cancellation).await? {
+            return Ok(true);
+        }
+
+        match refreshed {
+            None => Ok(false),
+            Some(chat) if chat.capabilities.can_remove_for_self => {
+                self.gateway.remove_chat_for_self(chat_id).await?;
+                Ok(false)
+            }
+            Some(_) => Err(AppError::Gateway("CHAT_DELETE_FOR_SELF_FORBIDDEN".into())),
+        }
     }
 
     async fn resolve_plan_chat(&self, plan: &DeletionPlan) -> Result<i64, AppError> {
@@ -789,6 +844,18 @@ impl CleanerService {
         job.updated_at = Utc::now();
         drop(jobs);
         self.persist().await
+    }
+
+    async fn stop_if_cancelled(
+        &self,
+        job_id: Uuid,
+        cancellation: &AtomicBool,
+    ) -> Result<bool, AppError> {
+        if !cancellation.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        self.finish_cancelled(job_id).await?;
+        Ok(true)
     }
 
     async fn wait_for_retry(
@@ -906,8 +973,95 @@ fn error_code(error: &AppError) -> &'static str {
     }
 }
 
-fn requires_system_auth(tier: ConfirmationTier) -> bool {
-    matches!(tier, ConfirmationTier::High | ConfirmationTier::Critical)
+fn authorization_reason(plan: &DeletionPlan) -> String {
+    let plan_token = &plan.fingerprint[..plan.fingerprint.len().min(12)];
+    let chat_id = plan.target_chat_id.unwrap_or_default();
+    let chat = trusted_prompt_label(plan.chat_title.as_deref().unwrap_or("Unknown chat"));
+    let target = format!("‘{chat}’ (chat {chat_id})");
+    let action = match plan.operation {
+        PlanOperation::DeleteGroup => format!("Permanently delete {target}"),
+        PlanOperation::ClearHistoryAndLeave => {
+            format!("Clear all history for everyone in {target}, then leave")
+        }
+        PlanOperation::DeleteAllMessagesAndLeave => format!(
+            "Delete {} frozen messages in {target}, then leave",
+            plan.summary.delete_for_everyone
+        ),
+        PlanOperation::LeaveChat => format!(
+            "Delete {} frozen messages in {target}, then leave",
+            plan.summary.delete_for_everyone
+        ),
+        PlanOperation::ClearHistory => {
+            format!("Clear all Telegram history for everyone in {target}")
+        }
+        PlanOperation::RemoveChatForSelf => {
+            format!("Remove {target} only from this account")
+        }
+        PlanOperation::DeleteBySender => {
+            let sender = trusted_prompt_label(
+                plan.target_sender_name
+                    .as_deref()
+                    .unwrap_or("Unknown sender"),
+            );
+            let sender_id = plan.target_sender_id.unwrap_or_default();
+            format!("Delete every message by ‘{sender}’ (sender {sender_id}) in {target}")
+        }
+        PlanOperation::DeleteMyMessages => format!(
+            "Delete {} frozen messages sent by your account in {target}",
+            plan.summary.delete_for_everyone
+        ),
+        PlanOperation::SelectedMessages => {
+            let mut chat_ids = plan
+                .items
+                .iter()
+                .filter(|item| item.expected_reach == DeletionReach::Everyone)
+                .map(|item| item.chat_id)
+                .collect::<Vec<_>>();
+            chat_ids.sort_unstable();
+            chat_ids.dedup();
+            let visible_ids = chat_ids
+                .iter()
+                .take(4)
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remainder = chat_ids.len().saturating_sub(4);
+            let suffix = if remainder == 0 {
+                String::new()
+            } else {
+                format!(" and {remainder} more")
+            };
+            format!(
+                "Delete {} frozen Telegram messages for everyone in chat IDs {visible_ids}{suffix}",
+                plan.summary.delete_for_everyone
+            )
+        }
+    };
+    format!("Plan {plan_token}: {action}.")
+}
+
+fn trusted_prompt_label(value: &str) -> String {
+    let single_line = value
+        .chars()
+        .filter(|character| {
+            !matches!(
+                *character,
+                '\u{061c}'
+                    | '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    single_line.trim().chars().take(80).collect()
 }
 
 fn telegram_retry_after(error: &AppError) -> Option<u64> {
@@ -1032,6 +1186,230 @@ mod tests {
     }
 
     #[test]
+    fn selected_message_plan_requires_a_bound_single_use_grant() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [21; 32]);
+            let gateway: Arc<dyn TelegramGateway> = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway, store).unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: 101,
+                        message_id: 1,
+                    }],
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                plan.confirmation_tier,
+                cleaner_domain::ConfirmationTier::Low
+            );
+            let execution = || ExecuteRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint.clone(),
+                irreversible_acknowledged: true,
+                typed_chat_title: None,
+            };
+
+            assert!(matches!(
+                service.start_execution(execution()).await,
+                Err(AppError::SystemAuthentication(_))
+            ));
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            assert!(service.start_execution(execution()).await.is_ok());
+        });
+    }
+
+    #[test]
+    fn native_authorization_reason_identifies_the_exact_frozen_target() {
+        tauri::async_runtime::block_on(async {
+            let gateway = DemoGateway::new();
+            let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
+            let plan = DeletionPlan::by_sender(&chat, 714, "Priya".into()).unwrap();
+            let reason = authorization_reason(&plan);
+
+            assert!(reason.contains("Design Team"));
+            assert!(reason.contains("-1001"));
+            assert!(reason.contains("Priya"));
+            assert!(reason.contains("714"));
+            assert!(reason.contains(&plan.fingerprint[..12]));
+        });
+    }
+
+    #[test]
+    fn native_authorization_labels_strip_line_and_direction_controls() {
+        assert_eq!(
+            trusted_prompt_label("Design\nTeam \u{202e}123\u{2069}"),
+            "Design Team 123"
+        );
+    }
+
+    #[test]
+    fn sender_plan_uses_the_backend_resolved_display_name() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [22; 32]);
+            let gateway: Arc<dyn TelegramGateway> = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway, store).unwrap();
+            let plan = service
+                .prepare_sender_action(PrepareSenderActionRequest {
+                    chat_id: -1001,
+                    sender_id: 714,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(plan.target_sender_name.as_deref(), Some("Priya"));
+        });
+    }
+
+    #[test]
+    fn cancellation_during_capability_refresh_prevents_the_destructive_call() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [24; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            gateway.delay_current_reach(100);
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: 101,
+                        message_id: 1,
+                    }],
+                })
+                .await
+                .unwrap();
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                })
+                .await
+                .unwrap();
+
+            for _ in 0..100 {
+                if gateway.current_reach_started() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert!(gateway.current_reach_started());
+            service.cancel_job(job.id).await.unwrap();
+            for _ in 0..100 {
+                if service
+                    .jobs()
+                    .await
+                    .iter()
+                    .find(|candidate| candidate.id == job.id)
+                    .is_some_and(|candidate| candidate.status.is_terminal())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+
+            let finished = service
+                .jobs()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.id == job.id)
+                .unwrap();
+            assert_eq!(finished.status, JobStatus::Cancelled);
+            assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn restart_does_not_replay_a_broad_destructive_operation() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("jobs.enc");
+            let key = [25; 32];
+            let gateway = Arc::new(DemoGateway::new());
+            let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
+            let plan = DeletionPlan::chat_wide(PlanOperation::ClearHistory, &chat).unwrap();
+            let mut job = JobRecord::new(&plan);
+            job.status = JobStatus::Running;
+            SecureJobStore::with_test_key(path.clone(), key)
+                .save(&PersistedState {
+                    plans: vec![plan],
+                    jobs: vec![job],
+                })
+                .unwrap();
+
+            let service =
+                CleanerService::new(gateway.clone(), SecureJobStore::with_test_key(path, key))
+                    .unwrap();
+            service.resume_incomplete().await;
+
+            let interrupted = service.jobs().await.into_iter().next().unwrap();
+            assert_eq!(interrupted.status, JobStatus::Failed);
+            assert!(
+                interrupted
+                    .error_codes
+                    .iter()
+                    .any(|code| code == "restart_requires_new_review")
+            );
+            assert_eq!(
+                gateway.messages_by_ids(&[(-1001, 11)]).await.unwrap().len(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn restart_does_not_replay_group_deletion() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("jobs.enc");
+            let key = [26; 32];
+            let gateway = Arc::new(DemoGateway::new());
+            let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
+            let plan = DeletionPlan::chat_wide(PlanOperation::DeleteGroup, &chat).unwrap();
+            let mut job = JobRecord::new(&plan);
+            job.status = JobStatus::Running;
+            SecureJobStore::with_test_key(path.clone(), key)
+                .save(&PersistedState {
+                    plans: vec![plan],
+                    jobs: vec![job],
+                })
+                .unwrap();
+
+            let service =
+                CleanerService::new(gateway.clone(), SecureJobStore::with_test_key(path, key))
+                    .unwrap();
+            service.resume_incomplete().await;
+
+            let interrupted = service.jobs().await.into_iter().next().unwrap();
+            assert_eq!(interrupted.status, JobStatus::Failed);
+            assert!(
+                interrupted
+                    .error_codes
+                    .iter()
+                    .any(|code| code == "restart_requires_new_review")
+            );
+            assert!(gateway.chat_by_id(-1001).await.unwrap().is_some());
+        });
+    }
+
+    #[test]
     fn chat_scoped_plans_never_load_the_global_catalog() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
@@ -1049,8 +1427,7 @@ mod tests {
             service
                 .prepare_sender_action(PrepareSenderActionRequest {
                     chat_id: -1001,
-                    sender_id: 9003,
-                    sender_name: "Priya".into(),
+                    sender_id: 714,
                 })
                 .await
                 .unwrap();
@@ -1141,6 +1518,65 @@ mod tests {
                     .len(),
                 2
             );
+        });
+    }
+
+    #[test]
+    fn leave_job_finishes_local_removal_when_membership_is_already_gone() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [30; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: -1003,
+                    operation: PlanOperation::LeaveChat,
+                })
+                .await
+                .unwrap();
+
+            gateway.leave_chat(-1003).await.unwrap();
+            assert!(gateway.chat_by_id(-1003).await.unwrap().is_some());
+
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: plan.chat_title,
+                })
+                .await
+                .unwrap();
+
+            for _ in 0..50 {
+                if service
+                    .jobs()
+                    .await
+                    .iter()
+                    .find(|candidate| candidate.id == job.id)
+                    .is_some_and(|candidate| candidate.status.is_terminal())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let finished = service
+                .jobs()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.id == job.id)
+                .unwrap();
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert!(gateway.chat_by_id(-1003).await.unwrap().is_none());
         });
     }
 

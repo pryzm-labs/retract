@@ -11,7 +11,9 @@ All notable changes to Retract are documented here. The project follows [Semanti
 - Local-first Telegram search across chats and common media metadata.
 - Sensitive-information scanning, including Ethereum, Bitcoin, and Solana wallet formats.
 - Capability-checked selected-message, history, leave, and administrator cleanup workflows.
-- Resumable encrypted cleanup jobs and fresh confirmation for destructive operations.
+- Profile-bound encrypted cleanup jobs, frozen-ID resume, and fail-closed handling for ambiguous broad-operation and permanent group-deletion restarts.
+- Single-use macOS authorization with a backend-derived target description for every destructive plan.
+- Backend-resolved sender identities and cancellation checks immediately before destructive TDLib calls.
 - UI-based Telegram setup with bundled Apple-silicon TDLib 1.8.64.
 - Synthetic-only fixture mode for automated tests and project screenshots.
 - Reproducible, ad-hoc-signed unsigned preview packaging for macOS 12+ on Apple silicon.

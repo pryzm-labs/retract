@@ -188,6 +188,7 @@ describe("Retract desktop UI", () => {
     fireEvent.click(review);
     expect(await screen.findByText("Delete 1 message for everyone?")).toBeInTheDocument();
     expect(screen.getByText(/accepted Telegram deletions cannot be undone/)).toBeInTheDocument();
+    expect(screen.getByText(/macOS will show the exact frozen target/i)).toBeInTheDocument();
   });
 
   it("keeps new selections actionable while a completed cleanup refreshes in the background", async () => {
@@ -195,6 +196,7 @@ describe("Retract desktop UI", () => {
     const refresh = new Promise<ChatSummary[]>((resolve) => { finishRefresh = resolve; });
     const targetedRefresh = vi.spyOn(api, "refreshChats").mockImplementationOnce(() => refresh);
     const globalRefresh = vi.spyOn(api, "snapshot");
+    const nativeAuthorization = vi.spyOn(api, "authorizePlan");
 
     render(<App />);
     await screen.findByText("Search every chat");
@@ -205,6 +207,7 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete for everyone" }));
 
     expect(await screen.findByText("Syncing cleanup…")).toBeInTheDocument();
+    expect(nativeAuthorization).toHaveBeenCalledTimes(1);
     expect(targetedRefresh).toHaveBeenCalledTimes(1);
     expect(globalRefresh).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Project Cedar launch credentials moved to the vault."));

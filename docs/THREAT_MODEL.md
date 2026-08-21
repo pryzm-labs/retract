@@ -25,7 +25,7 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 ## Enforced invariants
 
 - Only backend-created plans can execute; the ID and fingerprint must match.
-- High/critical grants are bound to a plan fingerprint, expire after 60 seconds, and are consumed once.
+- Every destructive action requires a grant bound to its plan fingerprint; grants expire after 60 seconds and are consumed once.
 - A frozen plan cannot start more than one job.
 - Selected message properties are fetched again just before each deletion and again following a rate-limit delay.
 - Only `DeletionReach::Everyone` IDs enter a revoke batch.
@@ -33,21 +33,21 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 - No everyone-scoped plan can fall back to self-only deletion. Self-only chat removal is a separate operation with its own capability check, immutable plan, and confirmation copy.
 - Chat-wide operations re-resolve the immutable chat ID and current capability immediately before the call.
 - Cancelling prevents later calls; a currently in-flight TDLib call may still complete.
-- Restarted nonterminal jobs resume from durable batch progress.
-- Test-DC and production plans/databases use separate app-data profiles, preventing cross-environment job resumption. The synthetic gateway is test-only, and the production frontend boundary excludes fixture modules.
+- Frozen message-ID jobs can resume from durable batch progress. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion jobs are stopped after an ambiguous restart and require a new review so later messages cannot enter the old authorization.
+- Test-DC and production plans/databases use separate app-data profiles, and AES-GCM associated data binds persisted jobs to the selected profile. Legacy unbound nonterminal jobs are stopped rather than resumed. The synthetic gateway is test-only, and the production frontend boundary excludes fixture modules.
 - Stored plans intentionally retain only IDs, reach expectations, titles needed for confirmation, counters, and timestamps—not message text or media.
 
 ## Threats and mitigations
 
 | Threat | Mitigation | Residual risk |
 | --- | --- | --- |
-| Compromised webview invokes IPC directly | Backend-created fingerprinted plans, typed-title proof, plan replay prevention, macOS owner auth for high impact | Malware controlling the user session may also control the native process |
+| Compromised webview invokes IPC directly | Backend-created fingerprinted plans, single-use macOS owner authentication for every destructive plan, and a backend-derived native prompt identifying the immutable target | Malware controlling the user session may also control the native process |
 | Permission changes after preview | Per-message and chat capability recheck at action time | Telegram can change state during an in-flight request |
 | Partial batch failure or process crash | Encrypted durable cursor, bounded batches, idempotent rechecks, normalized partial status | A response lost after Telegram commits can make local counters conservative |
 | Telegram rate limiting | Parse flood waits, persist queued state, remain cancellable, then recheck and retry | Very long or repeated server waits delay completion |
-| Wrong group destroyed | Separate critical UI, immutable chat ID, exact title, irreversible acknowledgement, fresh system authentication | Similar Unicode chat titles can still confuse a user; show IDs in a future expert view |
+| Wrong group destroyed | Separate critical UI, immutable chat ID, exact title, irreversible acknowledgement, and a native system prompt containing the sanitized authoritative title, chat ID, and plan token | Similar Unicode chat titles can still confuse a user; the numeric ID and plan token disambiguate the target |
 | Secret leakage from logs | No message bodies in jobs, zeroized in-memory credentials, frontend never receives API secrets | TDLib and OS diagnostic logs are separate components and need release review |
-| Tampered job file | AES-GCM authentication; malformed or modified stores fail closed | Deleting the store loses local progress but cannot create Telegram authority |
+| Tampered, rolled-back, or transplanted job file | Profile-bound AES-GCM authentication; malformed or cross-profile stores fail closed; non-idempotent broad jobs never auto-replay after restart | Deleting the store loses local progress but cannot create Telegram authority |
 | Malicious TDLib library path | Bundled artifact from an exact source commit, build-time SHA-256 check, loaded-version check, and ad-hoc app-bundle signature | Developer overrides intentionally permit a custom path; unsigned previews lack Apple notarization, so checksum/provenance verification or a source build remains necessary |
 | Compromised build dependency targets the developer host | Integrity-checked lockfiles, npm lifecycle scripts disabled during install, non-root container user, secrets and local state excluded from context, no Docker socket mount, and network disabled for build/test commands | Docker daemon/base images and online dependency acquisition remain trusted; malicious code can still corrupt the produced artifact |
 | Compromised GitHub Action or overprivileged workflow | Official actions pinned to full commit SHAs, read-only repository permission, checkout credentials removed, no Telegram/release secrets, and native packaging gated on both container architectures | GitHub-hosted runner images and the pinned action commits remain trusted; release signing will require a separately protected workflow |

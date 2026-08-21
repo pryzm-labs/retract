@@ -75,6 +75,10 @@ impl TelegramGateway for SetupGateway {
         Err(setup_error())
     }
 
+    async fn sender_name(&self, _sender_id: i64) -> Result<String, AppError> {
+        Err(setup_error())
+    }
+
     async fn current_reach(
         &self,
         _chat_id: i64,

@@ -85,7 +85,9 @@ For every accepted operation, verify from both participating accounts after TDLi
 
 - Inject `FLOOD_WAIT_2`/429 for capability fetch and deletion. Job becomes queued, stays cancellable, persists its wait, rechecks permissions, and resumes.
 - Cancel while queued for flood wait. Job becomes cancelled and makes no later call.
-- Kill the app before a batch, during a completed batch response, and between batches. Restart resumes without deleting outside the frozen plan.
+- Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Restart resumes only the frozen IDs and never deletes outside the reviewed plan.
+- Kill the app around whole-history, self-only history, sender-wide, and permanent group-deletion calls. An ambiguous nonterminal job must stop with `restart_requires_new_review`; it must not replay against later messages until the user creates and authorizes a new plan.
+- Copy an authenticated test-DC job store into the production profile. Startup must reject it as profile-bound ciphertext and execute nothing. A legacy unbound nonterminal store must be retained only as a stopped job requiring new review.
 - Disconnect/reconnect network during search and deletion; errors remain explicit and UI stays responsive.
 - Corrupt the encrypted job file; startup fails closed with no execution.
 - Change/remove the Keychain key; encrypted state cannot be decrypted and no plan auto-runs.
@@ -93,9 +95,9 @@ For every accepted operation, verify from both participating accounts after TDLi
 
 ## macOS and accessibility
 
-- Intel and Apple Silicon builds on the oldest supported macOS and current macOS.
+- Apple-silicon builds on macOS 12 and the current supported macOS release.
 - Light/dark mode, reduced motion, 200% effective zoom, keyboard-only flow, visible focus, and VoiceOver labels/order.
-- Touch ID available, Touch ID unavailable with password fallback, cancelled password, locked-out biometrics, and app background/system-cancel cases.
+- For low, medium, high, and critical operations: Touch ID available, Touch ID unavailable with password fallback, cancelled password, locked-out biometrics, and app background/system-cancel cases. Confirm the native reason identifies the immutable target and plan token.
 - Code signing, hardened runtime, notarization, Gatekeeper launch, update path, Keychain ACL prompts, and uninstall/reinstall behavior.
 
 ## Production exit criteria

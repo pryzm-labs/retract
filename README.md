@@ -31,7 +31,7 @@ Retract is a local-first macOS desktop app for searching and cleaning Telegram h
 - Revoke selected messages, your own history, or the broadest history an administrator can remove before leaving a group.
 - Clear or remove a conversation from your own chat list even when there is nothing you can revoke for the other participant.
 - Permanently delete a group only when Telegram reports that the signed-in owner has that capability, through a separate critical action.
-- Resume bounded cleanup jobs after a flood wait or restart without expanding the reviewed target set.
+- Resume frozen-ID cleanup batches after a flood wait or restart without expanding the reviewed target set. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion operations stop after an ambiguous restart and require a new review.
 
 Text, photos, videos, documents, voice messages, albums, captions, and other attachments are deleted with their Telegram message when Telegram accepts the request.
 
@@ -45,11 +45,11 @@ Telegram deletion is not global erasure. Forwarded messages, quoted copies, scre
 
 The v0.1.x preview supports Apple-silicon Macs running macOS 12 or newer.
 
-1. Download the `.app.zip` and matching `.sha256` from the [latest release](https://github.com/Pryzm-Labs/retract/releases/latest).
+1. Download the `.app.zip` and matching `.sha256` from the [Releases page](https://github.com/Pryzm-Labs/retract/releases). Preview builds are published as prereleases.
 2. Verify the checksum from the download directory:
 
    ```sh
-   shasum -a 256 -c Retract-v0.1.0-macos-arm64.app.zip.sha256
+   shasum -a 256 -c Retract-v*-macos-arm64.app.zip.sha256
    ```
 
 3. Extract the archive and move **Retract.app** to Applications.
@@ -82,7 +82,7 @@ On first launch, Retract opens **Connect Telegram**. There is no fixture or demo
 3. Enter both values in Retract. Enable Telegram's test server only when using disposable test-DC accounts.
 4. Save settings and complete QR, phone/code, and two-step verification as requested by Telegram.
 
-The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory. Message contents are not written to Retract's job log.
+The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory, and authenticated job state is cryptographically bound to its test or production profile. Message contents are not written to Retract's job log.
 
 ## Make the first deletion safely
 
@@ -120,7 +120,7 @@ The prune command is interactive and scoped to Retract's named BuildKit caches. 
 
 - React and TypeScript render the three-pane UI; the webview cannot authorize a destructive operation.
 - Rust freezes plans, rechecks Telegram capabilities, owns confirmations, batches, encrypted state, retries, and cancellation.
-- High-impact actions require the exact chat title and fresh Touch ID or Mac login-password verification.
+- Every destructive action requires a fresh, single-use Touch ID or Mac login-password grant whose native prompt identifies the backend-frozen chat, sender, message count, and plan token as applicable.
 - TDLib is pinned by source commit and SHA-256, bundled as a native app resource, and checked before use.
 - The webview uses a strict content security policy and a minimal Tauri capability allowlist.
 - Production bundles resolve only the desktop IPC adapter. Synthetic fixture data is compiled only for tests and the dedicated screenshot build.

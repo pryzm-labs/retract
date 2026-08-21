@@ -16,6 +16,8 @@ const requiredFiles = [
   ".github/ISSUE_TEMPLATE/config.yml",
   ".github/PULL_REQUEST_TEMPLATE.md",
   ".github/dependabot.yml",
+  "scripts/verify-app-contents.sh",
+  "scripts/verify-production-bundle-contents.sh",
   "docs/images/retract-overview.png"
 ];
 

@@ -154,7 +154,6 @@ pub struct PrepareChatActionRequest {
 pub struct PrepareSenderActionRequest {
     pub chat_id: i64,
     pub sender_id: i64,
-    pub sender_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -411,6 +411,7 @@ impl DeletionPlan {
             target.chat_id,
             target.sender_id,
             &items,
+            target.sender_name.as_deref(),
             target.chat_title.as_deref(),
         );
         Self {
@@ -579,6 +580,7 @@ fn fingerprint(
     target_chat_id: Option<i64>,
     target_sender_id: Option<i64>,
     items: &[PlanItem],
+    sender_name: Option<&str>,
     title: Option<&str>,
 ) -> String {
     let mut digest = Sha256::new();
@@ -588,6 +590,10 @@ fn fingerprint(
     }
     if let Some(sender_id) = target_sender_id {
         digest.update(sender_id.to_be_bytes());
+    }
+    if let Some(sender_name) = sender_name {
+        digest.update(sender_name.as_bytes());
+        digest.update(b"\n");
     }
     if let Some(title) = title {
         digest.update(title.as_bytes());
@@ -741,7 +747,9 @@ mod tests {
         };
         let first = DeletionPlan::by_sender(&chat, 77, "Sender".into()).unwrap();
         let second = DeletionPlan::by_sender(&chat, 78, "Sender".into()).unwrap();
+        let renamed = DeletionPlan::by_sender(&chat, 77, "Different sender".into()).unwrap();
         assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(first.fingerprint, renamed.fingerprint);
         assert_eq!(first.target_sender_id, Some(77));
     }
 

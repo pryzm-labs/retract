@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { assertVersionConsistency, buildManifest, parseBuildStamp } from "./release-metadata.mjs";
@@ -9,6 +13,36 @@ const tdlib = {
   architecture: "arm64",
   sha256: "a89780da629bce37eadba34448622141d89f37bb29a28dfe7293496d5b8ea044"
 };
+
+const expectedBundleFiles = [
+  "Contents/Info.plist",
+  "Contents/MacOS/retract",
+  "Contents/Resources/icon.icns",
+  "Contents/Resources/lib/libtdjson.dylib",
+  "Contents/Resources/licenses/TDLib-LICENSE_1_0.txt",
+  "Contents/Resources/licenses/TDLib-build-stamp.txt",
+  "Contents/_CodeSignature/CodeResources"
+];
+
+function createExpectedBundle(root) {
+  for (const relativePath of expectedBundleFiles) {
+    const absolutePath = join(root, relativePath);
+    mkdirSync(resolve(absolutePath, ".."), { recursive: true });
+    writeFileSync(absolutePath, relativePath);
+  }
+}
+
+function verifyBundle(root) {
+  return spawnSync("sh", [resolve("scripts/verify-app-contents.sh"), root], {
+    encoding: "utf8"
+  });
+}
+
+function verifyProductionBundle(root) {
+  return spawnSync("sh", [resolve("scripts/verify-production-bundle-contents.sh"), root], {
+    encoding: "utf8"
+  });
+}
 
 test("rejects inconsistent application versions", () => {
   assert.throws(() => assertVersionConsistency({
@@ -44,4 +78,48 @@ test("build manifest identifies an unsigned arm64 preview", () => {
     notarized: false,
     tdlib
   });
+});
+
+test("release bundle validator accepts only the reviewed app contents", () => {
+  const directory = mkdtempSync(join(tmpdir(), "retract-bundle-test-"));
+  try {
+    const valid = join(directory, "valid.app");
+    createExpectedBundle(valid);
+    assert.equal(verifyBundle(valid).status, 0);
+
+    const unexpected = join(directory, "unexpected.app");
+    createExpectedBundle(unexpected);
+    writeFileSync(join(unexpected, "Contents/Resources/session.db"), "private state");
+    const unexpectedResult = verifyBundle(unexpected);
+    assert.notEqual(unexpectedResult.status, 0);
+    assert.match(unexpectedResult.stderr, /unexpected app-bundle path/i);
+
+    const linked = join(directory, "linked.app");
+    createExpectedBundle(linked);
+    symlinkSync("Info.plist", join(linked, "Contents/linked-plist"));
+    const linkedResult = verifyBundle(linked);
+    assert.notEqual(linkedResult.status, 0);
+    assert.match(linkedResult.stderr, /symbolic links are not permitted/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("production bundle validator rejects fixture data without nonstandard tools", () => {
+  const directory = mkdtempSync(join(tmpdir(), "retract-production-bundle-test-"));
+  try {
+    const clean = join(directory, "clean");
+    mkdirSync(clean);
+    writeFileSync(join(clean, "app.js"), "const product = 'Retract';");
+    assert.equal(verifyProductionBundle(clean).status, 0);
+
+    const contaminated = join(directory, "contaminated");
+    mkdirSync(contaminated);
+    writeFileSync(join(contaminated, "app.js"), "const command = 'reset_demo';");
+    const contaminatedResult = verifyProductionBundle(contaminated);
+    assert.notEqual(contaminatedResult.status, 0);
+    assert.match(contaminatedResult.stderr, /forbidden fixture marker: reset_demo/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

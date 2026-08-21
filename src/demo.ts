@@ -407,12 +407,13 @@ export async function demoPrepareChatAction(chatId: number, operation: PlanOpera
   return structuredClone(plan);
 }
 
-export async function demoPrepareSenderAction(chatId: number, senderId: number, senderName: string): Promise<PlanView> {
+export async function demoPrepareSenderAction(chatId: number, senderId: number): Promise<PlanView> {
   await delay();
   const chat = chats.find((candidate) => candidate.id === chatId);
   if (!chat) throw new Error("Chat no longer exists.");
   if (!chat.capabilities.canDeleteBySender) throw new Error("Telegram’s current capability flags do not allow deleting by sender.");
-  if (!senderName.trim()) throw new Error("Sender name is required.");
+  const senderName = messages.find((message) => message.senderId === senderId)?.senderName;
+  if (!senderName) throw new Error("Sender no longer exists.");
   const plan: PlanView & { chatId: number; senderId: number } = {
     id: crypto.randomUUID(),
     operation: "delete_by_sender",

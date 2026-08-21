@@ -89,9 +89,7 @@ export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogP
         <LockKeyhole size={14} /> Plan <code>{plan.fingerprint.slice(0, 12)}</code> is frozen to {plan.operation === "selected_messages" ? "the reviewed IDs" : plan.operation === "delete_my_messages" ? "your message IDs in this chat" : plan.operation === "delete_all_messages_and_leave" ? "every enumerated message ID and this chat" : plan.operation === "leave_chat" ? "your outgoing message IDs and this chat" : plan.operation === "clear_history_and_leave" ? "whole-history cleanup and this immutable chat" : plan.operation === "delete_by_sender" ? "this chat and sender" : "this immutable chat"}.
       </div>
 
-      {titleRequired && (
-        <p className="system-auth-note">The desktop app will ask macOS to verify the device owner after you press the final button.</p>
-      )}
+      <p className="system-auth-note">macOS will show the exact frozen target and verify the device owner after you press the final button.</p>
 
       {titleRequired && (
         <label className="typed-confirmation">

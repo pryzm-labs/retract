@@ -48,8 +48,8 @@ export const api: RetractApi = {
   prepareOwnMessages: (chatId: number) => call<PlanView>("prepare_own_messages", { chatId }),
   prepareChatAction: (chatId: number, operation: PlanOperation) =>
     call<PlanView>("prepare_chat_action", { request: { chatId, operation } }),
-  prepareSenderAction: (chatId: number, senderId: number, senderName: string) =>
-    call<PlanView>("prepare_sender_action", { request: { chatId, senderId, senderName } }),
+  prepareSenderAction: (chatId: number, senderId: number) =>
+    call<PlanView>("prepare_sender_action", { request: { chatId, senderId } }),
   requestQrAuth: () => call<void>("request_qr_auth"),
   submitAuth: (command: AuthCommand, value: string) => call<void>(command, { request: { value } }),
   execute: (plan: PlanView, irreversibleAcknowledged: boolean, typedChatTitle?: string | null) =>

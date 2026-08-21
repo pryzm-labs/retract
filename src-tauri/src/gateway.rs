@@ -24,6 +24,7 @@ pub trait TelegramGateway: Send + Sync {
     async fn own_messages(&self, chat_id: i64) -> Result<Vec<MessageSnapshot>, AppError>;
     async fn chat_messages(&self, chat_id: i64) -> Result<Vec<MessageSnapshot>, AppError>;
     async fn messages_by_ids(&self, ids: &[(i64, i64)]) -> Result<Vec<MessageSnapshot>, AppError>;
+    async fn sender_name(&self, sender_id: i64) -> Result<String, AppError>;
     async fn current_reach(
         &self,
         chat_id: i64,

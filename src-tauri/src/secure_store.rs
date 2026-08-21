@@ -1,17 +1,22 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
-    aead::{Aead, OsRng, rand_core::RngCore},
+    aead::{Aead, OsRng, Payload, rand_core::RngCore},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{error::AppError, model::PersistedState};
 
-const MAGIC: &[u8; 7] = b"RTRCT01";
+const MAGIC: &[u8; 7] = b"RTRCT02";
+const LEGACY_UNBOUND_MAGIC: &[u8; 7] = b"RTRCT01";
 const KEY_LENGTH: usize = 32;
 const NONCE_LENGTH: usize = 12;
 
@@ -49,15 +54,25 @@ pub struct SecureJobStore {
     key: [u8; KEY_LENGTH],
     #[zeroize(skip)]
     path: PathBuf,
+    #[zeroize(skip)]
+    profile_binding: Vec<u8>,
+    #[zeroize(skip)]
+    loaded_legacy_unbound: AtomicBool,
 }
 
 impl SecureJobStore {
     pub fn open(data_dir: PathBuf) -> Result<Self, AppError> {
         fs::create_dir_all(&data_dir)?;
         let key = load_or_create_named_key(&data_dir, "encrypted-job-store", "job-store.key")?;
+        let profile_binding = data_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned().into_bytes())
+            .ok_or_else(|| AppError::SecureStore("job-store profile is invalid".into()))?;
         Ok(Self {
             key,
             path: data_dir.join("jobs.enc"),
+            profile_binding,
+            loaded_legacy_unbound: AtomicBool::new(false),
         })
     }
 
@@ -66,12 +81,32 @@ impl SecureJobStore {
         Ok(Self {
             key: [0x53; KEY_LENGTH],
             path: data_dir.join("setup-jobs.enc"),
+            profile_binding: b"setup".to_vec(),
+            loaded_legacy_unbound: AtomicBool::new(false),
         })
     }
 
     #[cfg(test)]
     pub fn with_test_key(path: PathBuf, key: [u8; KEY_LENGTH]) -> Self {
-        Self { key, path }
+        Self::with_test_key_and_profile(path, key, b"test")
+    }
+
+    #[cfg(test)]
+    pub fn with_test_key_and_profile(
+        path: PathBuf,
+        key: [u8; KEY_LENGTH],
+        profile_binding: &[u8],
+    ) -> Self {
+        Self {
+            key,
+            path,
+            profile_binding: profile_binding.to_vec(),
+            loaded_legacy_unbound: AtomicBool::new(false),
+        }
+    }
+
+    pub fn loaded_legacy_unbound(&self) -> bool {
+        self.loaded_legacy_unbound.load(Ordering::Acquire)
     }
 
     pub fn load(&self) -> Result<PersistedState, AppError> {
@@ -82,7 +117,13 @@ impl SecureJobStore {
             }
             Err(error) => return Err(error.into()),
         };
-        if bytes.len() < MAGIC.len() + NONCE_LENGTH || &bytes[..MAGIC.len()] != MAGIC {
+        if bytes.len() < MAGIC.len() + NONCE_LENGTH {
+            return Err(AppError::SecureStore(
+                "job store has an invalid header".into(),
+            ));
+        }
+        let legacy_unbound = &bytes[..MAGIC.len()] == LEGACY_UNBOUND_MAGIC;
+        if !legacy_unbound && &bytes[..MAGIC.len()] != MAGIC {
             return Err(AppError::SecureStore(
                 "job store has an invalid header".into(),
             ));
@@ -90,9 +131,22 @@ impl SecureJobStore {
         let cipher = Aes256Gcm::new_from_slice(&self.key)
             .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
         let nonce = aes_gcm::Nonce::from_slice(&bytes[MAGIC.len()..MAGIC.len() + NONCE_LENGTH]);
+        let aad = if legacy_unbound {
+            &[][..]
+        } else {
+            self.profile_binding.as_slice()
+        };
         let plaintext = cipher
-            .decrypt(nonce, &bytes[MAGIC.len() + NONCE_LENGTH..])
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &bytes[MAGIC.len() + NONCE_LENGTH..],
+                    aad,
+                },
+            )
             .map_err(|_| AppError::SecureStore("job store authentication failed".into()))?;
+        self.loaded_legacy_unbound
+            .store(legacy_unbound, Ordering::Release);
         serde_json::from_slice(&plaintext).map_err(|error| AppError::SecureStore(error.to_string()))
     }
 
@@ -105,7 +159,13 @@ impl SecureJobStore {
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_ref())
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext.as_ref(),
+                    aad: self.profile_binding.as_slice(),
+                },
+            )
             .map_err(|_| AppError::SecureStore("job store encryption failed".into()))?;
 
         let mut payload = Vec::with_capacity(MAGIC.len() + NONCE_LENGTH + ciphertext.len());
@@ -116,6 +176,7 @@ impl SecureJobStore {
         let temporary = self.path.with_extension("enc.tmp");
         write_private(&temporary, &payload)?;
         fs::rename(temporary, &self.path)?;
+        self.loaded_legacy_unbound.store(false, Ordering::Release);
         Ok(())
     }
 }
@@ -537,6 +598,20 @@ mod tests {
         bytes[last] ^= 1;
         fs::write(path, bytes).unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn authenticated_job_state_is_bound_to_its_telegram_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let key = [9; 32];
+        SecureJobStore::with_test_key_and_profile(path.clone(), key, b"telegram-test")
+            .save(&PersistedState::default())
+            .unwrap();
+
+        let production =
+            SecureJobStore::with_test_key_and_profile(path, key, b"telegram-production");
+        assert!(production.load().is_err());
     }
 
     #[test]

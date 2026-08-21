@@ -476,7 +476,7 @@ export default function App() {
     const generation = beginAction("Preparing sender-wide review…");
     if (generation === null) return;
     try {
-      const prepared = await api.prepareSenderAction(activeChat.id, sender.senderId, sender.senderName);
+      const prepared = await api.prepareSenderAction(activeChat.id, sender.senderId);
       if (generation === actionGeneration.current) setPlan(prepared);
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -492,9 +492,7 @@ export default function App() {
     let refreshAfterExecution: number[] = [];
     let removedAfterExecution: number[] = [];
     try {
-      if (plan.confirmationTier === "high" || plan.confirmationTier === "critical") {
-        await api.authorizePlan(plan);
-      }
+      await api.authorizePlan(plan);
       const job = await api.execute(plan, acknowledged, typedTitle);
       if (job.status !== "queued" && job.status !== "running") {
         refreshAfterExecution = job.targetChatIds;

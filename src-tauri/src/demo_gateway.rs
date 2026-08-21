@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -34,6 +34,10 @@ pub struct DemoGateway {
     chat_list_reads: AtomicUsize,
     #[cfg(test)]
     direct_chat_reads: AtomicUsize,
+    #[cfg(test)]
+    current_reach_delay_ms: AtomicU64,
+    #[cfg(test)]
+    current_reach_started: AtomicBool,
 }
 
 impl DemoGateway {
@@ -47,6 +51,10 @@ impl DemoGateway {
             chat_list_reads: AtomicUsize::new(0),
             #[cfg(test)]
             direct_chat_reads: AtomicUsize::new(0),
+            #[cfg(test)]
+            current_reach_delay_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            current_reach_started: AtomicBool::new(false),
         }
     }
 
@@ -56,6 +64,18 @@ impl DemoGateway {
             self.chat_list_reads.load(Ordering::Acquire),
             self.direct_chat_reads.load(Ordering::Acquire),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delay_current_reach(&self, milliseconds: u64) {
+        self.current_reach_started.store(false, Ordering::Release);
+        self.current_reach_delay_ms
+            .store(milliseconds, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_reach_started(&self) -> bool {
+        self.current_reach_started.load(Ordering::Acquire)
     }
 }
 
@@ -212,11 +232,28 @@ impl TelegramGateway for DemoGateway {
             .collect())
     }
 
+    async fn sender_name(&self, sender_id: i64) -> Result<String, AppError> {
+        let data = self.data.read().await;
+        data.messages
+            .iter()
+            .find(|stored| stored.snapshot.sender_id == sender_id)
+            .map(|stored| stored.snapshot.sender_name.clone())
+            .ok_or(AppError::NotFound)
+    }
+
     async fn current_reach(
         &self,
         chat_id: i64,
         message_id: i64,
     ) -> Result<Option<DeletionReach>, AppError> {
+        #[cfg(test)]
+        {
+            self.current_reach_started.store(true, Ordering::Release);
+            let delay = self.current_reach_delay_ms.load(Ordering::Acquire);
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+        }
         let data = self.data.read().await;
         Ok(data
             .messages
@@ -313,8 +350,6 @@ impl TelegramGateway for DemoGateway {
             return Err(AppError::Gateway("CHAT_DELETE_FOR_SELF_FORBIDDEN".into()));
         }
         data.chats.remove(index);
-        data.messages
-            .retain(|stored| stored.snapshot.chat_id != chat_id);
         Ok(())
     }
 
@@ -336,15 +371,16 @@ impl TelegramGateway for DemoGateway {
 
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError> {
         let mut data = self.data.write().await;
-        let index = data
+        let chat = data
             .chats
-            .iter()
-            .position(|chat| chat.id == chat_id)
+            .iter_mut()
+            .find(|chat| chat.id == chat_id)
             .ok_or(AppError::NotFound)?;
-        if !data.chats[index].capabilities.can_leave_chat {
+        if !chat.capabilities.can_leave_chat {
             return Err(AppError::Gateway("CHAT_MEMBER_REQUIRED".into()));
         }
-        data.chats.remove(index);
+        chat.capabilities.can_leave_chat = false;
+        chat.capabilities.can_remove_for_self = true;
         Ok(())
     }
 

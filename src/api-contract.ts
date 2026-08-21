@@ -33,7 +33,7 @@ export interface RetractApi {
   prepareSelection(messageRefs: Array<{ chatId: number; messageId: number }>): Promise<PlanView>;
   prepareOwnMessages(chatId: number): Promise<PlanView>;
   prepareChatAction(chatId: number, operation: PlanOperation): Promise<PlanView>;
-  prepareSenderAction(chatId: number, senderId: number, senderName: string): Promise<PlanView>;
+  prepareSenderAction(chatId: number, senderId: number): Promise<PlanView>;
   requestQrAuth(): Promise<void>;
   submitAuth(command: AuthCommand, value: string): Promise<void>;
   execute(plan: PlanView, irreversibleAcknowledged: boolean, typedChatTitle?: string | null): Promise<JobRecord>;

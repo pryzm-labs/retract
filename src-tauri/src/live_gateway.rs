@@ -1448,6 +1448,11 @@ impl TelegramGateway for LiveGateway {
         Ok(snapshots)
     }
 
+    async fn sender_name(&self, sender_id: i64) -> Result<String, AppError> {
+        self.ensure_ready()?;
+        Ok(self.sender_name(sender_id, sender_id < 0).await)
+    }
+
     async fn current_reach(
         &self,
         chat_id: i64,
@@ -1552,28 +1557,6 @@ impl TelegramGateway for LiveGateway {
         self.client
             .request(json!({ "@type": "leaveChat", "chat_id": chat_id }))
             .await?;
-
-        // Leaving changes only this account's membership. Once Telegram applies
-        // that change, explicitly remove the local history/list entry when its
-        // refreshed capability allows the self-only operation.
-        let refreshed = self
-            .client
-            .request(json!({ "@type": "getChat", "chat_id": chat_id }))
-            .await?;
-        let removable_for_self = refreshed
-            .get("can_be_deleted_only_for_self")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if removable_for_self {
-            self.client
-                .request(json!({
-                    "@type": "deleteChatHistory",
-                    "chat_id": chat_id,
-                    "remove_from_chat_list": true,
-                    "revoke": false
-                }))
-                .await?;
-        }
         self.mark_chat_summary_dirty(chat_id).await;
         Ok(())
     }
