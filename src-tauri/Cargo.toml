@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 aes-gcm = "0.10"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 cleaner-domain = { path = "../crates/cleaner-domain" }
 futures-util = "0.3"
