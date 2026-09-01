@@ -1936,6 +1936,156 @@ fn humanize_message_type(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> Value {
+        let raw = match name {
+            "message-content" => include_str!("../tests/fixtures/tdlib/message-content.json"),
+            "member-statuses" => include_str!("../tests/fixtures/tdlib/member-statuses.json"),
+            "chat-positions" => include_str!("../tests/fixtures/tdlib/chat-positions.json"),
+            _ => panic!("unknown synthetic TDLib fixture"),
+        };
+        serde_json::from_str(raw).expect("valid synthetic TDLib fixture")
+    }
+
+    #[test]
+    fn normalizes_every_supported_message_content_fixture() {
+        let cases = fixture("message-content");
+        let cases = cases.as_array().expect("message content fixture array");
+        assert_eq!(cases.len(), 13);
+
+        let mut actual_kinds = cases
+            .iter()
+            .map(|case| case["expectedKind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual_kinds.sort_unstable();
+        assert_eq!(
+            actual_kinds,
+            [
+                "animation",
+                "audio",
+                "contact",
+                "file",
+                "location",
+                "other",
+                "photo",
+                "poll",
+                "service",
+                "sticker",
+                "text",
+                "video",
+                "voice",
+            ]
+        );
+
+        for case in cases {
+            let (kind, preview) = content_preview(&case["content"]);
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                case["expectedKind"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                preview,
+                case["expectedPreview"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                sensitive_content_text(&case["content"]),
+                case["expectedSensitiveText"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_every_member_status_fixture() {
+        let cases = fixture("member-statuses");
+        let cases = cases.as_array().expect("member status fixture array");
+        assert_eq!(cases.len(), 8);
+
+        for case in cases {
+            let (role, can_delete, can_leave) = role_from_status(Some(&case["status"]));
+            assert_eq!(
+                serde_json::to_value(role).unwrap(),
+                case["expectedRole"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                can_delete,
+                case["expectedDelete"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                can_leave,
+                case["expectedLeave"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_every_chat_position_fixture() {
+        let cases = fixture("chat-positions");
+        let cases = cases.as_array().expect("chat position fixture array");
+        assert_eq!(cases.len(), 4);
+
+        for case in cases {
+            let chat = json!({ "positions": case["positions"].clone() });
+            assert_eq!(
+                chat_is_in_catalog(&chat),
+                case["expectedInCatalog"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn distinguishes_user_and_chat_message_senders() {
+        assert_eq!(
+            message_sender_id(&json!({
+                "@type": "messageSenderUser",
+                "user_id": "123"
+            })),
+            (123, false)
+        );
+        assert_eq!(
+            message_sender_id(&json!({
+                "@type": "messageSenderChat",
+                "chat_id": 456
+            })),
+            (456, true)
+        );
+    }
+
+    #[test]
+    fn maps_only_a_single_supported_media_kind_to_a_tdlib_filter() {
+        assert_eq!(
+            search_filter(&[ContentKind::File]),
+            json!({ "@type": "searchMessagesFilterDocument" })
+        );
+        assert_eq!(
+            search_filter(&[ContentKind::Photo, ContentKind::Video]),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn caps_message_preview_at_300_characters() {
+        let (kind, preview) = content_preview(&json!({
+            "@type": "messageText",
+            "text": { "text": "x".repeat(301) }
+        }));
+        assert_eq!(kind, ContentKind::Text);
+        assert_eq!(preview, "x".repeat(300));
+        assert_eq!(preview.chars().count(), 300);
+    }
+
     #[test]
     fn maps_text_caption_and_admin_rights() {
         let (kind, preview) = content_preview(&json!({

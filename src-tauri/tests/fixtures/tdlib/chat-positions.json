@@ -1,0 +1,22 @@
+[
+  {
+    "name": "visible-main",
+    "positions": [{ "list": { "@type": "chatListMain" }, "order": "123" }],
+    "expectedInCatalog": true
+  },
+  {
+    "name": "visible-archive",
+    "positions": [{ "list": { "@type": "chatListArchive" }, "order": 456 }],
+    "expectedInCatalog": true
+  },
+  {
+    "name": "zero-order-main",
+    "positions": [{ "list": { "@type": "chatListMain" }, "order": 0 }],
+    "expectedInCatalog": false
+  },
+  {
+    "name": "unrelated-list",
+    "positions": [{ "list": { "@type": "chatListFolder", "chat_folder_id": 1 }, "order": 789 }],
+    "expectedInCatalog": false
+  }
+]
