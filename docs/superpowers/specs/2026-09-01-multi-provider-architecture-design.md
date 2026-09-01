@@ -1,9 +1,15 @@
 # Retract Multi-Provider Architecture Design
 
-**Status:** Proposed for review  
-**Date:** 2026-09-01  
-**Scope:** Phase 0 architecture only; this document does not authorize or implement the refactor  
+**Status:** Approved
+
+**Approved:** 2026-09-01
+
+**Date:** 2026-09-01
+
+**Scope:** Phase 0 architecture only; this document does not authorize or implement the refactor
 **Recommended approach:** Hybrid provider architecture with live Telegram access and an encrypted local archive index
+
+**First implementation plan:** `docs/superpowers/plans/2026-09-01-telegram-characterization.md`
 
 ## Purpose
 
@@ -868,4 +874,3 @@ X archive support is complete only when it provides the same local guarantees. O
 - [X authentication mapping](https://docs.x.com/fundamentals/authentication/guides/v2-authentication-mapping)
 - [X API rate limits](https://docs.x.com/x-api/fundamentals/rate-limits)
 - [X API usage and billing](https://docs.x.com/x-api/fundamentals/post-cap)
-
