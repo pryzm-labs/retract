@@ -1,0 +1,75 @@
+{
+  "searchRequest": {
+    "query": "passport apartment",
+    "chatIds": [-1001],
+    "chatKinds": ["supergroup"],
+    "contentKinds": ["photo", "file"],
+    "direction": "mine",
+    "minDate": "2026-08-01T00:00:00Z",
+    "maxDate": "2026-08-31T23:59:59Z",
+    "excludePinned": true,
+    "privacyScan": true,
+    "limit": 500
+  },
+  "catalogProgress": {
+    "phase": "loading",
+    "total": 531,
+    "processed": 128
+  },
+  "authSnapshot": {
+    "stage": "waiting_for_password",
+    "hint": "synthetic hint",
+    "qrLink": null
+  },
+  "searchResponse": {
+    "messages": [
+      {
+        "chatId": -1001,
+        "messageId": 14,
+        "senderId": 42,
+        "senderName": "Synthetic user",
+        "sentAt": "2026-08-15T18:00:00Z",
+        "isOutgoing": true,
+        "contentKind": "photo",
+        "preview": "Synthetic passport reminder",
+        "privacyFindings": ["identity_document"],
+        "albumId": 7001,
+        "isPinned": false,
+        "deletionReach": "everyone"
+      }
+    ],
+    "returned": 1,
+    "truncated": false
+  },
+  "planView": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "operation": "selected_messages",
+    "chatTitle": null,
+    "targetSenderName": null,
+    "summary": {
+      "selected": 1,
+      "deleteForEveryone": 1,
+      "selfOnly": 0,
+      "cannotDelete": 0
+    },
+    "confirmationTier": "low",
+    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "createdAt": "2026-08-15T18:01:00Z"
+  },
+  "jobRecord": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "planId": "11111111-1111-4111-8111-111111111111",
+    "operation": "selected_messages",
+    "targetChatIds": [-1001],
+    "status": "completed",
+    "total": 1,
+    "deleted": 1,
+    "skipped": 0,
+    "failed": 0,
+    "nextBatch": 1,
+    "retryAfterSeconds": null,
+    "errorCodes": [],
+    "createdAt": "2026-08-15T18:01:01Z",
+    "updatedAt": "2026-08-15T18:01:02Z"
+  }
+}
