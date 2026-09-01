@@ -8,6 +8,8 @@ use cleaner_domain::{
     ChatCapabilities, ChatKind, ChatRole, ChatSummary, ContentKind, ConversationState,
     DeletionReach, MessageSnapshot, detect_sensitive_data,
 };
+#[cfg(test)]
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -38,6 +40,10 @@ pub struct DemoGateway {
     current_reach_delay_ms: AtomicU64,
     #[cfg(test)]
     current_reach_started: AtomicBool,
+    #[cfg(test)]
+    operation_log: Mutex<Vec<String>>,
+    #[cfg(test)]
+    delete_batch_sizes: Mutex<Vec<usize>>,
 }
 
 impl DemoGateway {
@@ -55,6 +61,10 @@ impl DemoGateway {
             current_reach_delay_ms: AtomicU64::new(0),
             #[cfg(test)]
             current_reach_started: AtomicBool::new(false),
+            #[cfg(test)]
+            operation_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            delete_batch_sizes: Mutex::new(Vec::new()),
         }
     }
 
@@ -76,6 +86,77 @@ impl DemoGateway {
     #[cfg(test)]
     pub(crate) fn current_reach_started(&self) -> bool {
         self.current_reach_started.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    async fn record(&self, operation: String) {
+        self.operation_log.lock().await.push(operation);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn operation_log(&self) -> Vec<String> {
+        self.operation_log.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn clear_operation_log(&self) {
+        self.operation_log.lock().await.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delete_batch_sizes(&self) -> Vec<usize> {
+        self.delete_batch_sizes.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_message_reach(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        reach: DeletionReach,
+    ) {
+        let mut data = self.data.write().await;
+        let message = data
+            .messages
+            .iter_mut()
+            .find(|stored| {
+                stored.snapshot.chat_id == chat_id && stored.snapshot.message_id == message_id
+            })
+            .expect("synthetic message exists");
+        message.snapshot.deletion_reach = reach;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn append_messages(&self, chat_id: i64, first_message_id: i64, count: usize) {
+        let mut data = self.data.write().await;
+        assert!(data.chats.iter().any(|chat| chat.id == chat_id));
+        for offset in 0..count {
+            let offset = i64::try_from(offset).expect("synthetic message count fits i64");
+            let message_id = first_message_id
+                .checked_add(offset)
+                .expect("synthetic message ID does not overflow");
+            assert!(message_id > 0);
+            data.messages.push(StoredMessage {
+                snapshot: MessageSnapshot {
+                    chat_id,
+                    message_id,
+                    sender_id: 42,
+                    sender_name: "You".into(),
+                    sent_at: Utc
+                        .timestamp_opt(1_700_000_000 + offset, 0)
+                        .single()
+                        .expect("valid synthetic timestamp"),
+                    is_outgoing: true,
+                    content_kind: ContentKind::Text,
+                    preview: "Synthetic batch message".into(),
+                    privacy_findings: Vec::new(),
+                    album_id: None,
+                    is_pinned: false,
+                    deletion_reach: DeletionReach::Everyone,
+                },
+                deleted: false,
+            });
+        }
     }
 }
 
@@ -271,6 +352,19 @@ impl TelegramGateway for DemoGateway {
         chat_id: i64,
         message_ids: &[i64],
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            let mut sorted_ids = message_ids.to_vec();
+            sorted_ids.sort_unstable();
+            let ids = sorted_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            self.record(format!("delete_messages_for_everyone:{chat_id}:{ids}"))
+                .await;
+            self.delete_batch_sizes.lock().await.push(message_ids.len());
+        }
         if message_ids.is_empty() || message_ids.len() > 100 {
             return Err(AppError::Gateway("invalid deletion batch".into()));
         }
@@ -297,6 +391,9 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("clear_history_for_everyone:{chat_id}"))
+            .await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -316,6 +413,9 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn clear_history_for_everyone_keep_chat(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("clear_history_for_everyone_keep_chat:{chat_id}"))
+            .await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -340,6 +440,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn remove_chat_for_self(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("remove_chat_for_self:{chat_id}")).await;
         let mut data = self.data.write().await;
         let index = data
             .chats
@@ -354,6 +456,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn delete_group(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("delete_group:{chat_id}")).await;
         let mut data = self.data.write().await;
         let index = data
             .chats
@@ -370,6 +474,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("leave_chat:{chat_id}")).await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -389,6 +495,9 @@ impl TelegramGateway for DemoGateway {
         chat_id: i64,
         sender_id: i64,
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("delete_messages_by_sender:{chat_id}:{sender_id}"))
+            .await;
         let mut data = self.data.write().await;
         let chat = data
             .chats

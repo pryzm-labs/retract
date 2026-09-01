@@ -1337,6 +1337,160 @@ mod tests {
     }
 
     #[test]
+    fn selected_everyone_deletion_never_downgrades_after_reach_changes() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [32; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: 101,
+                        message_id: 1,
+                    }],
+                })
+                .await
+                .unwrap();
+
+            gateway
+                .set_message_reach(101, 1, DeletionReach::SelfOnly)
+                .await;
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            gateway.clear_operation_log().await;
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                })
+                .await
+                .unwrap();
+
+            for _ in 0..50 {
+                if service
+                    .jobs()
+                    .await
+                    .iter()
+                    .find(|candidate| candidate.id == job.id)
+                    .is_some_and(|candidate| candidate.status.is_terminal())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let finished = service
+                .jobs()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.id == job.id)
+                .unwrap();
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.deleted, 0);
+            assert_eq!(finished.skipped, 1);
+            assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+            assert!(
+                gateway
+                    .operation_log()
+                    .await
+                    .iter()
+                    .all(|entry| { !entry.starts_with("delete_messages_for_everyone:101:") })
+            );
+        });
+    }
+
+    #[test]
+    fn selected_message_job_uses_exact_telegram_batch_boundaries() {
+        tauri::async_runtime::block_on(async {
+            const CHAT_ID: i64 = 101;
+            const FIRST_MESSAGE_ID: i64 = 50_000;
+            const MESSAGE_COUNT: usize = 205;
+
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [33; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            gateway
+                .append_messages(CHAT_ID, FIRST_MESSAGE_ID, MESSAGE_COUNT)
+                .await;
+            let expected_refs = (0..MESSAGE_COUNT)
+                .map(|offset| MessageRef {
+                    chat_id: CHAT_ID,
+                    message_id: FIRST_MESSAGE_ID + offset as i64,
+                })
+                .collect::<Vec<_>>();
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: expected_refs.clone(),
+                })
+                .await
+                .unwrap();
+
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            gateway.clear_operation_log().await;
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                })
+                .await
+                .unwrap();
+
+            for _ in 0..50 {
+                if service
+                    .jobs()
+                    .await
+                    .iter()
+                    .find(|candidate| candidate.id == job.id)
+                    .is_some_and(|candidate| candidate.status.is_terminal())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let finished = service
+                .jobs()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.id == job.id)
+                .unwrap();
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.deleted, MESSAGE_COUNT);
+            assert_eq!(gateway.delete_batch_sizes().await, vec![100, 100, 5]);
+
+            let expected_operations = expected_refs
+                .chunks(100)
+                .map(|batch| {
+                    let message_ids = batch
+                        .iter()
+                        .map(|message| message.message_id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("delete_messages_for_everyone:{CHAT_ID}:{message_ids}")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(gateway.operation_log().await, expected_operations);
+        });
+    }
+
+    #[test]
     fn restart_does_not_replay_a_broad_destructive_operation() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
@@ -1540,6 +1694,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            gateway.clear_operation_log().await;
             let job = service
                 .start_execution(ExecuteRequest {
                     plan_id: plan.id,
@@ -1587,6 +1742,15 @@ mod tests {
                     .unwrap()
                     .len(),
                 2
+            );
+            let operations = gateway.operation_log().await;
+            assert_eq!(
+                operations,
+                vec![
+                    "delete_messages_for_everyone:-1003:31",
+                    "leave_chat:-1003",
+                    "remove_chat_for_self:-1003",
+                ]
             );
         });
     }
