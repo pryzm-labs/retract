@@ -323,7 +323,8 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /accepted Telegram deletions cannot be undone/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete for everyone" }));
 
-    await waitFor(() => expect(authorizePlan).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(authorizePlan).toHaveBeenCalledTimes(1);
     const reviewedPlan = await vi.mocked(prepareSelection).mock.results[0].value;
     expect(authorizePlan.mock.calls[0][0]).toBe(reviewedPlan);
     expect(execute).toHaveBeenCalledTimes(1);
@@ -331,6 +332,7 @@ describe("Retract desktop UI", () => {
     expect(execute).toHaveBeenCalledWith(reviewedPlan, true, null);
     expect(vi.mocked(api.authorizePlan).mock.invocationCallOrder[0])
       .toBeLessThan(vi.mocked(api.execute).mock.invocationCallOrder[0]);
+    expect(prepareSelection).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByText("Whiteboard with customer email list"));
     fireEvent.click(screen.getByRole("button", { name: /Review deletion/ }));
