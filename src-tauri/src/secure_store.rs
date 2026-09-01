@@ -689,6 +689,161 @@ mod tests {
             .expect("valid frozen encrypted fixture base64")
     }
 
+    fn decrypt_frozen_value(
+        bytes: &[u8],
+        key: [u8; KEY_LENGTH],
+        profile: &[u8],
+    ) -> serde_json::Value {
+        assert!(bytes.len() >= MAGIC.len() + NONCE_LENGTH);
+        let aad = match &bytes[..MAGIC.len()] {
+            value if value == LEGACY_UNBOUND_MAGIC => &[][..],
+            value if value == MAGIC => profile,
+            value => panic!("unexpected frozen fixture magic: {value:?}"),
+        };
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("valid frozen fixture key");
+        let nonce = AesNonce::try_from(&bytes[MAGIC.len()..MAGIC.len() + NONCE_LENGTH])
+            .expect("valid frozen fixture nonce");
+        let plaintext = cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &bytes[MAGIC.len() + NONCE_LENGTH..],
+                    aad,
+                },
+            )
+            .expect("independently authenticated frozen fixture plaintext");
+        serde_json::from_slice(&plaintext).expect("frozen fixture plaintext JSON")
+    }
+
+    fn expect_raw_keys(
+        value: &serde_json::Value,
+        path: &str,
+        expected: &[&str],
+    ) -> Result<(), String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{path} must be an object"))?;
+        let mut actual = object.keys().map(String::as_str).collect::<Vec<_>>();
+        let mut expected = expected.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{path} raw keys differ: expected {expected:?}, found {actual:?}"
+            ))
+        }
+    }
+
+    fn expect_raw_array<'a>(
+        value: &'a serde_json::Value,
+        path: &str,
+    ) -> Result<&'a [serde_json::Value], String> {
+        value
+            .as_array()
+            .map(Vec::as_slice)
+            .ok_or_else(|| format!("{path} must be an array"))
+    }
+
+    fn validate_frozen_raw(value: &serde_json::Value) -> Result<(), String> {
+        const FORBIDDEN_RAW_NAMES: &[&str] = &[
+            "preview",
+            "caption",
+            "fileName",
+            "file_name",
+            "attachment",
+            "messageBody",
+            "message_body",
+            "apiHash",
+            "api_hash",
+            "password",
+            "authCode",
+            "auth_code",
+            "SYNTHETIC_CONTENT_SENTINEL",
+            "SYNTHETIC_AUTH_SENTINEL",
+        ];
+        let raw = serde_json::to_string(value).map_err(|error| error.to_string())?;
+        if let Some(name) = FORBIDDEN_RAW_NAMES.iter().find(|name| raw.contains(**name)) {
+            return Err(format!("raw plaintext contains forbidden name {name}"));
+        }
+
+        expect_raw_keys(value, "$", &["plans", "jobs"])?;
+        for (plan_index, plan) in expect_raw_array(&value["plans"], "$.plans")?
+            .iter()
+            .enumerate()
+        {
+            let plan_path = format!("$.plans[{plan_index}]");
+            expect_raw_keys(
+                plan,
+                &plan_path,
+                &[
+                    "id",
+                    "operation",
+                    "target_chat_id",
+                    "target_sender_id",
+                    "target_sender_name",
+                    "chat_title",
+                    "items",
+                    "summary",
+                    "confirmation_tier",
+                    "fingerprint",
+                    "created_at",
+                ],
+            )?;
+            for (item_index, item) in
+                expect_raw_array(&plan["items"], &format!("{plan_path}.items"))?
+                    .iter()
+                    .enumerate()
+            {
+                expect_raw_keys(
+                    item,
+                    &format!("{plan_path}.items[{item_index}]"),
+                    &["chat_id", "message_id", "expected_reach"],
+                )?;
+            }
+            expect_raw_keys(
+                &plan["summary"],
+                &format!("{plan_path}.summary"),
+                &["selected", "deleteForEveryone", "selfOnly", "cannotDelete"],
+            )?;
+        }
+        for (job_index, job) in expect_raw_array(&value["jobs"], "$.jobs")?
+            .iter()
+            .enumerate()
+        {
+            expect_raw_keys(
+                job,
+                &format!("$.jobs[{job_index}]"),
+                &[
+                    "id",
+                    "planId",
+                    "operation",
+                    "targetChatIds",
+                    "status",
+                    "total",
+                    "deleted",
+                    "skipped",
+                    "failed",
+                    "nextBatch",
+                    "retryAfterSeconds",
+                    "errorCodes",
+                    "createdAt",
+                    "updatedAt",
+                ],
+            )?;
+            expect_raw_array(
+                &job["targetChatIds"],
+                &format!("$.jobs[{job_index}].targetChatIds"),
+            )?;
+            expect_raw_array(
+                &job["errorCodes"],
+                &format!("$.jobs[{job_index}].errorCodes"),
+            )?;
+        }
+        Ok(())
+    }
+
     fn assert_frozen_fixture(
         encoded: &str,
         key: [u8; KEY_LENGTH],
@@ -698,6 +853,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.enc");
         let original = decode_frozen_fixture(encoded);
+        let raw = decrypt_frozen_value(&original, key, profile);
+        validate_frozen_raw(&raw)
+            .expect("raw frozen fixture schema must be exact and content-free");
+        assert_eq!(raw, frozen_expected_state());
+        let independently_deserialized: PersistedState =
+            serde_json::from_value(raw).expect("validated frozen fixture state");
+        assert_eq!(
+            serde_json::to_value(&independently_deserialized).unwrap(),
+            frozen_expected_state()
+        );
+
         fs::write(&path, &original).unwrap();
         let store = SecureJobStore::with_test_key_and_profile(path.clone(), key, profile);
         let state = store.load().unwrap();
@@ -725,6 +891,42 @@ mod tests {
         tampered[last] ^= 1;
         fs::write(&path, tampered).unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_content_or_auth_names_in_raw_frozen_plaintext() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/secure-store/rtrct02-nonempty.b64");
+        let original = decode_frozen_fixture(FIXTURE);
+        let raw = decrypt_frozen_value(&original, FROZEN_CURRENT_KEY, FROZEN_PROFILE);
+
+        let mut unknown_key_mutation = raw.clone();
+        unknown_key_mutation["plans"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "unknown_field".into(),
+                serde_json::Value::String("synthetic-value".into()),
+            );
+        let unknown_key_error = validate_frozen_raw(&unknown_key_mutation).unwrap_err();
+        assert!(unknown_key_error.contains("unknown_field"));
+
+        let mut content_mutation = raw.clone();
+        content_mutation["jobs"][0]["errorCodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String(
+                "SYNTHETIC_CONTENT_SENTINEL".into(),
+            ));
+        let content_error = validate_frozen_raw(&content_mutation).unwrap_err();
+        assert!(content_error.contains("SYNTHETIC_CONTENT_SENTINEL"));
+
+        let mut auth_mutation = raw;
+        auth_mutation["jobs"][0]["errorCodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::String("SYNTHETIC_AUTH_SENTINEL".into()));
+        let auth_error = validate_frozen_raw(&auth_mutation).unwrap_err();
+        assert!(auth_error.contains("SYNTHETIC_AUTH_SENTINEL"));
     }
 
     #[test]
