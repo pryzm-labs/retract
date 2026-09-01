@@ -24,3 +24,7 @@ Use disposable identities and execute the search/catalog, destructive, confirmat
 ## Refactor parity rule
 
 Run this gate on the last pre-refactor commit and on the Telegram-provider migration commit. A changed result requires either a defect fix approved as a separate behavior change or a revision to the architecture design; it may not be dismissed as an internal refactor difference.
+
+## Automated baseline command
+
+The canonical local command is `npm run check`; the canonical isolated command is `npm run container:check`. Pull requests that change provider-facing models must include both command outcomes in the PR verification section and must identify any live test-DC cases rerun because destructive behavior changed.

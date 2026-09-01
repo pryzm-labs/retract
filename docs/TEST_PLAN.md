@@ -21,6 +21,20 @@ npm run tauri build -- --debug
 
 Required: no failed tests, warnings treated as errors, no high/critical npm advisories, successful app bundle, and no unexpected network requests other than Telegram endpoints.
 
+### Telegram provider-refactor characterization
+
+Before changing Telegram-facing domain or IPC types, run:
+
+```sh
+npx vitest run src/ipc-contract.test.ts src/components/AuthGate.test.tsx src/App.test.tsx src/api.test.ts
+RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml wire_contract_tests
+RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml live_gateway::tests
+RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml service::tests
+RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml secure_store::tests
+```
+
+These tests are compatibility gates. A provider migration may update their type names only in the same reviewed change that supplies an explicit old-to-new wire migration and proves equivalent Telegram behavior.
+
 ## Test identities
 
 Create disposable test-DC users covering: DM peer, basic-group owner, supergroup owner, admin with delete rights, limited admin, ordinary member, and a sender whose messages can be moderated. Include one secret chat on the same local TDLib session if supported by the test setup.
