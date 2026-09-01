@@ -45,6 +45,12 @@ Phase 0 freezes Telegram's current signed numeric IPC IDs, and its fixture delib
 
 - [ ] **Provider-foundation prerequisite:** before changing any production identifier type, add a behavior-level RED lifecycle harness using opaque strings and provider-native values greater than JavaScript's safe-integer range. It must cover selection keys, planning/fingerprints, job tracking, encrypted persistence and recovery, Rust/TypeScript IPC, and dirty targeted refresh/reconciliation. Make the production ID migration pass that harness in the same provider-foundation change. Do not cite the Phase 0 numeric-safe fixture as sufficient.
 
+### Approved Phase 0 cleanup-job presentation amendment
+
+Phase 0 freezes the production recent-job row exactly as it exists: operation, every current status, rate-limit retry countdown when present, and a nonzero deleted count. It does not claim that the UI renders `skipped`, `failed`, or `errorCodes`; those fields remain in the backend job record and content-free log.
+
+- [ ] **Provider UI generalization prerequisite:** before generalizing job presentation across providers, add an accessible full-result view for skipped and failed counters and safe structured diagnostics, with behavior-level RED coverage. Do not cite the Phase 0 status/retry/deleted characterization as complete outcome presentation.
+
 ### Existing encrypted-store preservation boundary
 
 The current store writes and syncs a new encrypted temporary file before replacing `jobs.enc`; the characterization suite proves that a temporary-write failure preserves the prior authenticated file. After a successful replacement, the application keeps no backup or general rollback copy. A later store migration must write and verify a separate new store, retain the original until verification succeeds, and switch atomically only after success.
@@ -115,7 +121,7 @@ This document is the regression gate for moving Telegram behind Retract's provid
 - Broad ambiguous jobs stop after restart; safe frozen-ID jobs retain bounded cursor behavior.
 - Persisted job state remains encrypted, profile-bound, tamper-evident, and content-free.
 - Telegram authentication secrets remain absent from settings JSON and frontend snapshots.
-- The UI preserves album atomicity, hidden selections, review-before-execute, progress, cancellation, and targeted reconciliation.
+- The UI preserves album atomicity, hidden selections, review-before-execute, current status/retry/deleted presentation, cancellation, and targeted reconciliation; skipped/failed counters and error codes are a tracked provider-UI prerequisite, not current rendered behavior.
 
 ## Live test-DC contract
 

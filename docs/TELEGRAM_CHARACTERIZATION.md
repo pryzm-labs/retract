@@ -16,7 +16,13 @@ This document is the regression gate for moving Telegram behind Retract's provid
 - Broad ambiguous jobs stop after restart; safe frozen-ID jobs retain bounded cursor behavior.
 - Persisted job state remains encrypted, profile-bound, tamper-evident, and content-free.
 - Telegram authentication secrets remain absent from settings JSON and frontend snapshots.
-- The UI preserves album atomicity, hidden selections, review-before-execute, progress, cancellation, and targeted reconciliation.
+- The UI preserves album atomicity, hidden selections, review-before-execute, current job status/retry/deleted presentation, cancellation, and targeted reconciliation.
+
+## Current cleanup-job presentation boundary
+
+Phase 0 recent-job rows render the operation, every current status, a rate-limit retry countdown when present, and the deleted count when nonzero. The current UI does not render the job record's `skipped`, `failed`, or `errorCodes` diagnostics; those fields remain available through the backend job record and content-free log. Characterization tests assert that omitted values are not folded into or misrepresented by the visible status/deleted copy.
+
+Before provider UI generalization, Retract must add an accessible full-result presentation for skipped and failed counters plus safe structured diagnostics. That future work is a prerequisite for claiming that provider-neutral job results expose complete outcome diagnostics; Phase 0 freezes only the narrower current surface.
 
 ## Phase boundary and required provider-foundation gate
 

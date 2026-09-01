@@ -465,9 +465,10 @@ describe("Retract desktop UI", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
     render(<App />);
-    const queuedState = await screen.findByText("queued");
-    const row = queuedState.closest(".job-row");
-    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Cancel" }));
+    const row = await screen.findByRole("group", {
+      name: "Cleanup job cancel-exact-job",
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
     expect(await screen.findByText("cancelled")).toBeInTheDocument();
     expect(cancelJob).toHaveBeenCalledTimes(1);

@@ -183,7 +183,7 @@ function ImpactRow({ icon, tone, count, label }: { icon: React.ReactNode; tone: 
 function JobRow({ job, busy, onCancel }: { job: JobRecord; busy: boolean; onCancel: (jobId: string) => void }) {
   const active = job.status === "queued" || job.status === "running";
   return (
-    <div className="job-row">
+    <div className="job-row" role="group" aria-label={`Cleanup job ${job.id}`}>
       <span className={`job-state job-${job.status}`}>{active ? <History size={14} /> : job.status === "completed" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}</span>
       <span className="job-copy">
         <strong>{job.operation === "selected_messages" ? plural(job.total, "message") : job.operation === "delete_my_messages" ? `${job.total.toLocaleString()} of my messages` : job.operation === "clear_history_and_leave" ? "Clear all history & leave" : job.operation === "delete_all_messages_and_leave" ? "Delete all possible history & leave" : job.operation === "leave_chat" ? "Revoke my messages & leave" : job.operation === "remove_chat_for_self" ? "Remove chat for me" : job.operation.replaceAll("_", " ")}</strong>

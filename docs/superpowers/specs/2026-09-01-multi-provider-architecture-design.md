@@ -620,7 +620,7 @@ All limits are named constants with deterministic error codes and tests. Imports
 - Broad, dynamic, cost-bearing, or ambiguous jobs require new review after an uncertain restart.
 - Permanent container destruction remains a separate critical action.
 - Cleanup-before-leave ordering remains part of Telegram's provider-specific plan preparation.
-- User-visible results distinguish confirmed, skipped, failed, already unavailable, manual, and ambiguous outcomes.
+- The generalized user-visible result design distinguishes confirmed, skipped, failed, already unavailable, manual, and ambiguous outcomes. This is a future UI requirement; the narrower Phase 0 Telegram job row is documented below.
 
 ## UI evolution
 
@@ -743,7 +743,8 @@ macOS Keychain is the current strong path. X live tokens may ship only on platfo
 - Album atomicity, hidden selections, and cross-conversation review remain correct.
 - No execution occurs before review, irreversible acknowledgement, and authorization.
 - Completed chat removal uses targeted reconciliation without a global reload.
-- Every job terminal and retry state remains visible and truthful.
+- Phase 0 keeps every current job status, rate-limit retry countdown, and nonzero deleted count visible and truthful. Its recent-job row does not render `skipped`, `failed`, or `errorCodes`, and the characterization may not imply otherwise.
+- Before provider UI generalization, an accessible full-result presentation must expose skipped and failed counters plus safe structured diagnostics, with behavior-level RED coverage.
 
 ### Live release gate
 

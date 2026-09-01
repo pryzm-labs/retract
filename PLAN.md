@@ -52,7 +52,7 @@ Deletion is irreversible. There is no app-level trash or undo once Telegram acce
 - A dry-run summary before every deletion.
 - Selected-message deletion, whole-history clearing, delete-by-sender, and true group deletion where allowed.
 - Rate-limit-aware, resumable deletion jobs with cancellation between batches.
-- A local, privacy-minimized job report showing deleted, skipped, failed, and still-visible counts.
+- A local, privacy-minimized job report showing deleted, skipped, failed, and still-visible counts. This is a tracked future requirement; the current Phase 0 recent-job row shows status/retry/deleted only.
 - Light/dark mode, VoiceOver labels, keyboard navigation, and native-feeling macOS shortcuts.
 
 ### Exclude from the first release
@@ -294,6 +294,10 @@ Avoid features that create hidden or automatic behavior: silent background delet
 ### Tracked provider-foundation prerequisite
 
 - [ ] Before any provider-foundation change migrates Telegram production ID types, land a RED lifecycle harness for opaque strings and provider-native values greater than JavaScript's safe-integer range across selection, planning, jobs, encrypted persistence, IPC, and targeted refresh. The current Phase 0 numeric-safe fixture does not satisfy this item.
+
+### Tracked provider UI prerequisite
+
+- [ ] Before provider UI generalization, add an accessible full-result presentation for skipped and failed counters and safe structured diagnostics. The current Phase 0 status/retry/deleted row does not satisfy this item.
 
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 

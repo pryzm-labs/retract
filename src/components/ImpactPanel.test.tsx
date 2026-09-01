@@ -51,7 +51,7 @@ function panelProps(
 }
 
 describe("ImpactPanel job activity", () => {
-  it("renders every current job state with truthful progress and diagnostics", () => {
+  it("renders every current job state and only the counters production exposes", () => {
     const onCancelJob = vi.fn();
     const queued = job("queued-job", "queued");
     const running = job("running-job", "running", {
@@ -68,23 +68,21 @@ describe("ImpactPanel job activity", () => {
       <ImpactPanel {...panelProps([queued, running, rateLimited], onCancelJob)} />,
     );
 
-    expect(screen.getByText("queued")).toBeInTheDocument();
-    expect(screen.getByText("running · 4 deleted")).toBeInTheDocument();
+    const queuedRow = screen.getByRole("group", { name: "Cleanup job queued-job" });
+    const runningRow = screen.getByRole("group", { name: "Cleanup job running-job" });
+    const retryRow = screen.getByRole("group", { name: "Cleanup job rate-limited-job" });
+    expect(within(queuedRow).getByText("queued")).toBeInTheDocument();
+    expect(within(runningRow).getByText("running · 4 deleted")).toBeInTheDocument();
     expect(
-      screen.getByText("rate limited · retry in 3s · 4 deleted"),
+      within(retryRow).getByText("rate limited · retry in 3s · 4 deleted"),
     ).toBeInTheDocument();
+    expect(within(runningRow).queryByText(/1 skipped/i)).not.toBeInTheDocument();
+    expect(within(retryRow).queryByText(/synthetic_rate_limited/i)).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(3);
 
-    const queuedRow = screen.getByText("queued").closest(".job-row");
-    const runningRow = screen
-      .getByText("running · 4 deleted")
-      .closest(".job-row");
-    const retryRow = screen
-      .getByText("rate limited · retry in 3s · 4 deleted")
-      .closest(".job-row");
-    fireEvent.click(within(queuedRow as HTMLElement).getByRole("button", { name: "Cancel" }));
-    fireEvent.click(within(runningRow as HTMLElement).getByRole("button", { name: "Cancel" }));
-    fireEvent.click(within(retryRow as HTMLElement).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(queuedRow).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(runningRow).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(retryRow).getByRole("button", { name: "Cancel" }));
     expect(onCancelJob.mock.calls).toEqual([
       ["queued-job"],
       ["running-job"],
@@ -114,9 +112,17 @@ describe("ImpactPanel job activity", () => {
       <ImpactPanel {...panelProps([completed, partial, failed], onCancelJob)} />,
     );
 
-    expect(screen.getByText("completed · 2 deleted")).toBeInTheDocument();
-    expect(screen.getByText("partial · 3 deleted")).toBeInTheDocument();
-    expect(screen.getByText("failed")).toBeInTheDocument();
+    const completedRow = screen.getByRole("group", { name: "Cleanup job completed-job" });
+    const partialRow = screen.getByRole("group", { name: "Cleanup job partial-job" });
+    const failedRow = screen.getByRole("group", { name: "Cleanup job failed-job" });
+    expect(within(completedRow).getByText("completed · 2 deleted")).toBeInTheDocument();
+    expect(within(partialRow).getByText("partial · 3 deleted")).toBeInTheDocument();
+    expect(within(failedRow).getByText("failed")).toBeInTheDocument();
+    expect(within(partialRow).queryByText(/1 skipped/i)).not.toBeInTheDocument();
+    expect(within(partialRow).queryByText(/1 failed/i)).not.toBeInTheDocument();
+    expect(within(partialRow).queryByText(/synthetic_partial/i)).not.toBeInTheDocument();
+    expect(within(failedRow).queryByText(/3 failed/i)).not.toBeInTheDocument();
+    expect(within(failedRow).queryByText(/synthetic_failure/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
 
     const cancelled = job("cancelled-job", "cancelled", {
@@ -128,7 +134,10 @@ describe("ImpactPanel job activity", () => {
     });
     rerender(<ImpactPanel {...panelProps([cancelled], onCancelJob)} />);
 
-    expect(screen.getByText("cancelled · 1 deleted")).toBeInTheDocument();
+    const cancelledRow = screen.getByRole("group", { name: "Cleanup job cancelled-job" });
+    expect(within(cancelledRow).getByText("cancelled · 1 deleted")).toBeInTheDocument();
+    expect(within(cancelledRow).queryByText(/3 skipped/i)).not.toBeInTheDocument();
+    expect(within(cancelledRow).queryByText(/synthetic_cancelled/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(
       screen.getByText("Job logs contain IDs and counts, not message content."),
