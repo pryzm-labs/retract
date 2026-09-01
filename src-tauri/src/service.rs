@@ -1096,6 +1096,8 @@ mod tests {
     use crate::{demo_gateway::DemoGateway, secure_store::SecureJobStore};
     use cleaner_domain::{ContentKind, MessageSnapshot, PlanOperation};
 
+    const TERMINAL_JOB_TIMEOUT: Duration = Duration::from_secs(10);
+
     async fn prepared_broad_restart_plan(
         service: &Arc<CleanerService>,
         operation: PlanOperation,
@@ -1144,19 +1146,27 @@ mod tests {
     }
 
     async fn wait_for_terminal_job(service: &CleanerService, job_id: Uuid) -> JobRecord {
-        for _ in 0..100 {
-            let job = service
-                .jobs()
-                .await
-                .into_iter()
-                .find(|candidate| candidate.id == job_id)
-                .unwrap();
-            if job.status.is_terminal() {
-                return job;
+        tokio::time::timeout(TERMINAL_JOB_TIMEOUT, async {
+            loop {
+                let job = service
+                    .jobs()
+                    .await
+                    .into_iter()
+                    .find(|candidate| candidate.id == job_id)
+                    .unwrap();
+                if job.status.is_terminal() {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("job {job_id} did not become terminal");
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "job {job_id} did not become terminal within {} seconds",
+                TERMINAL_JOB_TIMEOUT.as_secs()
+            )
+        })
     }
 
     #[test]
@@ -1807,6 +1817,8 @@ mod tests {
     #[test]
     fn restart_resumes_own_message_job_from_frozen_ids() {
         tauri::async_runtime::block_on(async {
+            const NEW_OWN_MESSAGE_ID: i64 = 60_001;
+
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("jobs.enc");
             let key = [37; 32];
@@ -1825,6 +1837,7 @@ mod tests {
                 .cloned()
                 .unwrap();
             assert_eq!(plan.operation, PlanOperation::DeleteMyMessages);
+            gateway.append_messages(-1003, NEW_OWN_MESSAGE_ID, 1).await;
             let mut job = JobRecord::new(&plan);
             job.status = JobStatus::Running;
             let job_id = job.id;
@@ -1861,6 +1874,14 @@ mod tests {
                     .await
                     .unwrap()
                     .is_empty()
+            );
+            assert_eq!(
+                gateway
+                    .messages_by_ids(&[(-1003, NEW_OWN_MESSAGE_ID)])
+                    .await
+                    .unwrap()
+                    .len(),
+                1
             );
         });
     }
