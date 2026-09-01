@@ -58,75 +58,59 @@ describe("Telegram authentication gate", () => {
     vi.mocked(api.submitAuth).mockResolvedValue(undefined);
   });
 
-  it("maps every credential stage to its exact label and auth command", async () => {
-    for (const [stage, label, command] of authCases) {
-      const { onRefresh, unmount } = renderGate({ stage });
+  it.each(authCases)("maps %s to its exact label and auth command", async (stage, label, command) => {
+    const { onRefresh } = renderGate({ stage });
 
-      const input = screen.getByLabelText(label);
-      fireEvent.change(input, { target: { value: "synthetic-value" } });
-      fireEvent.submit(input.closest("form")!);
+    const input = screen.getByLabelText(label);
+    fireEvent.change(input, { target: { value: "synthetic-value" } });
+    fireEvent.submit(input.closest("form")!);
 
-      await waitFor(() => expect(api.submitAuth).toHaveBeenCalledWith(command, "synthetic-value"));
-      expect(api.submitAuth).toHaveBeenCalledTimes(1);
-      expect(onRefresh).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(api.submitAuth).mock.invocationCallOrder[0])
-        .toBeLessThan(onRefresh.mock.invocationCallOrder[0]);
-
-      unmount();
-      vi.clearAllMocks();
-    }
+    await waitFor(() => expect(api.submitAuth).toHaveBeenCalledWith(command, "synthetic-value"));
+    expect(api.submitAuth).toHaveBeenCalledTimes(1);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.submitAuth).mock.invocationCallOrder[0])
+      .toBeLessThan(onRefresh.mock.invocationCallOrder[0]);
   });
 
-  it("clears secret fields and shows normalized errors after rejected submissions", async () => {
-    for (const [stage, label] of secretCases) {
-      vi.mocked(api.submitAuth).mockRejectedValueOnce(new Error("Synthetic auth rejection"));
-      const { onRefresh, unmount } = renderGate({ stage });
-      const input = screen.getByLabelText(label);
+  it.each(secretCases)("clears the secret field for %s after a rejected submission", async (stage, label) => {
+    vi.mocked(api.submitAuth).mockRejectedValueOnce(new Error("Synthetic auth rejection"));
+    const { onRefresh } = renderGate({ stage });
+    const input = screen.getByLabelText(label);
 
-      fireEvent.change(input, { target: { value: "synthetic-value" } });
-      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.change(input, { target: { value: "synthetic-value" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic auth rejection");
-      expect(input).toHaveValue("");
-      expect(onRefresh).not.toHaveBeenCalled();
-
-      unmount();
-      vi.clearAllMocks();
-    }
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic auth rejection");
+    expect(input).toHaveValue("");
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
-  it("retains non-secret fields for correction after rejected submissions", async () => {
-    for (const [stage, label] of nonSecretCases) {
-      vi.mocked(api.submitAuth).mockRejectedValueOnce(new Error("Synthetic auth rejection"));
-      const { onRefresh, unmount } = renderGate({ stage });
-      const input = screen.getByLabelText(label);
+  it.each(nonSecretCases)("retains the non-secret field for %s after a rejected submission", async (stage, label) => {
+    vi.mocked(api.submitAuth).mockRejectedValueOnce(new Error("Synthetic auth rejection"));
+    const { onRefresh } = renderGate({ stage });
+    const input = screen.getByLabelText(label);
 
-      fireEvent.change(input, { target: { value: "synthetic-value" } });
-      fireEvent.submit(input.closest("form")!);
+    fireEvent.change(input, { target: { value: "synthetic-value" } });
+    fireEvent.submit(input.closest("form")!);
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic auth rejection");
-      expect(input).toHaveValue("synthetic-value");
-      expect(onRefresh).not.toHaveBeenCalled();
-
-      unmount();
-      vi.clearAllMocks();
-    }
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic auth rejection");
+    expect(input).toHaveValue("synthetic-value");
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
-  it("offers QR authentication only from the phone stage", async () => {
-    const { onRefresh, unmount } = renderGate({ stage: "waiting_for_phone" });
+  it("requests QR authentication from the phone stage", async () => {
+    const { onRefresh } = renderGate({ stage: "waiting_for_phone" });
 
     fireEvent.click(screen.getByRole("button", { name: /Sign in with QR code/ }));
     await waitFor(() => expect(api.requestQrAuth).toHaveBeenCalledTimes(1));
     expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
 
-    unmount();
-    vi.clearAllMocks();
-    for (const stage of nonPhoneStages) {
-      const view = renderGate({ stage });
-      expect(screen.queryByRole("button", { name: /Sign in with QR code/ })).not.toBeInTheDocument();
-      view.unmount();
-    }
+  it.each(nonPhoneStages)("does not request QR authentication while %s", (stage) => {
+    renderGate({ stage });
+
+    expect(screen.queryByRole("button", { name: /Sign in with QR code/ })).not.toBeInTheDocument();
+    expect(api.requestQrAuth).not.toHaveBeenCalled();
   });
 
   it("renders a Telegram device-link QR image while waiting for another device", async () => {

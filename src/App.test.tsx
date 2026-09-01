@@ -1,9 +1,17 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
 import App from "./App";
 import { fixtureApi } from "./api.fixture";
 import type { AppSnapshot, ChatSummary, JobRecord, MessageSnapshot, SearchResponse } from "./types";
+
+function expectSelectionCount(count: number) {
+  const impact = screen.getByRole("complementary", { name: "Selection impact" });
+  const total = impact.querySelector<HTMLElement>(".selection-total");
+  expect(total).not.toBeNull();
+  expect(within(total!).getByText(count.toLocaleString())).toBeInTheDocument();
+  expect(within(total!).getByText(count === 1 ? "message selected" : "messages selected")).toBeInTheDocument();
+}
 
 describe("Retract desktop UI", () => {
   beforeEach(async () => {
@@ -196,14 +204,14 @@ describe("Retract desktop UI", () => {
     await screen.findByText("Search every chat");
     fireEvent.click(await screen.findByText("cedar_research_notes.pdf · 4.8 MB"));
 
-    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("2messages selected");
+    expectSelectionCount(2);
     expect(screen.getByText("cedar_research_notes.pdf · 4.8 MB").closest("article"))
       .toHaveClass("is-selected");
     expect(screen.getByText("Whiteboard with customer email list").closest("article"))
       .toHaveClass("is-selected");
 
     fireEvent.click(screen.getByText("Whiteboard with customer email list"));
-    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("0messages selected");
+    expectSelectionCount(0);
   });
 
   it("retains a selected text result when the Media filter hides it", async () => {
@@ -218,7 +226,7 @@ describe("Retract desktop UI", () => {
     expect(screen.getByRole("button", { name: /Review deletion/ })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
-    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("0messages selected");
+    expectSelectionCount(0);
     expect(screen.queryByText(/selection outside this result view/)).not.toBeInTheDocument();
   });
 
@@ -308,6 +316,7 @@ describe("Retract desktop UI", () => {
       { chatId: -1001, messageId: 11 },
       { chatId: 101, messageId: 2 }
     ]);
+    expect(prepareSelection).toHaveBeenCalledTimes(1);
     expect(authorizePlan).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
 
@@ -316,8 +325,9 @@ describe("Retract desktop UI", () => {
 
     await waitFor(() => expect(authorizePlan).toHaveBeenCalledTimes(1));
     const reviewedPlan = await vi.mocked(prepareSelection).mock.results[0].value;
-    expect(authorizePlan).toHaveBeenCalledWith(reviewedPlan);
+    expect(authorizePlan.mock.calls[0][0]).toBe(reviewedPlan);
     expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][0]).toBe(reviewedPlan);
     expect(execute).toHaveBeenCalledWith(reviewedPlan, true, null);
     expect(vi.mocked(api.authorizePlan).mock.invocationCallOrder[0])
       .toBeLessThan(vi.mocked(api.execute).mock.invocationCallOrder[0]);
