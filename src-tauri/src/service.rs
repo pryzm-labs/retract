@@ -1094,7 +1094,70 @@ fn push_error_once(job: &mut JobRecord, code: &str) {
 mod tests {
     use super::*;
     use crate::{demo_gateway::DemoGateway, secure_store::SecureJobStore};
-    use cleaner_domain::PlanOperation;
+    use cleaner_domain::{ContentKind, MessageSnapshot, PlanOperation};
+
+    async fn prepared_broad_restart_plan(
+        service: &Arc<CleanerService>,
+        operation: PlanOperation,
+    ) -> DeletionPlan {
+        let view = match operation {
+            PlanOperation::ClearHistory => service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: -1001,
+                    operation,
+                })
+                .await
+                .unwrap(),
+            PlanOperation::ClearHistoryAndLeave => service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: -1002,
+                    operation: PlanOperation::LeaveChat,
+                })
+                .await
+                .unwrap(),
+            PlanOperation::RemoveChatForSelf => service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: 304,
+                    operation,
+                })
+                .await
+                .unwrap(),
+            PlanOperation::DeleteBySender => service
+                .prepare_sender_action(PrepareSenderActionRequest {
+                    chat_id: -1001,
+                    sender_id: 714,
+                })
+                .await
+                .unwrap(),
+            PlanOperation::DeleteGroup => service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: -1001,
+                    operation,
+                })
+                .await
+                .unwrap(),
+            _ => panic!("unsupported broad restart operation: {operation:?}"),
+        };
+        let plan = service.plans.read().await.get(&view.id).cloned().unwrap();
+        assert_eq!(plan.operation, operation);
+        plan
+    }
+
+    async fn wait_for_terminal_job(service: &CleanerService, job_id: Uuid) -> JobRecord {
+        for _ in 0..100 {
+            let job = service
+                .jobs()
+                .await
+                .into_iter()
+                .find(|candidate| candidate.id == job_id)
+                .unwrap();
+            if job.status.is_terminal() {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("job {job_id} did not become terminal");
+    }
 
     #[test]
     fn extracts_bounded_telegram_retry_delays() {
@@ -1112,6 +1175,97 @@ mod tests {
             telegram_retry_after(&AppError::Gateway("CHAT_ADMIN_REQUIRED".into())),
             None
         );
+    }
+
+    #[test]
+    fn persisted_cleanup_state_contains_recovery_metadata_but_no_message_content() {
+        const PRIVATE_PREVIEW: &str = "SYNTHETIC_CONTENT_MUST_NOT_PERSIST";
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let key = [34; 32];
+        let plan = DeletionPlan::selected_messages(vec![MessageSnapshot {
+            chat_id: -1001,
+            message_id: 90_001,
+            sender_id: 714,
+            sender_name: "Synthetic Sender".into(),
+            sent_at: Utc::now(),
+            is_outgoing: false,
+            content_kind: ContentKind::File,
+            preview: PRIVATE_PREVIEW.into(),
+            privacy_findings: Vec::new(),
+            album_id: Some(81_001),
+            is_pinned: false,
+            deletion_reach: DeletionReach::Everyone,
+        }])
+        .unwrap();
+        let mut job = JobRecord::new(&plan);
+        job.status = JobStatus::Partial;
+        job.deleted = 1;
+        job.next_batch = 1;
+        job.retry_after_seconds = Some(17);
+        job.error_codes = vec!["synthetic_retry_exhausted".into()];
+        job.updated_at = job.created_at + chrono::Duration::seconds(5);
+
+        SecureJobStore::with_test_key(path.clone(), key)
+            .save(&PersistedState {
+                plans: vec![plan.clone()],
+                jobs: vec![job.clone()],
+            })
+            .unwrap();
+        let reloaded = SecureJobStore::with_test_key(path, key).load().unwrap();
+
+        assert_eq!(reloaded.plans.len(), 1);
+        assert_eq!(reloaded.jobs.len(), 1);
+        let reloaded_plan = &reloaded.plans[0];
+        let reloaded_job = &reloaded.jobs[0];
+        assert_eq!(reloaded_plan.id, plan.id);
+        assert_eq!(reloaded_plan.fingerprint, plan.fingerprint);
+        assert_eq!(reloaded_plan.operation, PlanOperation::SelectedMessages);
+        assert_eq!(reloaded_plan.items.len(), 1);
+        assert_eq!(reloaded_plan.items[0].chat_id, -1001);
+        assert_eq!(reloaded_plan.items[0].message_id, 90_001);
+        assert_eq!(
+            reloaded_plan.items[0].expected_reach,
+            DeletionReach::Everyone
+        );
+        assert_eq!(reloaded_plan.summary.selected, 1);
+        assert_eq!(reloaded_plan.summary.delete_for_everyone, 1);
+        assert_eq!(reloaded_plan.created_at, plan.created_at);
+        assert_eq!(reloaded_job.id, job.id);
+        assert_eq!(reloaded_job.plan_id, plan.id);
+        assert_eq!(reloaded_job.operation, PlanOperation::SelectedMessages);
+        assert_eq!(reloaded_job.target_chat_ids, vec![-1001]);
+        assert_eq!(reloaded_job.status, JobStatus::Partial);
+        assert_eq!(
+            (
+                reloaded_job.total,
+                reloaded_job.deleted,
+                reloaded_job.skipped,
+                reloaded_job.failed,
+                reloaded_job.next_batch,
+            ),
+            (1, 1, 0, 0, 1)
+        );
+        assert_eq!(reloaded_job.retry_after_seconds, Some(17));
+        assert_eq!(reloaded_job.error_codes, vec!["synthetic_retry_exhausted"]);
+        assert_eq!(reloaded_job.created_at, job.created_at);
+        assert_eq!(reloaded_job.updated_at, job.updated_at);
+
+        let serialized = serde_json::to_string(&reloaded).unwrap();
+        assert!(!serialized.contains(PRIVATE_PREVIEW));
+        for forbidden in [
+            "preview",
+            "text",
+            "caption",
+            "fileName",
+            "attachment",
+            "apiHash",
+            "password",
+            "authCode",
+        ] {
+            assert!(!serialized.contains(&format!("\"{forbidden}\"")));
+        }
     }
 
     #[test]
@@ -1504,16 +1658,116 @@ mod tests {
     }
 
     #[test]
-    fn restart_does_not_replay_a_broad_destructive_operation() {
+    fn restart_requires_new_review_for_every_non_idempotent_broad_operation() {
+        tauri::async_runtime::block_on(async {
+            for operation in [
+                PlanOperation::ClearHistory,
+                PlanOperation::ClearHistoryAndLeave,
+                PlanOperation::RemoveChatForSelf,
+                PlanOperation::DeleteBySender,
+                PlanOperation::DeleteGroup,
+            ] {
+                for (persisted_status, deleted, expected_status) in [
+                    (JobStatus::Queued, 0, JobStatus::Failed),
+                    (JobStatus::Running, 1, JobStatus::Partial),
+                ] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let path = directory.path().join("jobs.enc");
+                    let key = [35; 32];
+                    let gateway = Arc::new(DemoGateway::new());
+                    let preparation = CleanerService::new(
+                        gateway.clone(),
+                        SecureJobStore::with_test_key(path.clone(), key),
+                    )
+                    .unwrap();
+                    let plan = prepared_broad_restart_plan(&preparation, operation).await;
+                    let mut job = JobRecord::new(&plan);
+                    job.status = persisted_status;
+                    job.total = 1;
+                    job.deleted = deleted;
+                    let job_id = job.id;
+                    drop(preparation);
+                    SecureJobStore::with_test_key(path.clone(), key)
+                        .save(&PersistedState {
+                            plans: vec![plan],
+                            jobs: vec![job],
+                        })
+                        .unwrap();
+
+                    gateway.clear_operation_log().await;
+                    let service = CleanerService::new(
+                        gateway.clone(),
+                        SecureJobStore::with_test_key(path.clone(), key),
+                    )
+                    .unwrap();
+                    service.resume_incomplete().await;
+
+                    let interrupted = service
+                        .jobs()
+                        .await
+                        .into_iter()
+                        .find(|candidate| candidate.id == job_id)
+                        .unwrap();
+                    assert_eq!(
+                        interrupted.status, expected_status,
+                        "unexpected restart status for {operation:?} from {persisted_status:?}"
+                    );
+                    assert_eq!(interrupted.deleted, deleted);
+                    assert_eq!(interrupted.retry_after_seconds, None);
+                    assert_eq!(
+                        interrupted.error_codes,
+                        vec!["restart_requires_new_review"],
+                        "unexpected restart diagnostic for {operation:?} from {persisted_status:?}"
+                    );
+                    assert!(
+                        gateway.operation_log().await.is_empty(),
+                        "restart replayed {operation:?} from {persisted_status:?}"
+                    );
+
+                    let reloaded = SecureJobStore::with_test_key(path, key).load().unwrap();
+                    assert_eq!(reloaded.jobs.len(), 1);
+                    assert_eq!(reloaded.jobs[0].status, expected_status);
+                    assert_eq!(
+                        reloaded.jobs[0].error_codes,
+                        vec!["restart_requires_new_review"]
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn restart_resumes_selected_message_job_from_frozen_ids() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("jobs.enc");
-            let key = [25; 32];
+            let key = [36; 32];
             let gateway = Arc::new(DemoGateway::new());
-            let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
-            let plan = DeletionPlan::chat_wide(PlanOperation::ClearHistory, &chat).unwrap();
+            let preparation = CleanerService::new(
+                gateway.clone(),
+                SecureJobStore::with_test_key(path.clone(), key),
+            )
+            .unwrap();
+            let view = preparation
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: 101,
+                        message_id: 1,
+                    }],
+                })
+                .await
+                .unwrap();
+            let plan = preparation
+                .plans
+                .read()
+                .await
+                .get(&view.id)
+                .cloned()
+                .unwrap();
             let mut job = JobRecord::new(&plan);
             job.status = JobStatus::Running;
+            let job_id = job.id;
+            drop(preparation);
             SecureJobStore::with_test_key(path.clone(), key)
                 .save(&PersistedState {
                     plans: vec![plan],
@@ -1521,37 +1775,60 @@ mod tests {
                 })
                 .unwrap();
 
+            gateway.clear_operation_log().await;
             let service =
                 CleanerService::new(gateway.clone(), SecureJobStore::with_test_key(path, key))
                     .unwrap();
             service.resume_incomplete().await;
 
-            let interrupted = service.jobs().await.into_iter().next().unwrap();
-            assert_eq!(interrupted.status, JobStatus::Failed);
+            let finished = wait_for_terminal_job(&service, job_id).await;
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.deleted, 1);
             assert!(
-                interrupted
+                finished
                     .error_codes
                     .iter()
-                    .any(|code| code == "restart_requires_new_review")
+                    .any(|code| code == "resumed_after_restart")
             );
             assert_eq!(
-                gateway.messages_by_ids(&[(-1001, 11)]).await.unwrap().len(),
-                1
+                gateway.operation_log().await,
+                vec!["delete_messages_for_everyone:101:1"]
+            );
+            assert!(
+                gateway
+                    .messages_by_ids(&[(101, 1)])
+                    .await
+                    .unwrap()
+                    .is_empty()
             );
         });
     }
 
     #[test]
-    fn restart_does_not_replay_group_deletion() {
+    fn restart_resumes_own_message_job_from_frozen_ids() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("jobs.enc");
-            let key = [26; 32];
+            let key = [37; 32];
             let gateway = Arc::new(DemoGateway::new());
-            let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
-            let plan = DeletionPlan::chat_wide(PlanOperation::DeleteGroup, &chat).unwrap();
+            let preparation = CleanerService::new(
+                gateway.clone(),
+                SecureJobStore::with_test_key(path.clone(), key),
+            )
+            .unwrap();
+            let view = preparation.prepare_own_messages(-1003).await.unwrap();
+            let plan = preparation
+                .plans
+                .read()
+                .await
+                .get(&view.id)
+                .cloned()
+                .unwrap();
+            assert_eq!(plan.operation, PlanOperation::DeleteMyMessages);
             let mut job = JobRecord::new(&plan);
             job.status = JobStatus::Running;
+            let job_id = job.id;
+            drop(preparation);
             SecureJobStore::with_test_key(path.clone(), key)
                 .save(&PersistedState {
                     plans: vec![plan],
@@ -1559,20 +1836,32 @@ mod tests {
                 })
                 .unwrap();
 
+            gateway.clear_operation_log().await;
             let service =
                 CleanerService::new(gateway.clone(), SecureJobStore::with_test_key(path, key))
                     .unwrap();
             service.resume_incomplete().await;
 
-            let interrupted = service.jobs().await.into_iter().next().unwrap();
-            assert_eq!(interrupted.status, JobStatus::Failed);
+            let finished = wait_for_terminal_job(&service, job_id).await;
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.deleted, 1);
             assert!(
-                interrupted
+                finished
                     .error_codes
                     .iter()
-                    .any(|code| code == "restart_requires_new_review")
+                    .any(|code| code == "resumed_after_restart")
             );
-            assert!(gateway.chat_by_id(-1001).await.unwrap().is_some());
+            assert_eq!(
+                gateway.operation_log().await,
+                vec!["delete_messages_for_everyone:-1003:31"]
+            );
+            assert!(
+                gateway
+                    .messages_by_ids(&[(-1003, 31)])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         });
     }
 

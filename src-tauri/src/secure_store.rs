@@ -612,6 +612,29 @@ mod tests {
     }
 
     #[test]
+    fn loads_legacy_unbound_job_store_and_marks_it_for_safe_migration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let key = [0x2a; KEY_LENGTH];
+        let plaintext = serde_json::to_vec(&PersistedState::default()).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let nonce_bytes = [0x11; NONCE_LENGTH];
+        let nonce = AesNonce::from(nonce_bytes);
+        let ciphertext = cipher.encrypt(&nonce, plaintext.as_ref()).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(LEGACY_UNBOUND_MAGIC);
+        bytes.extend_from_slice(&nonce_bytes);
+        bytes.extend_from_slice(&ciphertext);
+        fs::write(&path, bytes).unwrap();
+
+        let store = SecureJobStore::with_test_key_and_profile(path, key, b"telegram-production");
+        let state = store.load().unwrap();
+        assert!(state.plans.is_empty());
+        assert!(state.jobs.is_empty());
+        assert!(store.loaded_legacy_unbound());
+    }
+
+    #[test]
     fn round_trip_and_tamper_detection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.enc");
