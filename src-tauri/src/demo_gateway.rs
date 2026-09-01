@@ -44,6 +44,8 @@ pub struct DemoGateway {
     operation_log: Mutex<Vec<String>>,
     #[cfg(test)]
     delete_batch_sizes: Mutex<Vec<usize>>,
+    #[cfg(test)]
+    delete_calls: Mutex<Vec<(i64, Vec<i64>)>>,
 }
 
 impl DemoGateway {
@@ -65,6 +67,8 @@ impl DemoGateway {
             operation_log: Mutex::new(Vec::new()),
             #[cfg(test)]
             delete_batch_sizes: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            delete_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -109,6 +113,11 @@ impl DemoGateway {
     }
 
     #[cfg(test)]
+    pub(crate) async fn delete_calls(&self) -> Vec<(i64, Vec<i64>)> {
+        self.delete_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) async fn set_message_reach(
         &self,
         chat_id: i64,
@@ -130,12 +139,21 @@ impl DemoGateway {
     pub(crate) async fn append_messages(&self, chat_id: i64, first_message_id: i64, count: usize) {
         let mut data = self.data.write().await;
         assert!(data.chats.iter().any(|chat| chat.id == chat_id));
-        for offset in 0..count {
+        let message_ids = (0..count)
+            .map(|offset| {
+                first_message_id
+                    .checked_add(i64::try_from(offset).expect("synthetic message count fits i64"))
+                    .expect("synthetic message ID does not overflow")
+            })
+            .collect::<Vec<_>>();
+        assert!(message_ids.iter().all(|message_id| {
+            *message_id > 0
+                && data.messages.iter().all(|stored| {
+                    stored.snapshot.chat_id != chat_id || stored.snapshot.message_id != *message_id
+                })
+        }));
+        for (offset, message_id) in message_ids.into_iter().enumerate() {
             let offset = i64::try_from(offset).expect("synthetic message count fits i64");
-            let message_id = first_message_id
-                .checked_add(offset)
-                .expect("synthetic message ID does not overflow");
-            assert!(message_id > 0);
             data.messages.push(StoredMessage {
                 snapshot: MessageSnapshot {
                     chat_id,
@@ -364,6 +382,10 @@ impl TelegramGateway for DemoGateway {
             self.record(format!("delete_messages_for_everyone:{chat_id}:{ids}"))
                 .await;
             self.delete_batch_sizes.lock().await.push(message_ids.len());
+            self.delete_calls
+                .lock()
+                .await
+                .push((chat_id, message_ids.to_vec()));
         }
         if message_ids.is_empty() || message_ids.len() > 100 {
             return Err(AppError::Gateway("invalid deletion batch".into()));

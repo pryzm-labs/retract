@@ -1393,17 +1393,18 @@ mod tests {
                 .into_iter()
                 .find(|candidate| candidate.id == job.id)
                 .unwrap();
+            let operations = gateway.operation_log().await;
+            assert!(
+                operations.is_empty(),
+                "unexpected destructive operations: {operations:?}"
+            );
             assert_eq!(finished.status, JobStatus::Completed);
             assert_eq!(finished.deleted, 0);
             assert_eq!(finished.skipped, 1);
+            assert_eq!(finished.failed, 0);
+            assert!(finished.error_codes.is_empty());
+            assert!(finished.retry_after_seconds.is_none());
             assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
-            assert!(
-                gateway
-                    .operation_log()
-                    .await
-                    .iter()
-                    .all(|entry| { !entry.starts_with("delete_messages_for_everyone:101:") })
-            );
         });
     }
 
@@ -1473,7 +1474,19 @@ mod tests {
                 .unwrap();
             assert_eq!(finished.status, JobStatus::Completed);
             assert_eq!(finished.deleted, MESSAGE_COUNT);
+            assert_eq!(finished.skipped, 0);
+            assert_eq!(finished.failed, 0);
+            assert!(finished.error_codes.is_empty());
+            assert!(finished.retry_after_seconds.is_none());
             assert_eq!(gateway.delete_batch_sizes().await, vec![100, 100, 5]);
+            assert_eq!(
+                gateway.delete_calls().await,
+                vec![
+                    (CHAT_ID, (50_000..=50_099).collect::<Vec<_>>()),
+                    (CHAT_ID, (50_100..=50_199).collect::<Vec<_>>()),
+                    (CHAT_ID, (50_200..=50_204).collect::<Vec<_>>()),
+                ]
+            );
 
             let expected_operations = expected_refs
                 .chunks(100)
@@ -1727,6 +1740,9 @@ mod tests {
             assert_eq!(finished.status, JobStatus::Completed);
             assert_eq!(finished.deleted, 1);
             assert_eq!(finished.skipped, 2);
+            assert_eq!(finished.failed, 0);
+            assert!(finished.error_codes.is_empty());
+            assert!(finished.retry_after_seconds.is_none());
             assert!(gateway.chat_by_id(-1003).await.unwrap().is_none());
             assert!(
                 gateway
