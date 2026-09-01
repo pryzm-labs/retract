@@ -32,6 +32,119 @@ type Equal<Left, Right> =
     : false;
 type Assert<Condition extends true> = Condition;
 
+type NormalizeDto<Value> =
+  Value extends readonly (infer Item)[]
+    ? NormalizeDto<Item>[]
+    : Value extends object
+      ? { -readonly [Key in keyof Value]: NormalizeDto<Value[Key]> }
+      : Value;
+
+type OptionalKeys<Value> = {
+  [Key in keyof Value]-?: object extends Pick<Value, Key> ? Key : never;
+}[keyof Value];
+
+type RequiredUndefinedKeys<Value> = {
+  [Key in keyof Value]-?: object extends Pick<Value, Key>
+    ? never
+    : undefined extends Value[Key]
+      ? Key
+      : never;
+}[keyof Value];
+
+type NullableFields<Value> = {
+  [Key in keyof Value as null extends Value[Key] ? Key : never]: Value[Key];
+};
+
+type WireSearchRequest = {
+  readonly query: string;
+  readonly chatIds: readonly number[];
+  readonly chatKinds: readonly ChatKind[];
+  readonly contentKinds: readonly ContentKind[];
+  readonly direction: MessageDirection;
+  readonly minDate?: string | null;
+  readonly maxDate?: string | null;
+  readonly excludePinned: boolean;
+  readonly privacyScan?: boolean;
+  readonly limit: number;
+};
+
+type WireCatalogProgress = {
+  readonly phase: "idle" | "discovering" | "loading" | "ready";
+  readonly total: number;
+  readonly processed: number;
+};
+
+type WireAuthSnapshot = {
+  readonly stage: AuthStage;
+  readonly hint?: string | null;
+  readonly qrLink?: string | null;
+};
+
+type WireMessageSnapshot = {
+  readonly chatId: number;
+  readonly messageId: number;
+  readonly senderId: number;
+  readonly senderName: string;
+  readonly sentAt: string;
+  readonly isOutgoing: boolean;
+  readonly contentKind: ContentKind;
+  readonly preview: string;
+  readonly privacyFindings: readonly SensitiveDataKind[];
+  readonly albumId?: number | null;
+  readonly isPinned: boolean;
+  readonly deletionReach: DeletionReach;
+};
+
+type WireSearchResponse = {
+  readonly messages: readonly WireMessageSnapshot[];
+  readonly returned: number;
+  readonly truncated: boolean;
+};
+
+type WirePlanSummary = {
+  readonly selected: number;
+  readonly deleteForEveryone: number;
+  readonly selfOnly: number;
+  readonly cannotDelete: number;
+};
+
+type WirePlanView = {
+  readonly id: string;
+  readonly operation: PlanOperation;
+  readonly chatTitle?: string | null;
+  readonly targetSenderName?: string | null;
+  readonly summary: WirePlanSummary;
+  readonly confirmationTier: ConfirmationTier;
+  readonly fingerprint: string;
+  readonly createdAt: string;
+};
+
+type WireJobRecord = {
+  readonly id: string;
+  readonly planId: string;
+  readonly operation: PlanOperation;
+  readonly targetChatIds: readonly number[];
+  readonly status: JobStatus;
+  readonly total: number;
+  readonly deleted: number;
+  readonly skipped: number;
+  readonly failed: number;
+  readonly nextBatch: number;
+  readonly retryAfterSeconds?: number | null;
+  readonly errorCodes: readonly string[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+type WireContract = {
+  readonly searchRequest: WireSearchRequest;
+  readonly catalogProgress: WireCatalogProgress;
+  readonly authSnapshot: WireAuthSnapshot;
+  readonly searchResponse: WireSearchResponse;
+  readonly planView: WirePlanView;
+  readonly jobRecord: WireJobRecord;
+};
+
 const typedContract = {
   searchRequest: {
     query: "passport apartment",
@@ -102,14 +215,91 @@ const typedContract = {
     createdAt: "2026-08-15T18:01:01Z",
     updatedAt: "2026-08-15T18:01:02Z",
   },
-} satisfies {
-  searchRequest: SearchRequest;
-  catalogProgress: CatalogProgress;
-  authSnapshot: AuthSnapshot;
-  searchResponse: SearchResponse;
-  planView: PlanView;
-  jobRecord: JobRecord;
-};
+} satisfies WireContract;
+
+type _SearchRequestDto = Assert<Equal<NormalizeDto<WireSearchRequest>, SearchRequest>>;
+type _CatalogProgressDto = Assert<Equal<NormalizeDto<WireCatalogProgress>, CatalogProgress>>;
+type _AuthSnapshotDto = Assert<Equal<NormalizeDto<WireAuthSnapshot>, AuthSnapshot>>;
+type _SearchResponseDto = Assert<Equal<NormalizeDto<WireSearchResponse>, SearchResponse>>;
+type _MessageSnapshotDto = Assert<Equal<NormalizeDto<WireMessageSnapshot>, MessageSnapshot>>;
+type _PlanViewDto = Assert<Equal<NormalizeDto<WirePlanView>, PlanView>>;
+type _PlanSummaryDto = Assert<Equal<NormalizeDto<WirePlanSummary>, PlanSummary>>;
+type _JobRecordDto = Assert<Equal<NormalizeDto<WireJobRecord>, JobRecord>>;
+
+type _SearchRequestOptionalKeys = Assert<
+  Equal<OptionalKeys<WireSearchRequest>, OptionalKeys<SearchRequest>>
+>;
+type _CatalogProgressOptionalKeys = Assert<
+  Equal<OptionalKeys<WireCatalogProgress>, OptionalKeys<CatalogProgress>>
+>;
+type _AuthSnapshotOptionalKeys = Assert<
+  Equal<OptionalKeys<WireAuthSnapshot>, OptionalKeys<AuthSnapshot>>
+>;
+type _SearchResponseOptionalKeys = Assert<
+  Equal<OptionalKeys<WireSearchResponse>, OptionalKeys<SearchResponse>>
+>;
+type _MessageSnapshotOptionalKeys = Assert<
+  Equal<OptionalKeys<WireMessageSnapshot>, OptionalKeys<MessageSnapshot>>
+>;
+type _PlanViewOptionalKeys = Assert<
+  Equal<OptionalKeys<WirePlanView>, OptionalKeys<PlanView>>
+>;
+type _PlanSummaryOptionalKeys = Assert<
+  Equal<OptionalKeys<WirePlanSummary>, OptionalKeys<PlanSummary>>
+>;
+type _JobRecordOptionalKeys = Assert<
+  Equal<OptionalKeys<WireJobRecord>, OptionalKeys<JobRecord>>
+>;
+
+type _SearchRequestRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireSearchRequest>, RequiredUndefinedKeys<SearchRequest>>
+>;
+type _CatalogProgressRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireCatalogProgress>, RequiredUndefinedKeys<CatalogProgress>>
+>;
+type _AuthSnapshotRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireAuthSnapshot>, RequiredUndefinedKeys<AuthSnapshot>>
+>;
+type _SearchResponseRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireSearchResponse>, RequiredUndefinedKeys<SearchResponse>>
+>;
+type _MessageSnapshotRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireMessageSnapshot>, RequiredUndefinedKeys<MessageSnapshot>>
+>;
+type _PlanViewRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WirePlanView>, RequiredUndefinedKeys<PlanView>>
+>;
+type _PlanSummaryRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WirePlanSummary>, RequiredUndefinedKeys<PlanSummary>>
+>;
+type _JobRecordRequiredUndefined = Assert<
+  Equal<RequiredUndefinedKeys<WireJobRecord>, RequiredUndefinedKeys<JobRecord>>
+>;
+
+type _SearchRequestNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireSearchRequest>>, NullableFields<SearchRequest>>
+>;
+type _CatalogProgressNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireCatalogProgress>>, NullableFields<CatalogProgress>>
+>;
+type _AuthSnapshotNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireAuthSnapshot>>, NullableFields<AuthSnapshot>>
+>;
+type _SearchResponseNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireSearchResponse>>, NullableFields<SearchResponse>>
+>;
+type _MessageSnapshotNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireMessageSnapshot>>, NullableFields<MessageSnapshot>>
+>;
+type _PlanViewNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WirePlanView>>, NullableFields<PlanView>>
+>;
+type _PlanSummaryNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WirePlanSummary>>, NullableFields<PlanSummary>>
+>;
+type _JobRecordNullableFields = Assert<
+  Equal<NormalizeDto<NullableFields<WireJobRecord>>, NullableFields<JobRecord>>
+>;
 
 type _SearchRequestKeys = Assert<Equal<keyof typeof typedContract.searchRequest, keyof SearchRequest>>;
 type _CatalogProgressKeys = Assert<Equal<keyof typeof typedContract.catalogProgress, keyof CatalogProgress>>;
