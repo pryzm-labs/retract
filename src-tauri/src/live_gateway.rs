@@ -2048,6 +2048,73 @@ mod tests {
         })
     }
 
+    fn visible_chat(chat_id: i64, title: &str, chat_type: Value, last_message: Value) -> Value {
+        json!({
+            "@type": "chat",
+            "id": chat_id,
+            "title": title,
+            "positions": [{
+                "list": { "@type": "chatListMain" },
+                "order": "100"
+            }],
+            "type": chat_type,
+            "can_be_deleted_for_all_users": false,
+            "can_be_deleted_only_for_self": true,
+            "last_message": last_message
+        })
+    }
+
+    fn own_sender_search_request(chat_id: i64) -> Value {
+        json!({
+            "@type": "searchChatMessages",
+            "chat_id": chat_id,
+            "topic_id": null,
+            "query": "",
+            "sender_id": { "@type": "messageSenderUser", "user_id": 42 },
+            "from_message_id": 0,
+            "offset": 0,
+            "limit": 1,
+            "filter": null
+        })
+    }
+
+    async fn map_conversation_case(
+        gateway: &LiveGateway,
+        script: &ScriptedTdJson,
+        chat: Value,
+        detail: Option<(Value, Value)>,
+        history: Option<Value>,
+        own_messages: Option<Value>,
+    ) -> ConversationState {
+        let chat_id = value_i64(chat.get("id")).unwrap();
+        script.respond(json!({ "@type": "getChat", "chat_id": chat_id }), chat);
+        if let Some((request, response)) = detail {
+            script.respond(request, response);
+        }
+        if let Some(response) = history {
+            script.respond(
+                json!({
+                    "@type": "getChatHistory",
+                    "chat_id": chat_id,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 1,
+                    "only_local": false
+                }),
+                response,
+            );
+        }
+        if let Some(response) = own_messages {
+            script.respond(own_sender_search_request(chat_id), response);
+        }
+        gateway
+            .chat_by_id(chat_id)
+            .await
+            .unwrap()
+            .expect("synthetic chat is visible")
+            .conversation_state
+    }
+
     fn search_request(query: &str) -> SearchRequest {
         SearchRequest {
             query: query.into(),
@@ -2075,6 +2142,28 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("scripted auth did not reach {expected:?}"))
+    }
+
+    async fn wait_for_auth_snapshot(
+        gateway: &LiveGateway,
+        expected_stage: AuthStage,
+        expected_hint: &str,
+    ) -> AuthSnapshot {
+        tokio::time::timeout(SCRIPTED_WAIT, async {
+            loop {
+                let snapshot = gateway.auth();
+                if snapshot.stage == expected_stage
+                    && snapshot.hint.as_deref() == Some(expected_hint)
+                {
+                    return snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("scripted auth did not reach {expected_stage:?} with {expected_hint:?}")
+        })
     }
 
     async fn wait_for_dirty_chat(gateway: &LiveGateway, chat_id: i64) {
@@ -2150,6 +2239,289 @@ mod tests {
                     .filter(|trace| trace.kind == "getChat")
                     .count(),
                 9
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_drives_every_production_conversation_state_branch() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            let direct = |id| json!({ "@type": "chatTypePrivate", "user_id": id + 5000 });
+            let outgoing = json!({ "@type": "message", "id": 1, "is_outgoing": true });
+            let incoming = json!({ "@type": "message", "id": 2, "is_outgoing": false });
+
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(1201, "Synthetic active", direct(1201), outgoing.clone()),
+                    None,
+                    None,
+                    None,
+                )
+                .await,
+                ConversationState::Active
+            );
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        1202,
+                        "Synthetic secret awaiting",
+                        json!({ "@type": "chatTypeSecret", "secret_chat_id": 4202 }),
+                        incoming.clone(),
+                    ),
+                    None,
+                    None,
+                    None,
+                )
+                .await,
+                ConversationState::AwaitingReply
+            );
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(1203, "Synthetic empty", direct(1203), Value::Null),
+                    None,
+                    Some(json!({ "@type": "messages", "messages": [] })),
+                    None,
+                )
+                .await,
+                ConversationState::Empty
+            );
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(1204, "Synthetic unknown history", direct(1204), Value::Null),
+                    None,
+                    Some(json!({
+                        "@type": "error",
+                        "code": 500,
+                        "message": "SYNTHETIC_HISTORY_UNAVAILABLE"
+                    })),
+                    None,
+                )
+                .await,
+                ConversationState::Unknown
+            );
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(1205, "Synthetic history active", direct(1205), Value::Null),
+                    None,
+                    Some(json!({
+                        "@type": "messages",
+                        "messages": [null, outgoing.clone()]
+                    })),
+                    None,
+                )
+                .await,
+                ConversationState::Active
+            );
+
+            gateway.own_user_id.store(0, Ordering::Release);
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        1206,
+                        "Synthetic account unknown",
+                        direct(1206),
+                        incoming.clone()
+                    ),
+                    None,
+                    None,
+                    None,
+                )
+                .await,
+                ConversationState::AwaitingReply
+            );
+            gateway.own_user_id.store(42, Ordering::Release);
+
+            for (chat_id, response) in [
+                (
+                    1207,
+                    json!({ "@type": "foundChatMessages", "total_count": 1, "messages": [] }),
+                ),
+                (
+                    1208,
+                    json!({
+                        "@type": "foundChatMessages",
+                        "total_count": 0,
+                        "messages": [{ "@type": "message", "id": 3 }]
+                    }),
+                ),
+            ] {
+                assert_eq!(
+                    map_conversation_case(
+                        &gateway,
+                        &script,
+                        visible_chat(
+                            chat_id,
+                            "Synthetic prior reply",
+                            direct(chat_id),
+                            incoming.clone(),
+                        ),
+                        None,
+                        None,
+                        Some(response),
+                    )
+                    .await,
+                    ConversationState::AwaitingReply
+                );
+            }
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        1209,
+                        "Synthetic search unavailable",
+                        direct(1209),
+                        incoming.clone()
+                    ),
+                    None,
+                    None,
+                    Some(json!({
+                        "@type": "error",
+                        "code": 500,
+                        "message": "SYNTHETIC_SEARCH_UNAVAILABLE"
+                    })),
+                )
+                .await,
+                ConversationState::AwaitingReply
+            );
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        1210,
+                        "Synthetic never replied",
+                        direct(1210),
+                        incoming.clone()
+                    ),
+                    None,
+                    None,
+                    Some(json!({
+                        "@type": "foundChatMessages",
+                        "total_count": 0,
+                        "messages": []
+                    })),
+                )
+                .await,
+                ConversationState::NeverReplied
+            );
+
+            let member_group = 3211;
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        -1211,
+                        "Synthetic member never replied",
+                        json!({ "@type": "chatTypeSupergroup", "supergroup_id": member_group }),
+                        incoming.clone(),
+                    ),
+                    Some((
+                        json!({ "@type": "getSupergroup", "supergroup_id": member_group }),
+                        json!({
+                            "@type": "supergroup",
+                            "id": member_group,
+                            "is_channel": false,
+                            "member_count": 5,
+                            "status": { "@type": "chatMemberStatusMember" }
+                        }),
+                    )),
+                    None,
+                    Some(json!({
+                        "@type": "foundChatMessages",
+                        "total_count": 0,
+                        "messages": []
+                    })),
+                )
+                .await,
+                ConversationState::NeverReplied
+            );
+
+            let admin_group = 3212;
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        -1212,
+                        "Synthetic admin unknown",
+                        json!({ "@type": "chatTypeSupergroup", "supergroup_id": admin_group }),
+                        incoming,
+                    ),
+                    Some((
+                        json!({ "@type": "getSupergroup", "supergroup_id": admin_group }),
+                        json!({
+                            "@type": "supergroup",
+                            "id": admin_group,
+                            "is_channel": false,
+                            "member_count": 6,
+                            "status": {
+                                "@type": "chatMemberStatusAdministrator",
+                                "rights": { "can_delete_messages": false }
+                            }
+                        }),
+                    )),
+                    None,
+                    Some(json!({
+                        "@type": "foundChatMessages",
+                        "total_count": 0,
+                        "messages": []
+                    })),
+                )
+                .await,
+                ConversationState::Unknown
+            );
+
+            let channel_group = 3213;
+            assert_eq!(
+                map_conversation_case(
+                    &gateway,
+                    &script,
+                    visible_chat(
+                        -1213,
+                        "Synthetic channel unknown",
+                        json!({ "@type": "chatTypeSupergroup", "supergroup_id": channel_group }),
+                        Value::Null,
+                    ),
+                    Some((
+                        json!({ "@type": "getSupergroup", "supergroup_id": channel_group }),
+                        json!({
+                            "@type": "supergroup",
+                            "id": channel_group,
+                            "is_channel": true,
+                            "member_count": 7,
+                            "status": { "@type": "chatMemberStatusMember" }
+                        }),
+                    )),
+                    None,
+                    None,
+                )
+                .await,
+                ConversationState::Unknown
+            );
+
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "getChat")
+                    .count(),
+                13
             );
             script.assert_drained();
         });
@@ -2394,20 +2766,59 @@ mod tests {
             .await
             .expect("ready state resolves the synthetic account label");
 
-            for (state, expected) in [
-                ("authorizationStateLoggingOut", AuthStage::LoggingOut),
-                ("authorizationStateClosed", AuthStage::Closed),
-                ("authorizationStateWaitRegistration", AuthStage::Error),
+            for (state, expected, hint) in [
+                (
+                    "authorizationStateLoggingOut",
+                    AuthStage::LoggingOut,
+                    "Closing the encrypted Telegram session…",
+                ),
+                (
+                    "authorizationStateClosed",
+                    AuthStage::Closed,
+                    "The Telegram session is closed.",
+                ),
+                (
+                    "authorizationStateClosing",
+                    AuthStage::LoggingOut,
+                    "Closing the encrypted Telegram session…",
+                ),
+                (
+                    "authorizationStateWaitRegistration",
+                    AuthStage::Error,
+                    "Retract only signs in to existing accounts; finish registration in an official Telegram app.",
+                ),
+                (
+                    "authorizationStateWaitPremiumPurchase",
+                    AuthStage::Error,
+                    "Telegram requires an account action that Retract cannot complete. Use an official client, then retry.",
+                ),
+                (
+                    "authorizationStateSyntheticUnsupported",
+                    AuthStage::Error,
+                    "TDLib returned an unsupported authorization state.",
+                ),
             ] {
                 script.emit_update(json!({
                     "@type": "updateAuthorizationState",
                     "authorization_state": { "@type": state }
                 }));
-                wait_for_auth_stage(&gateway, expected).await;
+                wait_for_auth_snapshot(&gateway, expected, hint).await;
             }
 
-            let kinds = script
-                .traces()
+            let traces = script.traces();
+            let trace_debug = format!("{traces:?}");
+            for secret in [
+                "synthetic-value",
+                "synthetic-api-value",
+                "synthetic@example.invalid",
+                "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=",
+            ] {
+                assert!(
+                    !trace_debug.contains(secret),
+                    "content-free scripted trace exposed a submitted secret"
+                );
+            }
+            let kinds = traces
                 .into_iter()
                 .map(|trace| trace.kind)
                 .collect::<Vec<_>>();
@@ -2552,6 +2963,117 @@ mod tests {
                     .count(),
                 2
             );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_targets_cached_chat_refresh_for_every_dirty_update_class() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            *gateway.chat_summary_cache.write().await = Some(vec![ChatSummary {
+                id: 1101,
+                title: "Synthetic cached chat".into(),
+                kind: ChatKind::Direct,
+                archived: false,
+                member_count: None,
+                conversation_state: ConversationState::Active,
+                capabilities: ChatCapabilities {
+                    role: ChatRole::Member,
+                    can_delete_others: false,
+                    can_clear_for_everyone: false,
+                    can_remove_for_self: true,
+                    can_delete_group: false,
+                    can_delete_by_sender: false,
+                    can_leave_chat: false,
+                },
+                avatar_seed: 1,
+            }]);
+            gateway
+                .group_chat_ids
+                .write()
+                .await
+                .extend([((false, 2101), 1101), ((true, 3101), 1101)]);
+
+            let updates = [
+                (
+                    "new chat",
+                    json!({ "@type": "updateNewChat", "chat": { "id": 1101 } }),
+                ),
+                (
+                    "title",
+                    json!({ "@type": "updateChatTitle", "chat_id": 1101 }),
+                ),
+                (
+                    "position",
+                    json!({ "@type": "updateChatPosition", "chat_id": 1101 }),
+                ),
+                (
+                    "last message",
+                    json!({ "@type": "updateChatLastMessage", "chat_id": 1101 }),
+                ),
+                (
+                    "added list",
+                    json!({ "@type": "updateChatAddedToList", "chat_id": 1101 }),
+                ),
+                (
+                    "removed list",
+                    json!({ "@type": "updateChatRemovedFromList", "chat_id": 1101 }),
+                ),
+                (
+                    "permissions",
+                    json!({ "@type": "updateChatPermissions", "chat_id": 1101 }),
+                ),
+                (
+                    "deleted messages",
+                    json!({ "@type": "updateDeleteMessages", "chat_id": 1101 }),
+                ),
+                (
+                    "basic group",
+                    json!({
+                        "@type": "updateBasicGroup",
+                        "basic_group": { "id": 2101 }
+                    }),
+                ),
+                (
+                    "supergroup",
+                    json!({
+                        "@type": "updateSupergroup",
+                        "supergroup": { "id": 3101 }
+                    }),
+                ),
+            ];
+
+            for (index, (label, update)) in updates.into_iter().enumerate() {
+                let title = format!("Synthetic targeted refresh {index}");
+                script.respond(
+                    json!({ "@type": "getChat", "chat_id": 1101 }),
+                    visible_chat(
+                        1101,
+                        &title,
+                        json!({ "@type": "chatTypePrivate", "user_id": 4101 }),
+                        json!({ "@type": "message", "id": 1, "is_outgoing": true }),
+                    ),
+                );
+                script.emit_update(update);
+                wait_for_dirty_chat(&gateway, 1101).await;
+
+                let refreshed = gateway.chats().await.unwrap();
+                assert_eq!(refreshed.len(), 1, "{label}");
+                assert_eq!(refreshed[0].id, 1101, "{label}");
+                assert_eq!(refreshed[0].title, title, "{label}");
+                assert!(
+                    gateway.dirty_chat_summaries.lock().await.is_empty(),
+                    "{label} left a stale dirty marker"
+                );
+            }
+
+            let targeted = script
+                .traces()
+                .into_iter()
+                .filter(|trace| trace.kind == "getChat" && trace.chat_id == Some(1101))
+                .count();
+            assert_eq!(targeted, 10);
             script.assert_drained();
         });
     }
@@ -2886,6 +3408,92 @@ mod tests {
                     .filter(|trace| trace.kind == "searchSecretMessages")
                     .count(),
                 2
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_routes_every_supported_search_filter_and_multi_kind_null() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            gateway
+                .chat_kinds
+                .write()
+                .await
+                .insert(1101, ChatKind::Direct);
+
+            let cases = [
+                (ContentKind::Photo, "photo", "searchMessagesFilterPhoto"),
+                (ContentKind::Video, "video", "searchMessagesFilterVideo"),
+                (ContentKind::File, "file", "searchMessagesFilterDocument"),
+                (ContentKind::Voice, "voice", "searchMessagesFilterVoiceNote"),
+                (ContentKind::Audio, "audio", "searchMessagesFilterAudio"),
+                (
+                    ContentKind::Animation,
+                    "animation",
+                    "searchMessagesFilterAnimation",
+                ),
+            ];
+            for (kind, label, filter) in cases {
+                let query = format!("synthetic-filter-{label}");
+                script.respond(
+                    json!({
+                        "@type": "searchChatMessages",
+                        "chat_id": 1101,
+                        "topic_id": null,
+                        "query": query,
+                        "sender_id": null,
+                        "from_message_id": 0,
+                        "offset": 0,
+                        "limit": 100,
+                        "filter": { "@type": filter }
+                    }),
+                    json!({
+                        "@type": "foundChatMessages",
+                        "messages": [],
+                        "next_from_message_id": 0
+                    }),
+                );
+                let mut request = search_request(&query);
+                request.chat_ids = vec![1101];
+                request.content_kinds = vec![kind];
+                assert!(
+                    gateway.search(&request).await.unwrap().is_empty(),
+                    "{label}"
+                );
+            }
+
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "synthetic-filter-multiple",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [],
+                    "next_from_message_id": 0
+                }),
+            );
+            let mut multiple = search_request("synthetic-filter-multiple");
+            multiple.chat_ids = vec![1101];
+            multiple.content_kinds = vec![ContentKind::Photo, ContentKind::Video];
+            assert!(gateway.search(&multiple).await.unwrap().is_empty());
+
+            assert_eq!(
+                script
+                    .traces()
+                    .into_iter()
+                    .filter(|trace| trace.kind == "searchChatMessages")
+                    .count(),
+                7
             );
             script.assert_drained();
         });
