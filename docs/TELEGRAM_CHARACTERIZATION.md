@@ -5,6 +5,7 @@ This document is the regression gate for moving Telegram behind Retract's provid
 ## Automated contract
 
 - IPC response and request field names remain compatible until an explicitly versioned migration changes both Rust and TypeScript.
+- Telegram chat/message/sender IDs retain the current signed numeric, JavaScript-safe wire behavior throughout Phase 0.
 - TDLib chat, membership, message, media, pin, album, sender, and delete-property values normalize deterministically.
 - Main/archive catalogs deduplicate chats and targeted refresh never requires a global catalog reload.
 - Global, scoped, empty-query, secret-chat, privacy, date, direction, pin, conversation-kind, and content-kind searches retain their current semantics.
@@ -16,6 +17,14 @@ This document is the regression gate for moving Telegram behind Retract's provid
 - Persisted job state remains encrypted, profile-bound, tamper-evident, and content-free.
 - Telegram authentication secrets remain absent from settings JSON and frontend snapshots.
 - The UI preserves album atomicity, hidden selections, review-before-execute, progress, cancellation, and targeted reconciliation.
+
+## Phase boundary and required provider-foundation gate
+
+This Phase 0 contract deliberately tests only Telegram's current numeric IDs inside JavaScript's safe-integer range. It does not prove the approved opaque-ID design. Before the first provider-foundation change modifies any production identifier type, that change must add a behavior-level RED harness with opaque strings and provider-native values greater than JavaScript's safe-integer range across selection, planning/fingerprints, job tracking, encrypted persistence/recovery, Rust/TypeScript IPC, and dirty targeted refresh/reconciliation. The Phase 0 numeric test may not be treated as sufficient evidence for that migration.
+
+## Existing encrypted-store preservation contract
+
+Today `SecureJobStore` writes and syncs a new encrypted temporary file before replacing `jobs.enc`. The automated contract forces a temporary-write failure and proves that the last authenticated original remains byte-for-byte readable. Once replacement succeeds, Retract retains no application-managed backup or general rollback copy. Future provider/store migration must write and verify a separate new store, keep the original until verification succeeds, and atomically switch only after that success.
 
 ## Live test-DC contract
 

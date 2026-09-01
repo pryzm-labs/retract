@@ -39,6 +39,16 @@ This is the first executable plan in the approved multi-provider roadmap. It int
 
 The later plans must consume the actual contracts and test helpers produced here rather than guessing their final signatures in advance.
 
+### Approved Phase 0 ID boundary amendment
+
+Phase 0 freezes Telegram's current signed numeric IPC IDs, and its fixture deliberately keeps them inside JavaScript's safe-integer range. That assertion proves compatibility only for the present Telegram wire contract; it is not an opaque-ID or large-ID test.
+
+- [ ] **Provider-foundation prerequisite:** before changing any production identifier type, add a behavior-level RED lifecycle harness using opaque strings and provider-native values greater than JavaScript's safe-integer range. It must cover selection keys, planning/fingerprints, job tracking, encrypted persistence and recovery, Rust/TypeScript IPC, and dirty targeted refresh/reconciliation. Make the production ID migration pass that harness in the same provider-foundation change. Do not cite the Phase 0 numeric-safe fixture as sufficient.
+
+### Existing encrypted-store preservation boundary
+
+The current store writes and syncs a new encrypted temporary file before replacing `jobs.enc`; the characterization suite proves that a temporary-write failure preserves the prior authenticated file. After a successful replacement, the application keeps no backup or general rollback copy. A later store migration must write and verify a separate new store, retain the original until verification succeeds, and switch atomically only after success.
+
 ---
 
 ### Task 1: Record the Telegram regression gate and prove the starting baseline

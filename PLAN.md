@@ -291,6 +291,10 @@ Avoid features that create hidden or automatic behavior: silent background delet
 
 ## 11. Delivery phases
 
+### Tracked provider-foundation prerequisite
+
+- [ ] Before any provider-foundation change migrates Telegram production ID types, land a RED lifecycle harness for opaque strings and provider-native values greater than JavaScript's safe-integer range across selection, planning, jobs, encrypted persistence, IPC, and targeted refresh. The current Phase 0 numeric-safe fixture does not satisfy this item.
+
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 
 - Obtain app API credentials and clarify public-distribution compliance.

@@ -208,6 +208,8 @@ The core knows provider and account identity because it must route and isolate d
 
 All provider-facing IDs become opaque strings or UUID-backed application IDs across Rust, IPC, and TypeScript.
 
+**Approved Phase 0 boundary amendment (2026-09-01):** the Telegram characterization stage freezes the current signed numeric wire IDs and requires its fixture values to remain JavaScript-safe. It does not implement, simulate, or prove the future opaque-ID contract. Before the provider-foundation stage changes any production ID type, that stage must first add a failing lifecycle harness containing opaque strings and provider-native values greater than JavaScript's safe-integer range. The harness must cover selection keys, plan construction and fingerprints, job tracking, encrypted persistence/recovery, Rust/TypeScript IPC, and dirty targeted refresh/reconciliation. Only then may production types change to make the harness pass. The Phase 0 numeric-safe fixture may not be cited as satisfying that prerequisite.
+
 ```rust
 pub struct ProviderKey(String);
 pub struct AccountId(Uuid);
@@ -512,6 +514,8 @@ macOS continues using Keychain. Other platforms require an OS credential-store i
 
 ### Existing state migration
 
+The current `SecureJobStore` has a narrower preservation contract than the future migration described here: it writes and syncs an encrypted temporary file before replacing `jobs.enc`, so a characterized temporary-write failure leaves the last authenticated file unchanged. A successful replacement retains no application-managed backup or general rollback copy. The migration requirements below are therefore prospective; provider-foundation/persistence work must not assume a rollback facility already exists.
+
 - Existing TDLib directories are not moved, rewritten, deduplicated, or treated as the normalized index.
 - Existing Telegram connection settings remain readable and are upgraded through an atomic, versioned migration.
 - `RTRCT01` and `RTRCT02` job-store fixtures remain readable.
@@ -693,7 +697,7 @@ Introduce a content-free event schema for import and remediation lifecycle event
 
 ### Opaque ID migration
 
-Changing `i64`/JavaScript-number identifiers affects domain structs, IPC DTOs, selection keys, refresh reconciliation, jobs, fixtures, and UI props. Add large/string ID characterization tests before changing production types. During migration, Telegram adapters parse native numeric strings internally; the frontend never does.
+Changing `i64`/JavaScript-number identifiers affects domain structs, IPC DTOs, selection keys, refresh reconciliation, jobs, fixtures, and UI props. Phase 0 deliberately characterizes only the existing JavaScript-safe numeric Telegram contract. The first provider-foundation ID change must begin with the test-first opaque/string and greater-than-safe-integer lifecycle harness specified above, spanning selection, planning, jobs, persistence, IPC, and targeted refresh; no production ID type may change before that RED evidence exists. During migration, Telegram adapters parse native numeric strings internally; the frontend never does.
 
 ### Plan/job compatibility
 
@@ -726,13 +730,13 @@ macOS Keychain is the current strong path. X live tokens may ship only on platfo
 - Per-message rechecks before deletion and after rate-limit waits.
 - Bounded batch execution, partial results, cancellation, retry, restart, and ambiguous broad-operation behavior.
 - Native prompt sanitization and exact plan-bound system grants.
-- `RTRCT01`/`RTRCT02` load, tamper, cross-profile, rollback, and restart fixtures.
+- `RTRCT01`/`RTRCT02` load, tamper, cross-profile, current pre-replacement preservation, and restart fixtures; the future migration adds the separate rollback fixture required for its write/verify/switch path.
 - Proof that no message body enters persisted plan/job state or logs.
 
 ### Contract and frontend characterization
 
 - Rust JSON fixtures conform to TypeScript request/response shapes.
-- Opaque and greater-than-JavaScript-safe-integer IDs survive selection, planning, job tracking, and refresh.
+- Provider-foundation prerequisite, explicitly not satisfied by Phase 0: opaque strings and greater-than-JavaScript-safe-integer provider values survive selection, planning, job tracking, encrypted persistence, IPC, and targeted refresh.
 - Provider/backend action descriptors exclusively control visibility, effect copy, confirmation, and disabled reasons.
 - Search generation rejects stale responses.
 - Provider/account/source changes clear incompatible selections and never retarget a plan.
@@ -766,7 +770,7 @@ Archive providers additionally satisfy traversal, special-entry, compression-bom
 Each stage is a separate specification/implementation plan and should land through reviewable GitHub issues and pull requests.
 
 1. **Telegram characterization suite** — protect the existing integration, domain, persistence, and UI behavior.
-2. **Provider foundation** — scoped opaque IDs, provider registry, normalized records, action descriptors, structured errors, and compatibility API.
+2. **Provider foundation** — first land the RED opaque/string and greater-than-safe-integer lifecycle harness, then introduce scoped opaque IDs, provider registry, normalized records, action descriptors, structured errors, and compatibility API.
 3. **Encrypted archive persistence** — SQLCipher/FTS store, migrations, import lifecycle, source deletion, and security limits.
 4. **Telegram provider migration** — move current TDLib behavior behind focused query/connection/remediation ports without changing results.
 5. **Discord archive import** — streaming parser, schema profiles, synthetic fixtures, normalized ingestion, and progress.
