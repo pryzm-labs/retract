@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
 import App from "./App";
 import { fixtureApi } from "./api.fixture";
-import type { AppSnapshot, ChatSummary, JobRecord } from "./types";
+import type { AppSnapshot, ChatSummary, JobRecord, MessageSnapshot, SearchResponse } from "./types";
 
 describe("Retract desktop UI", () => {
   beforeEach(async () => {
@@ -189,6 +189,147 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Delete 1 message for everyone?")).toBeInTheDocument();
     expect(screen.getByText(/accepted Telegram deletions cannot be undone/)).toBeInTheDocument();
     expect(screen.getByText(/macOS will show the exact frozen target/i)).toBeInTheDocument();
+  });
+
+  it("selects and clears every visible message in a Telegram album atomically", async () => {
+    render(<App />);
+    await screen.findByText("Search every chat");
+    fireEvent.click(await screen.findByText("cedar_research_notes.pdf · 4.8 MB"));
+
+    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("2messages selected");
+    expect(screen.getByText("cedar_research_notes.pdf · 4.8 MB").closest("article"))
+      .toHaveClass("is-selected");
+    expect(screen.getByText("Whiteboard with customer email list").closest("article"))
+      .toHaveClass("is-selected");
+
+    fireEvent.click(screen.getByText("Whiteboard with customer email list"));
+    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("0messages selected");
+  });
+
+  it("retains a selected text result when the Media filter hides it", async () => {
+    render(<App />);
+    await screen.findByText("Search every chat");
+    fireEvent.click(await screen.findByText("Project Cedar launch credentials moved to the vault."));
+
+    fireEvent.click(screen.getByRole("button", { name: "Media" }));
+
+    expect(await screen.findByText("1 selection outside this result view")).toBeInTheDocument();
+    expect(screen.queryByText("Project Cedar launch credentials moved to the vault.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Review deletion/ })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(screen.getByText("messages selected").parentElement).toHaveTextContent("0messages selected");
+    expect(screen.queryByText(/selection outside this result view/)).not.toBeInTheDocument();
+  });
+
+  it("rejects a stale search response that resolves after the current query", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const firstMessage: MessageSnapshot = {
+        chatId: -1001,
+        messageId: 9101,
+        senderId: 42,
+        senderName: "Synthetic Sender",
+        sentAt: "2026-01-01T10:00:00.000Z",
+        isOutgoing: true,
+        contentKind: "text",
+        preview: "First stale result",
+        privacyFindings: [],
+        albumId: null,
+        isPinned: false,
+        deletionReach: "everyone"
+      };
+      const secondMessage: MessageSnapshot = {
+        ...firstMessage,
+        messageId: 9102,
+        preview: "Second current result"
+      };
+      let resolveFirst!: (response: SearchResponse) => void;
+      let resolveSecond!: (response: SearchResponse) => void;
+      const firstResponse = new Promise<SearchResponse>((resolve) => { resolveFirst = resolve; });
+      const secondResponse = new Promise<SearchResponse>((resolve) => { resolveSecond = resolve; });
+      const search = vi.spyOn(api, "search")
+        .mockImplementationOnce(() => firstResponse)
+        .mockImplementationOnce(() => secondResponse);
+
+      render(<App />);
+      await screen.findByText("Search every chat");
+      const query = screen.getByRole("textbox", { name: "Search message history" });
+
+      fireEvent.change(query, { target: { value: "first query" } });
+      await vi.advanceTimersByTimeAsync(120);
+      await waitFor(() => expect(search).toHaveBeenCalledTimes(1));
+
+      fireEvent.change(query, { target: { value: "second query" } });
+      await vi.advanceTimersByTimeAsync(120);
+      await waitFor(() => expect(search).toHaveBeenCalledTimes(2));
+
+      resolveSecond({ messages: [secondMessage], returned: 1, truncated: false });
+      expect(await screen.findByText("Second current result")).toBeInTheDocument();
+      expect(screen.queryByText("First stale result")).not.toBeInTheDocument();
+
+      resolveFirst({ messages: [firstMessage], returned: 1, truncated: false });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByText("Second current result")).toBeInTheDocument();
+      expect(screen.queryByText("First stale result")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("authorizes a reviewed multi-chat plan before execution and not when Escape cancels", async () => {
+    const prepareSelection = vi.spyOn(api, "prepareSelection");
+    const authorizePlan = vi.spyOn(api, "authorizePlan");
+    const execute = vi.spyOn(api, "execute").mockResolvedValue({
+      id: "synthetic-job",
+      planId: "synthetic-plan",
+      operation: "selected_messages",
+      targetChatIds: [-1001, 101],
+      status: "queued",
+      total: 2,
+      deleted: 0,
+      skipped: 0,
+      failed: 0,
+      nextBatch: 0,
+      retryAfterSeconds: null,
+      errorCodes: [],
+      createdAt: "2026-01-01T10:00:00.000Z",
+      updatedAt: "2026-01-01T10:00:00.000Z"
+    });
+
+    render(<App />);
+    await screen.findByText("Search every chat");
+    fireEvent.click(await screen.findByText("Project Cedar launch credentials moved to the vault."));
+    fireEvent.click(screen.getByText("Passport scan for the apartment application"));
+    fireEvent.click(screen.getByRole("button", { name: /Review deletion/ }));
+
+    expect(await screen.findByRole("heading", { name: "Delete 2 messages for everyone?" })).toBeInTheDocument();
+    expect(prepareSelection).toHaveBeenCalledWith([
+      { chatId: -1001, messageId: 11 },
+      { chatId: 101, messageId: 2 }
+    ]);
+    expect(authorizePlan).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /accepted Telegram deletions cannot be undone/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete for everyone" }));
+
+    await waitFor(() => expect(authorizePlan).toHaveBeenCalledTimes(1));
+    const reviewedPlan = await vi.mocked(prepareSelection).mock.results[0].value;
+    expect(authorizePlan).toHaveBeenCalledWith(reviewedPlan);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(reviewedPlan, true, null);
+    expect(vi.mocked(api.authorizePlan).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(api.execute).mock.invocationCallOrder[0]);
+
+    fireEvent.click(screen.getByText("Whiteboard with customer email list"));
+    fireEvent.click(screen.getByRole("button", { name: /Review deletion/ }));
+    const secondDialog = await screen.findByRole("dialog");
+    fireEvent(secondDialog, new Event("cancel", { cancelable: true }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(authorizePlan).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it("keeps new selections actionable while a completed cleanup refreshes in the background", async () => {
