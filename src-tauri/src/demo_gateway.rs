@@ -880,6 +880,139 @@ fn conversation_state(
 mod tests {
     use super::*;
 
+    fn request(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.into(),
+            chat_ids: Vec::new(),
+            chat_kinds: Vec::new(),
+            content_kinds: Vec::new(),
+            direction: MessageDirection::Any,
+            min_date: None,
+            max_date: None,
+            exclude_pinned: false,
+            privacy_scan: false,
+            limit: 500,
+        }
+    }
+
+    #[test]
+    fn telegram_search_contract_covers_normalized_filters() {
+        tauri::async_runtime::block_on(async {
+            let gateway = DemoGateway::new();
+
+            let query_cases: [(&str, &[(i64, i64)]); 4] = [
+                ("passport apartment", &[(101, 2)]),
+                ("cedar vault", &[(-1001, 11)]),
+                ("priya", &[(-1001, 15)]),
+                ("synthetic-no-match", &[]),
+            ];
+            for (query, expected) in query_cases {
+                let actual = gateway
+                    .search(&request(query))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|message| (message.chat_id, message.message_id))
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.as_slice(), expected, "query case {query:?}");
+            }
+
+            let mut scoped = request("");
+            scoped.chat_ids = vec![-1001];
+            let scoped_results = gateway.search(&scoped).await.unwrap();
+            assert!(!scoped_results.is_empty());
+            assert!(scoped_results.iter().all(|m| m.chat_id == -1001));
+
+            let mut outgoing = request("");
+            outgoing.direction = MessageDirection::Mine;
+            let outgoing_results = gateway.search(&outgoing).await.unwrap();
+            assert!(!outgoing_results.is_empty());
+            assert!(outgoing_results.iter().all(|m| m.is_outgoing));
+
+            let mut files = request("");
+            files.content_kinds = vec![ContentKind::File];
+            let file_results = gateway.search(&files).await.unwrap();
+            assert!(!file_results.is_empty());
+            assert!(
+                file_results
+                    .iter()
+                    .all(|m| m.content_kind == ContentKind::File)
+            );
+
+            let mut groups = request("");
+            groups.chat_kinds = vec![ChatKind::Supergroup];
+            let group_ids = [-1001, -1002, -1003];
+            let group_results = gateway.search(&groups).await.unwrap();
+            assert!(!group_results.is_empty());
+            assert!(group_results.iter().all(|m| group_ids.contains(&m.chat_id)));
+
+            let mut unpinned = request("");
+            unpinned.exclude_pinned = true;
+            let unpinned_results = gateway.search(&unpinned).await.unwrap();
+            assert!(!unpinned_results.is_empty());
+            assert!(unpinned_results.iter().all(|m| !m.is_pinned));
+
+            let boundary = Utc
+                .with_ymd_and_hms(2026, 8, 14, 18, 5, 0)
+                .single()
+                .unwrap();
+            let mut since_boundary = request("");
+            since_boundary.min_date = Some(boundary);
+            let since_results = gateway.search(&since_boundary).await.unwrap();
+            assert!(since_results.iter().all(|m| m.sent_at >= boundary));
+            assert!(
+                since_results
+                    .iter()
+                    .any(|m| { (m.chat_id, m.message_id, m.sent_at) == (-1001, 12, boundary) })
+            );
+
+            let mut through_boundary = request("");
+            through_boundary.max_date = Some(boundary);
+            let through_results = gateway.search(&through_boundary).await.unwrap();
+            assert!(through_results.iter().all(|m| m.sent_at <= boundary));
+            assert!(
+                through_results
+                    .iter()
+                    .any(|m| { (m.chat_id, m.message_id, m.sent_at) == (-1001, 12, boundary) })
+            );
+
+            let mut limited = request("");
+            limited.limit = 1;
+            let limited_results = gateway.search(&limited).await.unwrap();
+            assert_eq!(limited_results.len(), 1);
+            assert_eq!(
+                (limited_results[0].chat_id, limited_results[0].message_id),
+                (-1001, 11)
+            );
+
+            let mut privacy_scan = request("");
+            privacy_scan.privacy_scan = true;
+            let privacy_results = gateway.search(&privacy_scan).await.unwrap();
+            assert!(!privacy_results.is_empty());
+            assert!(
+                privacy_results
+                    .iter()
+                    .all(|message| !message.privacy_findings.is_empty())
+            );
+            assert!(
+                privacy_results
+                    .iter()
+                    .find(|message| (message.chat_id, message.message_id) == (101, 5))
+                    .unwrap()
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::CryptoWallet)
+            );
+            assert!(
+                privacy_results
+                    .iter()
+                    .find(|message| (message.chat_id, message.message_id) == (101, 2))
+                    .unwrap()
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::IdentityDocument)
+            );
+        });
+    }
+
     #[test]
     fn classifies_empty_and_unanswered_cleanup_candidates() {
         tauri::async_runtime::block_on(async {

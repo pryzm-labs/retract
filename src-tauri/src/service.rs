@@ -1440,6 +1440,76 @@ mod tests {
     }
 
     #[test]
+    fn targeted_refresh_deduplicates_sorts_and_omits_missing_chats() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [27; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+
+            let snapshot = service.snapshot().await.unwrap();
+            assert_eq!(snapshot.chats.len(), 8);
+            let progress = service.catalog_progress();
+            assert_eq!(progress.phase, "ready");
+            assert_eq!((progress.processed, progress.total), (8, 8));
+            let reads_after_snapshot = gateway.chat_read_counts();
+            assert_eq!(reads_after_snapshot, (1, 0));
+
+            let refreshed = service
+                .refresh_chats(vec![-1001, -1001, 304])
+                .await
+                .unwrap();
+            assert_eq!(
+                refreshed
+                    .iter()
+                    .map(|chat| (chat.id, chat.title.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(-1001, "Design Team"), (304, "Empty invite")]
+            );
+            assert_eq!(
+                gateway.chat_read_counts(),
+                (reads_after_snapshot.0, reads_after_snapshot.1 + 2)
+            );
+
+            gateway.remove_chat_for_self(304).await.unwrap();
+            let missing = service.refresh_chats(vec![304]).await.unwrap();
+            assert!(missing.is_empty());
+            assert_eq!(gateway.chat_read_counts(), (reads_after_snapshot.0, 3));
+            let progress = service.catalog_progress();
+            assert_eq!((progress.processed, progress.total), (7, 7));
+        });
+    }
+
+    #[test]
+    fn search_response_truncation_is_conservative_for_full_page() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [28; 32]);
+            let gateway: Arc<dyn TelegramGateway> = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway, store).unwrap();
+            let response = service
+                .search(SearchRequest {
+                    query: String::new(),
+                    chat_ids: Vec::new(),
+                    chat_kinds: Vec::new(),
+                    content_kinds: Vec::new(),
+                    direction: crate::model::MessageDirection::Any,
+                    min_date: None,
+                    max_date: None,
+                    exclude_pinned: false,
+                    privacy_scan: false,
+                    limit: 1,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(response.returned, 1);
+            assert_eq!(response.messages.len(), 1);
+            assert!(response.truncated);
+        });
+    }
+
+    #[test]
     fn admin_leave_job_deletes_every_eligible_message_before_removing_membership() {
         tauri::async_runtime::block_on(async {
             let directory = tempfile::tempdir().unwrap();
