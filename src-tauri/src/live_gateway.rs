@@ -2005,6 +2005,25 @@ mod tests {
         let cases = cases.as_array().expect("member status fixture array");
         assert_eq!(cases.len(), 8);
 
+        let mut actual_names = cases
+            .iter()
+            .map(|case| case["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual_names.sort_unstable();
+        assert_eq!(
+            actual_names,
+            [
+                "administrator-with-delete",
+                "administrator-without-delete",
+                "banned",
+                "creator",
+                "left",
+                "member",
+                "restricted-member",
+                "restricted-nonmember",
+            ]
+        );
+
         for case in cases {
             let (role, can_delete, can_leave) = role_from_status(Some(&case["status"]));
             assert_eq!(
@@ -2034,7 +2053,31 @@ mod tests {
         let cases = cases.as_array().expect("chat position fixture array");
         assert_eq!(cases.len(), 4);
 
+        let mut actual_names = cases
+            .iter()
+            .map(|case| case["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        actual_names.sort_unstable();
+        assert_eq!(
+            actual_names,
+            [
+                "unrelated-list",
+                "visible-archive",
+                "visible-main",
+                "zero-order-main",
+            ]
+        );
+
         for case in cases {
+            assert!(
+                case["positions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|position| position["order"].is_string()),
+                "{}",
+                case["name"]
+            );
             let chat = json!({ "positions": case["positions"].clone() });
             assert_eq!(
                 chat_is_in_catalog(&chat),
@@ -2047,13 +2090,12 @@ mod tests {
 
     #[test]
     fn distinguishes_user_and_chat_message_senders() {
-        assert_eq!(
-            message_sender_id(&json!({
-                "@type": "messageSenderUser",
-                "user_id": "123"
-            })),
-            (123, false)
-        );
+        let user_sender = json!({
+            "@type": "messageSenderUser",
+            "user_id": 123
+        });
+        assert!(user_sender["user_id"].is_number());
+        assert_eq!(message_sender_id(&user_sender), (123, false));
         assert_eq!(
             message_sender_id(&json!({
                 "@type": "messageSenderChat",
