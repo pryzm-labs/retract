@@ -316,9 +316,57 @@ mod wire_contract_tests {
         request.validate().unwrap();
         assert_eq!(request.query, "passport apartment");
         assert_eq!(request.chat_ids, vec![-1001]);
+        assert_eq!(request.chat_kinds, vec![ChatKind::Supergroup]);
+        assert_eq!(
+            request.content_kinds,
+            vec![ContentKind::Photo, ContentKind::File]
+        );
+        assert!(matches!(request.direction, MessageDirection::Mine));
+        assert_eq!(request.min_date, Some(instant("2026-08-01T00:00:00Z")));
+        assert_eq!(request.max_date, Some(instant("2026-08-31T23:59:59Z")));
         assert_eq!(request.limit, 500);
         assert!(request.exclude_pinned);
         assert!(request.privacy_scan);
+    }
+
+    #[test]
+    fn telegram_search_request_optional_and_default_boundaries_are_frozen() {
+        let mut value = contract()["searchRequest"].clone();
+        let object = value.as_object_mut().unwrap();
+        for field in [
+            "query",
+            "chatIds",
+            "chatKinds",
+            "contentKinds",
+            "direction",
+            "minDate",
+            "maxDate",
+            "excludePinned",
+            "privacyScan",
+            "limit",
+        ] {
+            object.remove(field);
+        }
+        let request: SearchRequest = serde_json::from_value(value).unwrap();
+        assert!(request.query.is_empty());
+        assert!(request.chat_ids.is_empty());
+        assert!(request.chat_kinds.is_empty());
+        assert!(request.content_kinds.is_empty());
+        assert!(matches!(request.direction, MessageDirection::Any));
+        assert!(request.min_date.is_none());
+        assert!(request.max_date.is_none());
+        assert!(!request.exclude_pinned);
+        assert!(!request.privacy_scan);
+        assert_eq!(request.limit, 500);
+
+        for (wire, expected) in [
+            ("any", MessageDirection::Any),
+            ("mine", MessageDirection::Mine),
+            ("others", MessageDirection::Others),
+        ] {
+            let direction: MessageDirection = serde_json::from_value(Value::from(wire)).unwrap();
+            assert!(std::mem::discriminant(&direction) == std::mem::discriminant(&expected));
+        }
     }
 
     fn instant(value: &str) -> DateTime<Utc> {
