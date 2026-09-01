@@ -13,12 +13,40 @@ function expectSelectionCount(count: number) {
   expect(within(total!).getByText(count === 1 ? "message selected" : "messages selected")).toBeInTheDocument();
 }
 
+function syntheticJob(
+  id: string,
+  status: JobRecord["status"],
+  overrides: Partial<JobRecord> = {},
+): JobRecord {
+  const timestamp = "2026-01-02T03:04:05.000Z";
+  return {
+    id,
+    planId: `plan-${id}`,
+    operation: "selected_messages",
+    targetChatIds: [-2101],
+    status,
+    total: 9,
+    deleted: 0,
+    skipped: 0,
+    failed: 0,
+    nextBatch: 0,
+    retryAfterSeconds: null,
+    errorCodes: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...overrides,
+  };
+}
+
 describe("Retract desktop UI", () => {
   beforeEach(async () => {
     await fixtureApi.resetFixtures();
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("never exposes fixture controls in the end-user shell", async () => {
     render(<App />);
@@ -391,6 +419,78 @@ describe("Retract desktop UI", () => {
     expect(screen.getByText("Email")).toBeInTheDocument();
     expect(screen.getByText("Crypto wallet")).toBeInTheDocument();
     expect(screen.getByText(/pixels inside photos and external copies are not inspected/i)).toBeInTheDocument();
+  });
+
+  it("polls an active cleanup through its terminal state and then stops polling", async () => {
+    const initial = await api.snapshot();
+    const running = syntheticJob("polling-job", "running", {
+      deleted: 2,
+      nextBatch: 1,
+    });
+    const completed = syntheticJob("polling-job", "completed", {
+      deleted: 9,
+      nextBatch: 3,
+    });
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+      ...initial,
+      recentJobs: [running],
+    });
+    const jobs = vi.spyOn(api, "jobs").mockResolvedValue([completed]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    render(<App />);
+    expect(await screen.findByText("running · 2 deleted")).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(700);
+    expect(await screen.findByText("completed · 9 deleted")).toBeInTheDocument();
+    expect(jobs).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(jobs).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the exact active job once and renders the refreshed terminal record", async () => {
+    const initial = await api.snapshot();
+    const queued = syntheticJob("cancel-exact-job", "queued");
+    const cancelled = syntheticJob("cancel-exact-job", "cancelled", {
+      skipped: 9,
+      errorCodes: ["synthetic_cancelled"],
+    });
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+      ...initial,
+      recentJobs: [queued],
+    });
+    const cancelJob = vi.spyOn(api, "cancelJob").mockResolvedValue(cancelled);
+    const jobs = vi.spyOn(api, "jobs").mockResolvedValue([cancelled]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    render(<App />);
+    const queuedState = await screen.findByText("queued");
+    const row = queuedState.closest(".job-row");
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Cancel" }));
+
+    expect(await screen.findByText("cancelled")).toBeInTheDocument();
+    expect(cancelJob).toHaveBeenCalledTimes(1);
+    expect(cancelJob).toHaveBeenCalledWith("cancel-exact-job");
+    expect(jobs).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  });
+
+  it("clears the active-job polling timer when the app unmounts", async () => {
+    const initial = await api.snapshot();
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+      ...initial,
+      recentJobs: [syntheticJob("unmounted-job", "running")],
+    });
+    const jobs = vi.spyOn(api, "jobs");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    const { unmount } = render(<App />);
+    expect(await screen.findByText("running")).toBeInTheDocument();
+    unmount();
+
+    await vi.advanceTimersByTimeAsync(1_400);
+    expect(jobs).not.toHaveBeenCalled();
   });
 
   it("opens end-user connection settings from the sidebar", async () => {
