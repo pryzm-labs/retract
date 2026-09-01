@@ -1093,7 +1093,10 @@ fn push_error_once(job: &mut JobRecord, code: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{demo_gateway::DemoGateway, secure_store::SecureJobStore};
+    use crate::{
+        demo_gateway::{DemoGateway, TestFailurePoint},
+        secure_store::SecureJobStore,
+    };
     use cleaner_domain::{ContentKind, MessageSnapshot, PlanOperation};
 
     const TERMINAL_JOB_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1167,6 +1170,38 @@ mod tests {
                 TERMINAL_JOB_TIMEOUT.as_secs()
             )
         })
+    }
+
+    async fn wait_for_rate_limited_job(service: &CleanerService, job_id: Uuid) -> JobRecord {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let job = service
+                    .jobs()
+                    .await
+                    .into_iter()
+                    .find(|candidate| candidate.id == job_id)
+                    .unwrap();
+                if job.status == JobStatus::Queued && job.retry_after_seconds.is_some() {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("job {job_id} did not enter its bounded retry wait"))
+    }
+
+    async fn wait_for_current_reach_check(gateway: &DemoGateway) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if gateway.current_reach_started() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the synthetic reach preflight did not start");
     }
 
     #[test]
@@ -1329,18 +1364,7 @@ mod tests {
                 .unwrap();
             let job = service.start_execution(execution()).await.unwrap();
 
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
             assert!(matches!(
                 service.start_execution(execution()).await,
                 Err(AppError::SystemAuthentication(_))
@@ -1468,33 +1492,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..100 {
-                if gateway.current_reach_started() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-            assert!(gateway.current_reach_started());
+            wait_for_current_reach_check(&gateway).await;
             service.cancel_job(job.id).await.unwrap();
-            for _ in 0..100 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-
-            let finished = service
-                .jobs()
-                .await
-                .into_iter()
-                .find(|candidate| candidate.id == job.id)
-                .unwrap();
+            let finished = wait_for_terminal_job(&service, job.id).await;
             assert_eq!(finished.status, JobStatus::Cancelled);
             assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
         });
@@ -1538,18 +1538,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
 
             let finished = service
                 .jobs()
@@ -1569,6 +1558,137 @@ mod tests {
             assert!(finished.error_codes.is_empty());
             assert!(finished.retry_after_seconds.is_none());
             assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn selected_everyone_deletion_rechecks_reach_after_a_rate_limit_wait() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [41; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: 101,
+                        message_id: 1,
+                    }],
+                })
+                .await
+                .unwrap();
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            gateway.clear_test_traces().await;
+            gateway
+                .inject_rate_limit_once(TestFailurePoint::DeleteMessagesForEveryone)
+                .await;
+
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                })
+                .await
+                .unwrap();
+            gateway.wait_for_injected_failure(1).await;
+            let waiting = wait_for_rate_limited_job(&service, job.id).await;
+            assert_eq!(waiting.retry_after_seconds, Some(1));
+            assert_eq!(waiting.error_codes, ["telegram_rate_limited"]);
+
+            gateway
+                .set_message_reach(101, 1, DeletionReach::SelfOnly)
+                .await;
+            let finished = wait_for_terminal_job(&service, job.id).await;
+
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.deleted, 0);
+            assert_eq!(finished.skipped, 1);
+            assert_eq!(finished.failed, 0);
+            assert_eq!(finished.next_batch, 1);
+            assert!(finished.retry_after_seconds.is_none());
+            assert_eq!(finished.error_codes, ["telegram_rate_limited"]);
+            assert_eq!(
+                gateway.current_reach_calls().await,
+                vec![(101, 1), (101, 1)]
+            );
+            assert_eq!(
+                gateway.operation_log().await,
+                vec!["delete_messages_for_everyone:101:1"]
+            );
+            assert_eq!(gateway.delete_calls().await, vec![(101, vec![1])]);
+            assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn chat_wide_deletion_rechecks_authority_after_a_rate_limit_wait() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [42; 32]);
+            let gateway = Arc::new(DemoGateway::new());
+            let service = CleanerService::new(gateway.clone(), store).unwrap();
+            let plan = service
+                .prepare_chat_action(PrepareChatActionRequest {
+                    chat_id: -1001,
+                    operation: PlanOperation::ClearHistory,
+                })
+                .await
+                .unwrap();
+            service
+                .authorize_plan(AuthorizePlanRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint.clone(),
+                })
+                .await
+                .unwrap();
+            gateway.clear_test_traces().await;
+            gateway
+                .inject_rate_limit_once(TestFailurePoint::ClearHistoryForEveryone)
+                .await;
+
+            let job = service
+                .start_execution(ExecuteRequest {
+                    plan_id: plan.id,
+                    fingerprint: plan.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: plan.chat_title,
+                })
+                .await
+                .unwrap();
+            gateway.wait_for_injected_failure(1).await;
+            let waiting = wait_for_rate_limited_job(&service, job.id).await;
+            assert_eq!(waiting.status, JobStatus::Queued);
+            assert_eq!(waiting.retry_after_seconds, Some(1));
+            assert_eq!(waiting.error_codes, ["telegram_rate_limited"]);
+
+            gateway.set_chat_clear_authority(-1001, false).await;
+            let finished = wait_for_terminal_job(&service, job.id).await;
+
+            assert_eq!(finished.status, JobStatus::Failed);
+            assert_eq!(finished.total, 0);
+            assert_eq!(finished.deleted, 0);
+            assert_eq!(finished.skipped, 0);
+            assert_eq!(finished.failed, 0);
+            assert_eq!(finished.next_batch, 0);
+            assert!(finished.retry_after_seconds.is_none());
+            assert_eq!(
+                finished.error_codes,
+                ["telegram_rate_limited", "telegram_rejected"]
+            );
+            assert_eq!(gateway.chat_by_id_calls().await, vec![-1001, -1001]);
+            assert_eq!(
+                gateway.operation_log().await,
+                vec!["clear_history_for_everyone:-1001"]
+            );
+            assert!(gateway.chat_by_id(-1001).await.unwrap().is_some());
         });
     }
 
@@ -1617,18 +1737,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
 
             let finished = service
                 .jobs()
@@ -2028,18 +2137,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
 
             let finished = service
                 .jobs()
@@ -2116,18 +2214,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
 
             let finished = service
                 .jobs()
@@ -2178,18 +2265,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            for _ in 0..50 {
-                if service
-                    .jobs()
-                    .await
-                    .iter()
-                    .find(|candidate| candidate.id == job.id)
-                    .is_some_and(|candidate| candidate.status.is_terminal())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            wait_for_terminal_job(&service, job.id).await;
 
             let finished = service
                 .jobs()

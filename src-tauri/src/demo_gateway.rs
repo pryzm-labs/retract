@@ -8,9 +8,9 @@ use cleaner_domain::{
     ChatCapabilities, ChatKind, ChatRole, ChatSummary, ContentKind, ConversationState,
     DeletionReach, MessageSnapshot, detect_sensitive_data,
 };
-#[cfg(test)]
-use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+#[cfg(test)]
+use tokio::sync::{Mutex, Notify};
 
 use crate::{
     error::AppError,
@@ -27,6 +27,13 @@ struct StoredMessage {
 struct DemoData {
     chats: Vec<ChatSummary>,
     messages: Vec<StoredMessage>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestFailurePoint {
+    DeleteMessagesForEveryone,
+    ClearHistoryForEveryone,
 }
 
 pub struct DemoGateway {
@@ -46,6 +53,16 @@ pub struct DemoGateway {
     delete_batch_sizes: Mutex<Vec<usize>>,
     #[cfg(test)]
     delete_calls: Mutex<Vec<(i64, Vec<i64>)>>,
+    #[cfg(test)]
+    current_reach_calls: Mutex<Vec<(i64, i64)>>,
+    #[cfg(test)]
+    chat_by_id_calls: Mutex<Vec<i64>>,
+    #[cfg(test)]
+    rate_limit_injections: Mutex<Vec<TestFailurePoint>>,
+    #[cfg(test)]
+    injected_failures_seen: AtomicUsize,
+    #[cfg(test)]
+    injected_failure_notify: Notify,
 }
 
 impl DemoGateway {
@@ -69,6 +86,16 @@ impl DemoGateway {
             delete_batch_sizes: Mutex::new(Vec::new()),
             #[cfg(test)]
             delete_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            current_reach_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            chat_by_id_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            rate_limit_injections: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            injected_failures_seen: AtomicUsize::new(0),
+            #[cfg(test)]
+            injected_failure_notify: Notify::new(),
         }
     }
 
@@ -108,6 +135,17 @@ impl DemoGateway {
     }
 
     #[cfg(test)]
+    pub(crate) async fn clear_test_traces(&self) {
+        self.operation_log.lock().await.clear();
+        self.delete_batch_sizes.lock().await.clear();
+        self.delete_calls.lock().await.clear();
+        self.current_reach_calls.lock().await.clear();
+        self.chat_by_id_calls.lock().await.clear();
+        self.rate_limit_injections.lock().await.clear();
+        self.injected_failures_seen.store(0, Ordering::Release);
+    }
+
+    #[cfg(test)]
     pub(crate) async fn delete_batch_sizes(&self) -> Vec<usize> {
         self.delete_batch_sizes.lock().await.clone()
     }
@@ -115,6 +153,50 @@ impl DemoGateway {
     #[cfg(test)]
     pub(crate) async fn delete_calls(&self) -> Vec<(i64, Vec<i64>)> {
         self.delete_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn current_reach_calls(&self) -> Vec<(i64, i64)> {
+        self.current_reach_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn chat_by_id_calls(&self) -> Vec<i64> {
+        self.chat_by_id_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn inject_rate_limit_once(&self, point: TestFailurePoint) {
+        self.rate_limit_injections.lock().await.push(point);
+    }
+
+    #[cfg(test)]
+    async fn take_rate_limit(&self, point: TestFailurePoint) -> bool {
+        let mut injections = self.rate_limit_injections.lock().await;
+        let Some(index) = injections.iter().position(|candidate| *candidate == point) else {
+            return false;
+        };
+        injections.remove(index);
+        drop(injections);
+        self.injected_failures_seen.fetch_add(1, Ordering::AcqRel);
+        self.injected_failure_notify.notify_one();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_injected_failure(&self, expected_count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if self.injected_failures_seen.load(Ordering::Acquire) >= expected_count {
+                    return;
+                }
+                self.injected_failure_notify.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("expected {expected_count} injected synthetic gateway failures")
+        });
     }
 
     #[cfg(test)]
@@ -133,6 +215,17 @@ impl DemoGateway {
             })
             .expect("synthetic message exists");
         message.snapshot.deletion_reach = reach;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_chat_clear_authority(&self, chat_id: i64, allowed: bool) {
+        let mut data = self.data.write().await;
+        let chat = data
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == chat_id)
+            .expect("synthetic chat exists");
+        chat.capabilities.can_clear_for_everyone = allowed;
     }
 
     #[cfg(test)]
@@ -218,7 +311,10 @@ impl TelegramGateway for DemoGateway {
 
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError> {
         #[cfg(test)]
-        self.direct_chat_reads.fetch_add(1, Ordering::AcqRel);
+        {
+            self.direct_chat_reads.fetch_add(1, Ordering::AcqRel);
+            self.chat_by_id_calls.lock().await.push(chat_id);
+        }
         let data = self.data.read().await;
         Ok(data
             .chats
@@ -347,6 +443,10 @@ impl TelegramGateway for DemoGateway {
     ) -> Result<Option<DeletionReach>, AppError> {
         #[cfg(test)]
         {
+            self.current_reach_calls
+                .lock()
+                .await
+                .push((chat_id, message_id));
             self.current_reach_started.store(true, Ordering::Release);
             let delay = self.current_reach_delay_ms.load(Ordering::Acquire);
             if delay > 0 {
@@ -386,6 +486,12 @@ impl TelegramGateway for DemoGateway {
                 .lock()
                 .await
                 .push((chat_id, message_ids.to_vec()));
+            if self
+                .take_rate_limit(TestFailurePoint::DeleteMessagesForEveryone)
+                .await
+            {
+                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
+            }
         }
         if message_ids.is_empty() || message_ids.len() > 100 {
             return Err(AppError::Gateway("invalid deletion batch".into()));
@@ -414,8 +520,16 @@ impl TelegramGateway for DemoGateway {
 
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), AppError> {
         #[cfg(test)]
-        self.record(format!("clear_history_for_everyone:{chat_id}"))
-            .await;
+        {
+            self.record(format!("clear_history_for_everyone:{chat_id}"))
+                .await;
+            if self
+                .take_rate_limit(TestFailurePoint::ClearHistoryForEveryone)
+                .await
+            {
+                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
+            }
+        }
         let mut data = self.data.write().await;
         let chat = data
             .chats
