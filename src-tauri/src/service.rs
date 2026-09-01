@@ -1172,6 +1172,35 @@ mod tests {
         })
     }
 
+    async fn wait_for_persisted_terminal_job(
+        path: &std::path::Path,
+        key: [u8; 32],
+        job_id: Uuid,
+    ) -> PersistedState {
+        tokio::time::timeout(TERMINAL_JOB_TIMEOUT, async {
+            loop {
+                let state = SecureJobStore::with_test_key(path.to_path_buf(), key)
+                    .load()
+                    .unwrap();
+                if state
+                    .jobs
+                    .iter()
+                    .any(|job| job.id == job_id && job.status.is_terminal())
+                {
+                    return state;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "job {job_id} was not durably terminal within {} seconds",
+                TERMINAL_JOB_TIMEOUT.as_secs()
+            )
+        })
+    }
+
     async fn wait_for_rate_limited_job(service: &CleanerService, job_id: Uuid) -> JobRecord {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -2019,7 +2048,7 @@ mod tests {
                     .all(|message_id| *message_id >= 70_100)
             );
 
-            let reloaded = SecureJobStore::with_test_key(path, key).load().unwrap();
+            let reloaded = wait_for_persisted_terminal_job(&path, key, job_id).await;
             assert_eq!(reloaded.plans, vec![plan]);
             assert_eq!(reloaded.jobs.len(), 1);
             assert_eq!(reloaded.jobs[0].status, JobStatus::Completed);
