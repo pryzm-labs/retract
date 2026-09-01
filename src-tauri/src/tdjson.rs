@@ -32,7 +32,43 @@ const RECEIVE_TIMEOUT_SECONDS: c_double = 1.0;
 /// receiver. Retract enforces that contract with one dedicated receiver thread.
 #[derive(Clone)]
 pub struct TdJsonClient {
-    inner: Arc<Inner>,
+    backend: ClientBackend,
+}
+
+#[derive(Clone)]
+enum ClientBackend {
+    Native(Arc<Inner>),
+    #[cfg(test)]
+    Scripted(Arc<ScriptedState>),
+}
+
+#[cfg(test)]
+struct ScriptedState {
+    exchanges: Mutex<Vec<ScriptedExchange>>,
+    traces: Mutex<Vec<ScriptedRequestTrace>>,
+    updates: broadcast::Sender<Value>,
+}
+
+#[cfg(test)]
+struct ScriptedExchange {
+    request: Value,
+    response: Value,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScriptedRequestTrace {
+    pub kind: String,
+    pub chat_id: Option<i64>,
+    pub message_id: Option<i64>,
+    pub message_ids: Vec<i64>,
+    pub from_message_id: Option<i64>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ScriptedTdJson {
+    state: Arc<ScriptedState>,
 }
 
 struct Inner {
@@ -112,56 +148,171 @@ impl TdJsonClient {
             updates,
         });
         spawn_receiver(Arc::downgrade(&inner));
-        Ok(Self { inner })
+        Ok(Self {
+            backend: ClientBackend::Native(inner),
+        })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.inner.updates.subscribe()
+        match &self.backend {
+            ClientBackend::Native(inner) => inner.updates.subscribe(),
+            #[cfg(test)]
+            ClientBackend::Scripted(state) => state.updates.subscribe(),
+        }
     }
 
-    pub async fn request(&self, mut request: Value) -> Result<Value, AppError> {
-        if self.inner.closing.load(Ordering::Acquire) {
-            return Err(AppError::Gateway("TDLIB_CLIENT_CLOSED".into()));
+    pub async fn request(&self, request: Value) -> Result<Value, AppError> {
+        match &self.backend {
+            ClientBackend::Native(inner) => native_request(Arc::clone(inner), request).await,
+            #[cfg(test)]
+            ClientBackend::Scripted(state) => scripted_request(state, request),
         }
-        let extra = Uuid::new_v4().to_string();
-        request
-            .as_object_mut()
-            .ok_or_else(|| AppError::InvalidRequest("TDLib request must be an object".into()))?
-            .insert("@extra".into(), Value::String(extra.clone()));
-        let serialized = serde_json::to_string(&request)
-            .map_err(|error| AppError::Gateway(format!("TDLIB_JSON_ENCODE: {error}")))?;
-        let c_request = CString::new(serialized)
-            .map_err(|_| AppError::Gateway("TDLIB_JSON_CONTAINS_NUL".into()))?;
-        let (sender, receiver) = oneshot::channel();
-        self.inner
-            .pending
-            .lock()
-            .map_err(|_| AppError::StateUnavailable)?
-            .insert(extra.clone(), sender);
-        // Keep pending request cleanup cancellation-safe. Foreground operations
-        // use a shorter aggregate timeout than the generic TDLib request limit,
-        // so dropping this future must not strand a sender in the routing map.
-        let _pending_request = PendingRequest {
-            inner: Arc::clone(&self.inner),
-            extra: extra.clone(),
-        };
-        // Safety: the handle and function pointer live in the same Inner. TDLib
-        // copies the null-terminated request before this function returns.
-        unsafe { (self.inner.send)(self.inner.handle, c_request.as_ptr()) };
+    }
 
-        let response = tokio::time::timeout(Duration::from_secs(45), receiver)
-            .await
-            .map_err(|_| AppError::Gateway("TDLIB_REQUEST_TIMEOUT".into()))?
-            .map_err(|_| AppError::Gateway("TDLIB_RESPONSE_CHANNEL_CLOSED".into()))?;
-        if response.get("@type").and_then(Value::as_str) == Some("error") {
-            let code = value_i64(response.get("code")).unwrap_or_default();
-            let message = response
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("UNKNOWN");
-            return Err(AppError::Gateway(format!("{code} {message}")));
-        }
-        Ok(response)
+    #[cfg(test)]
+    pub(crate) fn scripted() -> (Self, ScriptedTdJson) {
+        let (updates, _) = broadcast::channel(512);
+        let state = Arc::new(ScriptedState {
+            exchanges: Mutex::new(Vec::new()),
+            traces: Mutex::new(Vec::new()),
+            updates,
+        });
+        (
+            Self {
+                backend: ClientBackend::Scripted(Arc::clone(&state)),
+            },
+            ScriptedTdJson { state },
+        )
+    }
+}
+
+async fn native_request(inner: Arc<Inner>, mut request: Value) -> Result<Value, AppError> {
+    if inner.closing.load(Ordering::Acquire) {
+        return Err(AppError::Gateway("TDLIB_CLIENT_CLOSED".into()));
+    }
+    let extra = Uuid::new_v4().to_string();
+    request
+        .as_object_mut()
+        .ok_or_else(|| AppError::InvalidRequest("TDLib request must be an object".into()))?
+        .insert("@extra".into(), Value::String(extra.clone()));
+    let serialized = serde_json::to_string(&request)
+        .map_err(|error| AppError::Gateway(format!("TDLIB_JSON_ENCODE: {error}")))?;
+    let c_request = CString::new(serialized)
+        .map_err(|_| AppError::Gateway("TDLIB_JSON_CONTAINS_NUL".into()))?;
+    let (sender, receiver) = oneshot::channel();
+    inner
+        .pending
+        .lock()
+        .map_err(|_| AppError::StateUnavailable)?
+        .insert(extra.clone(), sender);
+    // Keep pending request cleanup cancellation-safe. Foreground operations
+    // use a shorter aggregate timeout than the generic TDLib request limit,
+    // so dropping this future must not strand a sender in the routing map.
+    let _pending_request = PendingRequest {
+        inner: Arc::clone(&inner),
+        extra: extra.clone(),
+    };
+    // Safety: the handle and function pointer live in the same Inner. TDLib
+    // copies the null-terminated request before this function returns.
+    unsafe { (inner.send)(inner.handle, c_request.as_ptr()) };
+
+    let response = tokio::time::timeout(Duration::from_secs(45), receiver)
+        .await
+        .map_err(|_| AppError::Gateway("TDLIB_REQUEST_TIMEOUT".into()))?
+        .map_err(|_| AppError::Gateway("TDLIB_RESPONSE_CHANNEL_CLOSED".into()))?;
+    checked_response(response)
+}
+
+fn checked_response(response: Value) -> Result<Value, AppError> {
+    if response.get("@type").and_then(Value::as_str) == Some("error") {
+        let code = value_i64(response.get("code")).unwrap_or_default();
+        let message = response
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        return Err(AppError::Gateway(format!("{code} {message}")));
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+fn scripted_request(state: &ScriptedState, request: Value) -> Result<Value, AppError> {
+    let trace = scripted_trace(&request);
+    state
+        .traces
+        .lock()
+        .map_err(|_| AppError::StateUnavailable)?
+        .push(trace.clone());
+    let mut exchanges = state
+        .exchanges
+        .lock()
+        .map_err(|_| AppError::StateUnavailable)?;
+    let Some(index) = exchanges
+        .iter()
+        .position(|exchange| exchange.request == request)
+    else {
+        return Err(AppError::Gateway(format!(
+            "SCRIPTED_TDJSON_UNEXPECTED_REQUEST:{}",
+            trace.kind
+        )));
+    };
+    checked_response(exchanges.remove(index).response)
+}
+
+#[cfg(test)]
+fn scripted_trace(request: &Value) -> ScriptedRequestTrace {
+    ScriptedRequestTrace {
+        kind: request
+            .get("@type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        chat_id: value_i64(request.get("chat_id")),
+        message_id: value_i64(request.get("message_id")),
+        message_ids: request
+            .get("message_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value_i64(Some(value)))
+            .collect(),
+        from_message_id: value_i64(request.get("from_message_id")),
+    }
+}
+
+#[cfg(test)]
+impl ScriptedTdJson {
+    pub(crate) fn respond(&self, request: Value, response: Value) {
+        self.state
+            .exchanges
+            .lock()
+            .expect("scripted TDJSON exchange lock")
+            .push(ScriptedExchange { request, response });
+    }
+
+    pub(crate) fn emit_update(&self, update: Value) {
+        let _ = self.state.updates.send(update);
+    }
+
+    pub(crate) fn traces(&self) -> Vec<ScriptedRequestTrace> {
+        self.state
+            .traces
+            .lock()
+            .expect("scripted TDJSON trace lock")
+            .clone()
+    }
+
+    pub(crate) fn assert_drained(&self) {
+        let exchanges = self
+            .state
+            .exchanges
+            .lock()
+            .expect("scripted TDJSON exchange lock");
+        assert!(
+            exchanges.is_empty(),
+            "{} scripted TDJSON exchanges were not consumed",
+            exchanges.len()
+        );
     }
 }
 

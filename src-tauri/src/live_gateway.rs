@@ -159,6 +159,32 @@ impl LiveGateway {
         Ok(gateway)
     }
 
+    #[cfg(test)]
+    fn connect_scripted(config: LiveGatewayConfig, client: TdJsonClient) -> Arc<Self> {
+        let gateway = Arc::new(Self {
+            client,
+            config,
+            auth: SyncRwLock::new(AuthSnapshot::ready()),
+            account_label: SyncRwLock::new("Synthetic Telegram account".into()),
+            own_user_id: AtomicI64::new(42),
+            sender_names: RwLock::new(HashMap::new()),
+            chat_kinds: RwLock::new(HashMap::new()),
+            catalog_loaded: AtomicBool::new(false),
+            search_generation: AtomicU64::new(0),
+            version_compatible: AtomicBool::new(true),
+            catalog_load_lock: Mutex::new(()),
+            chat_summary_cache: RwLock::new(None),
+            chat_summary_load_lock: Mutex::new(()),
+            dirty_chat_summaries: Mutex::new(HashSet::new()),
+            group_chat_ids: RwLock::new(HashMap::new()),
+            catalog_phase: AtomicU8::new(CATALOG_IDLE),
+            catalog_total: AtomicUsize::new(0),
+            catalog_processed: AtomicUsize::new(0),
+        });
+        Self::start_update_loop(&gateway);
+        gateway
+    }
+
     fn start_update_loop(gateway: &Arc<Self>) {
         let mut updates = gateway.client.subscribe();
         let weak = Arc::downgrade(gateway);
@@ -1935,12 +1961,944 @@ fn humanize_message_type(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tdjson::ScriptedTdJson;
+
+    const SCRIPTED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    fn orchestration_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../tests/fixtures/tdlib/live-orchestration.json"
+        ))
+        .expect("valid synthetic live TDLib orchestration fixture")
+    }
+
+    fn scripted_gateway() -> (Arc<LiveGateway>, ScriptedTdJson, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let (client, script) = TdJsonClient::scripted();
+        let gateway = LiveGateway::connect_scripted(
+            LiveGatewayConfig::new(
+                PathBuf::from("synthetic-tdlib"),
+                7,
+                Zeroizing::new("synthetic-api-value".into()),
+                true,
+                directory.path().join("synthetic-profile"),
+                [0x31; 32],
+            ),
+            client,
+        );
+        (gateway, script, directory)
+    }
+
+    fn respond_with_chat_mapping(script: &ScriptedTdJson, case: &Value) {
+        let chat_id = value_i64(case.pointer("/chat/id")).unwrap();
+        script.respond(
+            json!({ "@type": "getChat", "chat_id": chat_id }),
+            case["chat"].clone(),
+        );
+        if !case["detailRequest"].is_null() {
+            script.respond(
+                case["detailRequest"].clone(),
+                case["detailResponse"].clone(),
+            );
+        }
+    }
+
+    fn respond_with_reach(
+        script: &ScriptedTdJson,
+        chat_id: i64,
+        message_id: i64,
+        reach: DeletionReach,
+    ) {
+        script.respond(
+            json!({
+                "@type": "getMessageProperties",
+                "chat_id": chat_id,
+                "message_id": message_id
+            }),
+            json!({
+                "@type": "messageProperties",
+                "can_be_deleted_for_all_users": reach == DeletionReach::Everyone,
+                "can_be_deleted_only_for_self": reach == DeletionReach::SelfOnly
+            }),
+        );
+    }
+
+    fn raw_text_message(
+        chat_id: i64,
+        message_id: i64,
+        date: i64,
+        outgoing: bool,
+        pinned: bool,
+        sender_id: i64,
+        text: &str,
+    ) -> Value {
+        json!({
+            "@type": "message",
+            "id": message_id,
+            "chat_id": chat_id,
+            "date": date,
+            "is_outgoing": outgoing,
+            "is_pinned": pinned,
+            "media_album_id": "0",
+            "sender_id": { "@type": "messageSenderUser", "user_id": sender_id },
+            "content": {
+                "@type": "messageText",
+                "text": { "@type": "formattedText", "text": text, "entities": [] }
+            }
+        })
+    }
+
+    fn search_request(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.into(),
+            chat_ids: Vec::new(),
+            chat_kinds: Vec::new(),
+            content_kinds: Vec::new(),
+            direction: MessageDirection::Any,
+            min_date: None,
+            max_date: None,
+            exclude_pinned: false,
+            privacy_scan: false,
+            limit: 20,
+        }
+    }
+
+    async fn wait_for_auth_stage(gateway: &LiveGateway, expected: AuthStage) -> AuthSnapshot {
+        tokio::time::timeout(SCRIPTED_WAIT, async {
+            loop {
+                let snapshot = gateway.auth();
+                if snapshot.stage == expected {
+                    return snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("scripted auth did not reach {expected:?}"))
+    }
+
+    async fn wait_for_dirty_chat(gateway: &LiveGateway, chat_id: i64) {
+        tokio::time::timeout(SCRIPTED_WAIT, async {
+            loop {
+                if gateway.dirty_chat_summaries.lock().await.contains(&chat_id) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("chat {chat_id} was not marked dirty"));
+    }
+
+    #[test]
+    fn scripted_tdjson_drives_all_production_chat_mapping_branches() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            let fixture = orchestration_fixture();
+            let cases = fixture["chatMappings"].as_array().unwrap();
+            assert_eq!(cases.len(), 9);
+
+            for case in cases {
+                respond_with_chat_mapping(&script, case);
+                let chat_id = value_i64(case.pointer("/chat/id")).unwrap();
+                let chat = gateway.chat_by_id(chat_id).await.unwrap().unwrap();
+                assert_eq!(
+                    serde_json::to_value(chat.kind).unwrap(),
+                    case["expectedKind"],
+                    "{}",
+                    case["name"]
+                );
+                assert_eq!(chat.archived, case["expectedArchived"].as_bool().unwrap());
+                assert_eq!(
+                    chat.member_count.map(Value::from).unwrap_or(Value::Null),
+                    case["expectedMemberCount"]
+                );
+                assert_eq!(
+                    serde_json::to_value(chat.capabilities.role).unwrap(),
+                    case["expectedRole"]
+                );
+                assert_eq!(
+                    chat.capabilities.can_delete_others,
+                    case["expectedDeleteOthers"].as_bool().unwrap()
+                );
+                assert_eq!(
+                    chat.capabilities.can_clear_for_everyone,
+                    case["expectedClear"].as_bool().unwrap()
+                );
+                assert_eq!(
+                    chat.capabilities.can_remove_for_self,
+                    case["expectedRemove"].as_bool().unwrap()
+                );
+                assert_eq!(
+                    chat.capabilities.can_delete_group,
+                    case["expectedDeleteGroup"].as_bool().unwrap()
+                );
+                assert_eq!(
+                    chat.capabilities.can_delete_by_sender,
+                    case["expectedDeleteBySender"].as_bool().unwrap()
+                );
+                assert_eq!(
+                    chat.capabilities.can_leave_chat,
+                    case["expectedLeave"].as_bool().unwrap()
+                );
+            }
+
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "getChat")
+                    .count(),
+                9
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_drives_production_message_mapping_properties() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            let cases = fixture("message-content");
+            let cases = cases.as_array().unwrap();
+            let message_ids = (0..cases.len())
+                .map(|index| 6001 + i64::try_from(index).unwrap())
+                .collect::<Vec<_>>();
+            let messages = cases
+                .iter()
+                .enumerate()
+                .map(|(index, case)| {
+                    let message_id = message_ids[index];
+                    json!({
+                        "@type": "message",
+                        "id": message_id,
+                        "chat_id": 1101,
+                        "date": 1_700_000_000 + i64::try_from(index).unwrap(),
+                        "is_outgoing": true,
+                        "is_pinned": index == 2,
+                        "media_album_id": if index == 1 { "8801" } else { "0" },
+                        "sender_id": { "@type": "messageSenderUser", "user_id": 42 },
+                        "content": case["content"].clone()
+                    })
+                })
+                .collect::<Vec<_>>();
+            script.respond(
+                json!({
+                    "@type": "getMessages",
+                    "chat_id": 1101,
+                    "message_ids": message_ids
+                }),
+                json!({ "@type": "messages", "messages": messages }),
+            );
+            for (index, message_id) in message_ids.iter().enumerate() {
+                let reach = match index {
+                    0 => DeletionReach::Everyone,
+                    1 => DeletionReach::SelfOnly,
+                    _ => DeletionReach::None,
+                };
+                respond_with_reach(&script, 1101, *message_id, reach);
+            }
+
+            let refs = message_ids
+                .iter()
+                .map(|message_id| (1101, *message_id))
+                .collect::<Vec<_>>();
+            let mapped = gateway.messages_by_ids(&refs).await.unwrap();
+            assert_eq!(mapped.len(), cases.len());
+            for (index, message) in mapped.iter().enumerate() {
+                assert_eq!(
+                    serde_json::to_value(message.content_kind).unwrap(),
+                    cases[index]["expectedKind"]
+                );
+                assert_eq!(
+                    message.preview,
+                    cases[index]["expectedPreview"].as_str().unwrap()
+                );
+                assert_eq!(message.sender_name, "You");
+                assert_eq!(message.album_id, (index == 1).then_some(8801));
+                assert_eq!(message.is_pinned, index == 2);
+                assert_eq!(
+                    message.deletion_reach,
+                    match index {
+                        0 => DeletionReach::Everyone,
+                        1 => DeletionReach::SelfOnly,
+                        _ => DeletionReach::None,
+                    }
+                );
+            }
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_drives_auth_transitions_without_exposing_submitted_secrets() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, directory) = scripted_gateway();
+            let profile = directory.path().join("synthetic-profile");
+            script.respond(
+                json!({
+                    "@type": "setTdlibParameters",
+                    "use_test_dc": true,
+                    "database_directory": profile.join("database").to_string_lossy(),
+                    "files_directory": profile.join("files").to_string_lossy(),
+                    "database_encryption_key": BASE64.encode([0x31; 32]),
+                    "use_file_database": true,
+                    "use_chat_info_database": true,
+                    "use_message_database": true,
+                    "use_secret_chats": true,
+                    "api_id": 7,
+                    "api_hash": "synthetic-api-value",
+                    "system_language_code": "en-US",
+                    "device_model": "Mac",
+                    "system_version": std::env::consts::OS,
+                    "application_version": env!("CARGO_PKG_VERSION")
+                }),
+                json!({ "@type": "ok" }),
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitTdlibParameters" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::Initializing).await;
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitPhoneNumber" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForPhone).await;
+            script.respond(
+                json!({
+                    "@type": "requestQrCodeAuthentication",
+                    "other_user_ids": []
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway.request_qr_auth().await.unwrap();
+            script.respond(
+                json!({
+                    "@type": "setAuthenticationPhoneNumber",
+                    "phone_number": "synthetic-value",
+                    "settings": null
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway.submit_phone("synthetic-value").await.unwrap();
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitEmailAddress" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForEmailAddress).await;
+            script.respond(
+                json!({
+                    "@type": "setAuthenticationEmailAddress",
+                    "email_address": "synthetic@example.invalid"
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway
+                .submit_email_address("synthetic@example.invalid")
+                .await
+                .unwrap();
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": {
+                    "@type": "authorizationStateWaitEmailCode",
+                    "code_info": { "email_address_pattern": "synthetic-pattern" }
+                }
+            }));
+            let email = wait_for_auth_stage(&gateway, AuthStage::WaitingForEmailCode).await;
+            assert_eq!(email.hint.as_deref(), Some("synthetic-pattern"));
+            script.respond(
+                json!({
+                    "@type": "checkAuthenticationEmailCode",
+                    "code": {
+                        "@type": "emailAddressAuthenticationCode",
+                        "code": "synthetic-value"
+                    }
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway.submit_email_code("synthetic-value").await.unwrap();
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitCode" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForCode).await;
+            script.respond(
+                json!({
+                    "@type": "checkAuthenticationCode",
+                    "code": "synthetic-value"
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway.submit_code("synthetic-value").await.unwrap();
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": {
+                    "@type": "authorizationStateWaitPassword",
+                    "password_hint": "synthetic hint"
+                }
+            }));
+            let password = wait_for_auth_stage(&gateway, AuthStage::WaitingForPassword).await;
+            assert_eq!(password.hint.as_deref(), Some("synthetic hint"));
+            script.respond(
+                json!({
+                    "@type": "checkAuthenticationPassword",
+                    "password": "synthetic-value"
+                }),
+                json!({ "@type": "ok" }),
+            );
+            gateway.submit_password("synthetic-value").await.unwrap();
+            assert!(
+                !serde_json::to_string(&gateway.auth())
+                    .unwrap()
+                    .contains("synthetic-value")
+            );
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": {
+                    "@type": "authorizationStateWaitOtherDeviceConfirmation",
+                    "link": "synthetic-device-link"
+                }
+            }));
+            let other = wait_for_auth_stage(&gateway, AuthStage::WaitingForOtherDevice).await;
+            assert_eq!(other.qr_link.as_deref(), Some("synthetic-device-link"));
+
+            script.respond(
+                json!({ "@type": "getMe" }),
+                json!({
+                    "@type": "user",
+                    "id": 42,
+                    "first_name": "Synthetic",
+                    "last_name": "Account"
+                }),
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::Ready).await;
+            tokio::time::timeout(SCRIPTED_WAIT, async {
+                loop {
+                    if gateway.info().account_label == "Synthetic Account" {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ready state resolves the synthetic account label");
+
+            for (state, expected) in [
+                ("authorizationStateLoggingOut", AuthStage::LoggingOut),
+                ("authorizationStateClosed", AuthStage::Closed),
+                ("authorizationStateWaitRegistration", AuthStage::Error),
+            ] {
+                script.emit_update(json!({
+                    "@type": "updateAuthorizationState",
+                    "authorization_state": { "@type": state }
+                }));
+                wait_for_auth_stage(&gateway, expected).await;
+            }
+
+            let kinds = script
+                .traces()
+                .into_iter()
+                .map(|trace| trace.kind)
+                .collect::<Vec<_>>();
+            for expected in [
+                "setTdlibParameters",
+                "requestQrCodeAuthentication",
+                "setAuthenticationPhoneNumber",
+                "setAuthenticationEmailAddress",
+                "checkAuthenticationEmailCode",
+                "checkAuthenticationCode",
+                "checkAuthenticationPassword",
+                "getMe",
+            ] {
+                assert_eq!(
+                    kinds
+                        .iter()
+                        .filter(|kind| kind.as_str() == expected)
+                        .count(),
+                    1
+                );
+            }
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_characterizes_catalog_cache_dedup_and_dirty_refresh() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            let fixture = orchestration_fixture();
+            let cases = fixture["chatMappings"].as_array().unwrap();
+            let selected = [&cases[0], &cases[2], &cases[8]];
+
+            for list in [
+                json!({ "@type": "chatListMain" }),
+                json!({ "@type": "chatListArchive" }),
+            ] {
+                let request = json!({
+                    "@type": "loadChats",
+                    "chat_list": list,
+                    "limit": 100
+                });
+                script.respond(request.clone(), json!({ "@type": "ok" }));
+                script.respond(
+                    request,
+                    json!({ "@type": "error", "code": 404, "message": "SYNTHETIC_END" }),
+                );
+            }
+            script.respond(
+                json!({ "@type": "getChats", "chat_list": null, "limit": 10000 }),
+                json!({ "@type": "chats", "chat_ids": [1101, -1103, -1109, 1101] }),
+            );
+            script.respond(
+                json!({
+                    "@type": "getChats",
+                    "chat_list": { "@type": "chatListArchive" },
+                    "limit": 10000
+                }),
+                json!({ "@type": "chats", "chat_ids": [-1103] }),
+            );
+            for case in selected {
+                respond_with_chat_mapping(&script, case);
+            }
+
+            let first = gateway.chats().await.unwrap();
+            assert_eq!(first.len(), 3);
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|chat| chat.id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                3
+            );
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|chat| chat.title.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "Synthetic basic owner",
+                    "Synthetic channel member",
+                    "Synthetic direct"
+                ]
+            );
+            assert_eq!(gateway.catalog_progress().phase, "ready");
+            assert_eq!(gateway.catalog_progress().total, 3);
+            assert_eq!(gateway.catalog_progress().processed, 3);
+            let initial_trace_count = script.traces().len();
+            assert_eq!(gateway.chats().await.unwrap(), first);
+            assert_eq!(script.traces().len(), initial_trace_count);
+
+            let mut changed = cases[0]["chat"].clone();
+            changed["title"] = Value::String("Synthetic direct refreshed".into());
+            script.respond(json!({ "@type": "getChat", "chat_id": 1101 }), changed);
+            script.emit_update(json!({
+                "@type": "updateChatTitle",
+                "chat_id": 1101,
+                "title": "Synthetic direct refreshed"
+            }));
+            wait_for_dirty_chat(&gateway, 1101).await;
+            let refreshed = gateway.chats().await.unwrap();
+            assert!(
+                refreshed
+                    .iter()
+                    .any(|chat| chat.id == 1101 && chat.title == "Synthetic direct refreshed")
+            );
+
+            script.respond(
+                json!({ "@type": "getChat", "chat_id": -1109 }),
+                json!({ "@type": "error", "code": 404, "message": "SYNTHETIC_MISSING" }),
+            );
+            assert!(gateway.chat_by_id(-1109).await.unwrap().is_none());
+            assert!(
+                gateway
+                    .chats()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|chat| chat.id != -1109)
+            );
+
+            let traces = script.traces();
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|trace| trace.kind == "loadChats")
+                    .count(),
+                4
+            );
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|trace| trace.kind == "getChats")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|trace| trace.kind == "getChat" && trace.chat_id == Some(1101))
+                    .count(),
+                2
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn scripted_tdjson_characterizes_search_routes_pagination_dedup_and_filters() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            gateway
+                .chat_kinds
+                .write()
+                .await
+                .extend([(1101, ChatKind::Direct), (1102, ChatKind::Secret)]);
+
+            let global_a = raw_text_message(1101, 7001, 1_700_000_001, true, false, 42, "Global A");
+            let global_b = raw_text_message(1101, 7002, 1_700_000_002, true, false, 42, "Global B");
+            let global_c = raw_text_message(1101, 7003, 1_700_000_003, true, false, 42, "Global C");
+            script.respond(
+                json!({
+                    "@type": "searchMessages",
+                    "chat_list": null,
+                    "query": "synthetic query",
+                    "offset": "",
+                    "limit": 100,
+                    "filter": null,
+                    "chat_type_filter": null,
+                    "min_date": 0,
+                    "max_date": 0
+                }),
+                json!({
+                    "@type": "foundMessages",
+                    "messages": [global_a, global_b.clone()],
+                    "next_offset": "page-2"
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchMessages",
+                    "chat_list": null,
+                    "query": "synthetic query",
+                    "offset": "page-2",
+                    "limit": 100,
+                    "filter": null,
+                    "chat_type_filter": null,
+                    "min_date": 0,
+                    "max_date": 0
+                }),
+                json!({
+                    "@type": "foundMessages",
+                    "messages": [global_b, global_c],
+                    "next_offset": ""
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchSecretMessages",
+                    "chat_id": 0,
+                    "query": "synthetic query",
+                    "offset": "",
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({ "@type": "foundMessages", "messages": [], "next_offset": "" }),
+            );
+            for message_id in 7001..=7003 {
+                respond_with_reach(&script, 1101, message_id, DeletionReach::Everyone);
+            }
+            let global = gateway
+                .search(&search_request("synthetic query"))
+                .await
+                .unwrap();
+            assert_eq!(
+                global
+                    .iter()
+                    .map(|message| message.message_id)
+                    .collect::<Vec<_>>(),
+                [7003, 7002, 7001]
+            );
+
+            let scoped_a = raw_text_message(1101, 7011, 1_700_000_011, true, false, 42, "Scoped A");
+            let scoped_b = raw_text_message(1101, 7012, 1_700_000_012, true, false, 42, "Scoped B");
+            let secret = raw_text_message(1102, 7013, 1_700_000_013, true, false, 42, "Secret");
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "scope",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [scoped_a, scoped_b.clone()],
+                    "next_from_message_id": 7012
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "scope",
+                    "sender_id": null,
+                    "from_message_id": 7012,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [scoped_b],
+                    "next_from_message_id": 0
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchSecretMessages",
+                    "chat_id": 1102,
+                    "query": "scope",
+                    "offset": "",
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundMessages",
+                    "messages": [secret],
+                    "next_offset": ""
+                }),
+            );
+            for (chat_id, message_id) in [(1101, 7011), (1101, 7012), (1102, 7013)] {
+                respond_with_reach(&script, chat_id, message_id, DeletionReach::Everyone);
+            }
+            let mut scoped_request = search_request("scope");
+            scoped_request.chat_ids = vec![1101, 1102];
+            let scoped = gateway.search(&scoped_request).await.unwrap();
+            assert_eq!(scoped.len(), 3);
+            assert_eq!(
+                scoped
+                    .iter()
+                    .map(|message| message.message_id)
+                    .collect::<HashSet<_>>(),
+                HashSet::from([7011, 7012, 7013])
+            );
+
+            let trace_count = script.traces().len();
+            assert!(
+                gateway
+                    .search(&search_request(""))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(script.traces().len(), trace_count);
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1102,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [],
+                    "next_from_message_id": 0
+                }),
+            );
+            let mut scoped_empty = search_request("");
+            scoped_empty.chat_ids = vec![1102];
+            assert!(gateway.search(&scoped_empty).await.unwrap().is_empty());
+
+            let filter_messages = [
+                json!({
+                    "@type": "message",
+                    "id": 7021,
+                    "chat_id": 1101,
+                    "date": 1_700_000_021_i64,
+                    "is_outgoing": true,
+                    "is_pinned": false,
+                    "sender_id": { "@type": "messageSenderUser", "user_id": 42 },
+                    "content": { "@type": "messagePhoto", "caption": { "text": "Visible photo" } }
+                }),
+                json!({
+                    "@type": "message",
+                    "id": 7022,
+                    "chat_id": 1101,
+                    "date": 1_700_000_022_i64,
+                    "is_outgoing": true,
+                    "is_pinned": true,
+                    "sender_id": { "@type": "messageSenderUser", "user_id": 42 },
+                    "content": { "@type": "messagePhoto", "caption": { "text": "Pinned photo" } }
+                }),
+                json!({
+                    "@type": "message",
+                    "id": 7023,
+                    "chat_id": 1101,
+                    "date": 1_700_000_023_i64,
+                    "is_outgoing": false,
+                    "is_pinned": false,
+                    "sender_id": { "@type": "messageSenderUser", "user_id": 42 },
+                    "content": { "@type": "messagePhoto", "caption": { "text": "Incoming photo" } }
+                }),
+            ];
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "filter",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": { "@type": "searchMessagesFilterPhoto" }
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": filter_messages,
+                    "next_from_message_id": 0
+                }),
+            );
+            for message_id in 7021..=7023 {
+                respond_with_reach(&script, 1101, message_id, DeletionReach::Everyone);
+            }
+            let mut filtered = search_request("filter");
+            filtered.chat_ids = vec![1101];
+            filtered.chat_kinds = vec![ChatKind::Direct];
+            filtered.content_kinds = vec![ContentKind::Photo];
+            filtered.direction = MessageDirection::Mine;
+            filtered.min_date = DateTime::from_timestamp(1_700_000_020, 0);
+            filtered.max_date = DateTime::from_timestamp(1_700_000_030, 0);
+            filtered.exclude_pinned = true;
+            assert_eq!(
+                gateway
+                    .search(&filtered)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|message| message.message_id)
+                    .collect::<Vec<_>>(),
+                [7021]
+            );
+
+            let privacy_message = raw_text_message(
+                1101,
+                7031,
+                1_700_000_031,
+                false,
+                false,
+                4401,
+                "Synthetic contact person@example.invalid",
+            );
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [privacy_message],
+                    "next_from_message_id": 7031
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 7031,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [],
+                    "next_from_message_id": 0
+                }),
+            );
+            script.respond(
+                json!({ "@type": "getUser", "user_id": 4401 }),
+                json!({
+                    "@type": "user",
+                    "id": 4401,
+                    "first_name": "Synthetic",
+                    "last_name": "Sender"
+                }),
+            );
+            respond_with_reach(&script, 1101, 7031, DeletionReach::Everyone);
+            let mut privacy = search_request("Synthetic Sender");
+            privacy.chat_ids = vec![1101];
+            privacy.direction = MessageDirection::Others;
+            privacy.privacy_scan = true;
+            let matches = gateway.search(&privacy).await.unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].message_id, 7031);
+            assert_eq!(matches[0].sender_name, "Synthetic Sender");
+            assert!(
+                matches[0]
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::EmailAddress)
+            );
+
+            let traces = script.traces();
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|trace| trace.kind == "searchMessages")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                traces
+                    .iter()
+                    .filter(|trace| trace.kind == "searchSecretMessages")
+                    .count(),
+                2
+            );
+            script.assert_drained();
+        });
+    }
 
     fn fixture(name: &str) -> Value {
         let raw = match name {
             "message-content" => include_str!("../tests/fixtures/tdlib/message-content.json"),
             "member-statuses" => include_str!("../tests/fixtures/tdlib/member-statuses.json"),
             "chat-positions" => include_str!("../tests/fixtures/tdlib/chat-positions.json"),
+            "live-orchestration" => {
+                include_str!("../tests/fixtures/tdlib/live-orchestration.json")
+            }
             _ => panic!("unknown synthetic TDLib fixture"),
         };
         serde_json::from_str(raw).expect("valid synthetic TDLib fixture")

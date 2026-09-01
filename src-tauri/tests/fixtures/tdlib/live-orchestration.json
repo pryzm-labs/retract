@@ -1,0 +1,272 @@
+{
+  "chatMappings": [
+    {
+      "name": "direct",
+      "chat": {
+        "@type": "chat",
+        "id": 1101,
+        "title": "Synthetic direct",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "900" }],
+        "type": { "@type": "chatTypePrivate", "user_id": 4101 },
+        "can_be_deleted_for_all_users": true,
+        "can_be_deleted_only_for_self": true,
+        "last_message": { "id": 5101, "chat_id": 1101, "is_outgoing": true }
+      },
+      "expectedKind": "direct",
+      "expectedArchived": false,
+      "expectedMemberCount": null,
+      "expectedRole": "member",
+      "expectedDeleteOthers": false,
+      "expectedClear": true,
+      "expectedRemove": true,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": false
+    },
+    {
+      "name": "secret",
+      "chat": {
+        "@type": "chat",
+        "id": 1102,
+        "title": "Synthetic secret",
+        "positions": [{ "list": { "@type": "chatListArchive" }, "order": "800" }],
+        "type": { "@type": "chatTypeSecret", "secret_chat_id": 4202 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": true,
+        "last_message": { "id": 5102, "chat_id": 1102, "is_outgoing": true }
+      },
+      "expectedKind": "secret",
+      "expectedArchived": true,
+      "expectedMemberCount": null,
+      "expectedRole": "member",
+      "expectedDeleteOthers": false,
+      "expectedClear": false,
+      "expectedRemove": true,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": false
+    },
+    {
+      "name": "basic-group-owner",
+      "chat": {
+        "@type": "chat",
+        "id": -1103,
+        "title": "Synthetic basic owner",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "700" }],
+        "type": { "@type": "chatTypeBasicGroup", "basic_group_id": 2103 },
+        "can_be_deleted_for_all_users": true,
+        "can_be_deleted_only_for_self": false,
+        "last_message": { "id": 5103, "chat_id": -1103, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getBasicGroup", "basic_group_id": 2103 },
+      "detailResponse": {
+        "@type": "basicGroup",
+        "id": 2103,
+        "member_count": 3,
+        "status": { "@type": "chatMemberStatusCreator" }
+      },
+      "expectedKind": "basic_group",
+      "expectedArchived": false,
+      "expectedMemberCount": 3,
+      "expectedRole": "owner",
+      "expectedDeleteOthers": true,
+      "expectedClear": true,
+      "expectedRemove": false,
+      "expectedDeleteGroup": true,
+      "expectedDeleteBySender": false,
+      "expectedLeave": false
+    },
+    {
+      "name": "supergroup-owner",
+      "chat": {
+        "@type": "chat",
+        "id": -1104,
+        "title": "Synthetic supergroup owner",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "600" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3104 },
+        "can_be_deleted_for_all_users": true,
+        "can_be_deleted_only_for_self": false,
+        "last_message": { "id": 5104, "chat_id": -1104, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3104 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3104,
+        "member_count": 4,
+        "is_channel": false,
+        "status": { "@type": "chatMemberStatusCreator" }
+      },
+      "expectedKind": "supergroup",
+      "expectedArchived": false,
+      "expectedMemberCount": 4,
+      "expectedRole": "owner",
+      "expectedDeleteOthers": true,
+      "expectedClear": true,
+      "expectedRemove": false,
+      "expectedDeleteGroup": true,
+      "expectedDeleteBySender": true,
+      "expectedLeave": false
+    },
+    {
+      "name": "supergroup-full-admin",
+      "chat": {
+        "@type": "chat",
+        "id": -1105,
+        "title": "Synthetic full admin",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "500" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3105 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": false,
+        "last_message": { "id": 5105, "chat_id": -1105, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3105 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3105,
+        "member_count": 5,
+        "is_channel": false,
+        "status": {
+          "@type": "chatMemberStatusAdministrator",
+          "rights": { "can_delete_messages": true }
+        }
+      },
+      "expectedKind": "supergroup",
+      "expectedArchived": false,
+      "expectedMemberCount": 5,
+      "expectedRole": "admin_with_delete",
+      "expectedDeleteOthers": true,
+      "expectedClear": false,
+      "expectedRemove": false,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": true,
+      "expectedLeave": true
+    },
+    {
+      "name": "supergroup-limited-admin",
+      "chat": {
+        "@type": "chat",
+        "id": -1106,
+        "title": "Synthetic limited admin",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "400" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3106 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": false,
+        "last_message": { "id": 5106, "chat_id": -1106, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3106 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3106,
+        "member_count": 6,
+        "is_channel": false,
+        "status": {
+          "@type": "chatMemberStatusAdministrator",
+          "rights": { "can_delete_messages": false }
+        }
+      },
+      "expectedKind": "supergroup",
+      "expectedArchived": false,
+      "expectedMemberCount": 6,
+      "expectedRole": "admin_limited",
+      "expectedDeleteOthers": false,
+      "expectedClear": false,
+      "expectedRemove": false,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": true
+    },
+    {
+      "name": "supergroup-restricted-member",
+      "chat": {
+        "@type": "chat",
+        "id": -1107,
+        "title": "Synthetic restricted member",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "300" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3107 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": false,
+        "last_message": { "id": 5107, "chat_id": -1107, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3107 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3107,
+        "member_count": 7,
+        "is_channel": false,
+        "status": { "@type": "chatMemberStatusRestricted", "is_member": true }
+      },
+      "expectedKind": "supergroup",
+      "expectedArchived": false,
+      "expectedMemberCount": 7,
+      "expectedRole": "member",
+      "expectedDeleteOthers": false,
+      "expectedClear": false,
+      "expectedRemove": false,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": true
+    },
+    {
+      "name": "supergroup-departed",
+      "chat": {
+        "@type": "chat",
+        "id": -1108,
+        "title": "Synthetic departed member",
+        "positions": [{ "list": { "@type": "chatListArchive" }, "order": "200" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3108 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": true,
+        "last_message": { "id": 5108, "chat_id": -1108, "is_outgoing": true }
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3108 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3108,
+        "member_count": 8,
+        "is_channel": false,
+        "status": { "@type": "chatMemberStatusLeft" }
+      },
+      "expectedKind": "supergroup",
+      "expectedArchived": true,
+      "expectedMemberCount": 8,
+      "expectedRole": "member",
+      "expectedDeleteOthers": false,
+      "expectedClear": false,
+      "expectedRemove": true,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": false
+    },
+    {
+      "name": "channel-member",
+      "chat": {
+        "@type": "chat",
+        "id": -1109,
+        "title": "Synthetic channel member",
+        "positions": [{ "list": { "@type": "chatListMain" }, "order": "100" }],
+        "type": { "@type": "chatTypeSupergroup", "supergroup_id": 3109 },
+        "can_be_deleted_for_all_users": false,
+        "can_be_deleted_only_for_self": false,
+        "last_message": null
+      },
+      "detailRequest": { "@type": "getSupergroup", "supergroup_id": 3109 },
+      "detailResponse": {
+        "@type": "supergroup",
+        "id": 3109,
+        "member_count": 9,
+        "is_channel": true,
+        "status": { "@type": "chatMemberStatusMember" }
+      },
+      "expectedKind": "channel",
+      "expectedArchived": false,
+      "expectedMemberCount": 9,
+      "expectedRole": "member",
+      "expectedDeleteOthers": false,
+      "expectedClear": false,
+      "expectedRemove": false,
+      "expectedDeleteGroup": false,
+      "expectedDeleteBySender": false,
+      "expectedLeave": true
+    }
+  ]
+}
