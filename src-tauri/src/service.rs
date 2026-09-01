@@ -1924,6 +1924,112 @@ mod tests {
     }
 
     #[test]
+    fn restart_resumes_selected_message_job_from_nonzero_batch_cursor() {
+        tauri::async_runtime::block_on(async {
+            const CHAT_ID: i64 = 101;
+            const FIRST_MESSAGE_ID: i64 = 70_000;
+            const MESSAGE_COUNT: usize = 205;
+            const COMPLETED_BATCH_SIZE: usize = 100;
+
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("jobs.enc");
+            let key = [38; 32];
+            let gateway = Arc::new(DemoGateway::new());
+            gateway
+                .append_messages(CHAT_ID, FIRST_MESSAGE_ID, MESSAGE_COUNT)
+                .await;
+            let message_refs = (0..MESSAGE_COUNT)
+                .map(|offset| MessageRef {
+                    chat_id: CHAT_ID,
+                    message_id: FIRST_MESSAGE_ID + offset as i64,
+                })
+                .collect::<Vec<_>>();
+            let preparation = CleanerService::new(
+                gateway.clone(),
+                SecureJobStore::with_test_key(path.clone(), key),
+            )
+            .unwrap();
+            let view = preparation
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: message_refs.clone(),
+                })
+                .await
+                .unwrap();
+            let plan = preparation
+                .plans
+                .read()
+                .await
+                .get(&view.id)
+                .cloned()
+                .unwrap();
+
+            let completed_ids = message_refs[..COMPLETED_BATCH_SIZE]
+                .iter()
+                .map(|message| message.message_id)
+                .collect::<Vec<_>>();
+            gateway
+                .delete_messages_for_everyone(CHAT_ID, &completed_ids)
+                .await
+                .unwrap();
+
+            let mut job = JobRecord::new(&plan);
+            job.status = JobStatus::Running;
+            job.deleted = COMPLETED_BATCH_SIZE;
+            job.next_batch = 1;
+            let job_id = job.id;
+            drop(preparation);
+            SecureJobStore::with_test_key(path.clone(), key)
+                .save(&PersistedState {
+                    plans: vec![plan.clone()],
+                    jobs: vec![job],
+                })
+                .unwrap();
+
+            gateway.clear_test_traces().await;
+            let service = CleanerService::new(
+                gateway.clone(),
+                SecureJobStore::with_test_key(path.clone(), key),
+            )
+            .unwrap();
+            service.resume_incomplete().await;
+
+            let finished = wait_for_terminal_job(&service, job_id).await;
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.total, MESSAGE_COUNT);
+            assert_eq!(finished.deleted, MESSAGE_COUNT);
+            assert_eq!(finished.skipped, 0);
+            assert_eq!(finished.failed, 0);
+            assert_eq!(finished.next_batch, 3);
+            assert_eq!(finished.retry_after_seconds, None);
+            assert_eq!(finished.error_codes, vec!["resumed_after_restart"]);
+            assert_eq!(gateway.delete_batch_sizes().await, vec![100, 5]);
+            assert_eq!(
+                gateway.delete_calls().await,
+                vec![
+                    (CHAT_ID, (70_100..=70_199).collect::<Vec<_>>()),
+                    (CHAT_ID, (70_200..=70_204).collect::<Vec<_>>()),
+                ]
+            );
+            assert!(
+                gateway
+                    .delete_calls()
+                    .await
+                    .iter()
+                    .flat_map(|(_, message_ids)| message_ids)
+                    .all(|message_id| *message_id >= 70_100)
+            );
+
+            let reloaded = SecureJobStore::with_test_key(path, key).load().unwrap();
+            assert_eq!(reloaded.plans, vec![plan]);
+            assert_eq!(reloaded.jobs.len(), 1);
+            assert_eq!(reloaded.jobs[0].status, JobStatus::Completed);
+            assert_eq!(reloaded.jobs[0].deleted, MESSAGE_COUNT);
+            assert_eq!(reloaded.jobs[0].next_batch, 3);
+            assert_eq!(reloaded.jobs[0].error_codes, vec!["resumed_after_restart"]);
+        });
+    }
+
+    #[test]
     fn restart_resumes_own_message_job_from_frozen_ids() {
         tauri::async_runtime::block_on(async {
             const NEW_OWN_MESSAGE_ID: i64 = 60_001;

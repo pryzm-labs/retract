@@ -587,6 +587,167 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::model::PersistedState;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    // Frozen once with Node.js crypto over hand-authored JSON, independently of
+    // this module's Rust serializers and encryption implementation.
+    const FROZEN_LEGACY_KEY: [u8; KEY_LENGTH] = [0x61; KEY_LENGTH];
+    const FROZEN_CURRENT_KEY: [u8; KEY_LENGTH] = [0x62; KEY_LENGTH];
+    const FROZEN_PROFILE: &[u8] = b"telegram-compatibility";
+
+    fn frozen_expected_state() -> serde_json::Value {
+        serde_json::json!({
+            "plans": [
+                {
+                    "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "operation": "selected_messages",
+                    "target_chat_id": -2101,
+                    "target_sender_id": null,
+                    "target_sender_name": null,
+                    "chat_title": null,
+                    "items": [
+                        {
+                            "chat_id": -2101,
+                            "message_id": 8101,
+                            "expected_reach": "everyone"
+                        },
+                        {
+                            "chat_id": -2101,
+                            "message_id": 8102,
+                            "expected_reach": "everyone"
+                        }
+                    ],
+                    "summary": {
+                        "selected": 2,
+                        "deleteForEveryone": 2,
+                        "selfOnly": 0,
+                        "cannotDelete": 0
+                    },
+                    "confirmation_tier": "low",
+                    "fingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "created_at": "2026-01-02T03:04:05Z"
+                },
+                {
+                    "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "operation": "clear_history",
+                    "target_chat_id": -2102,
+                    "target_sender_id": null,
+                    "target_sender_name": null,
+                    "chat_title": "Synthetic history",
+                    "items": [],
+                    "summary": {
+                        "selected": 0,
+                        "deleteForEveryone": 0,
+                        "selfOnly": 0,
+                        "cannotDelete": 0
+                    },
+                    "confirmation_tier": "high",
+                    "fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    "created_at": "2026-01-02T03:05:05Z"
+                }
+            ],
+            "jobs": [
+                {
+                    "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "planId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "operation": "selected_messages",
+                    "targetChatIds": [-2101],
+                    "status": "completed",
+                    "total": 2,
+                    "deleted": 2,
+                    "skipped": 0,
+                    "failed": 0,
+                    "nextBatch": 1,
+                    "retryAfterSeconds": null,
+                    "errorCodes": [],
+                    "createdAt": "2026-01-02T03:04:06Z",
+                    "updatedAt": "2026-01-02T03:04:07Z"
+                },
+                {
+                    "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "planId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "operation": "clear_history",
+                    "targetChatIds": [-2102],
+                    "status": "running",
+                    "total": 0,
+                    "deleted": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                    "nextBatch": 0,
+                    "retryAfterSeconds": 1,
+                    "errorCodes": ["telegram_rate_limited"],
+                    "createdAt": "2026-01-02T03:05:06Z",
+                    "updatedAt": "2026-01-02T03:05:07Z"
+                }
+            ]
+        })
+    }
+
+    fn decode_frozen_fixture(raw: &str) -> Vec<u8> {
+        BASE64
+            .decode(raw.trim())
+            .expect("valid frozen encrypted fixture base64")
+    }
+
+    fn assert_frozen_fixture(
+        encoded: &str,
+        key: [u8; KEY_LENGTH],
+        profile: &[u8],
+        legacy_unbound: bool,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let original = decode_frozen_fixture(encoded);
+        fs::write(&path, &original).unwrap();
+        let store = SecureJobStore::with_test_key_and_profile(path.clone(), key, profile);
+        let state = store.load().unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            frozen_expected_state()
+        );
+        assert_eq!(store.loaded_legacy_unbound(), legacy_unbound);
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        for forbidden in [
+            "preview",
+            "caption",
+            "fileName",
+            "attachment",
+            "apiHash",
+            "password",
+            "authCode",
+        ] {
+            assert!(!serialized.contains(forbidden), "found {forbidden}");
+        }
+
+        let mut tampered = original;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        fs::write(&path, tampered).unwrap();
+        assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn loads_frozen_nonempty_rtrct01_state_without_current_struct_serialization() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/secure-store/rtrct01-nonempty.b64");
+        assert_frozen_fixture(FIXTURE, FROZEN_LEGACY_KEY, b"synthetic-other-profile", true);
+    }
+
+    #[test]
+    fn loads_frozen_nonempty_rtrct02_state_with_profile_binding() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/secure-store/rtrct02-nonempty.b64");
+        assert_frozen_fixture(FIXTURE, FROZEN_CURRENT_KEY, FROZEN_PROFILE, false);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        fs::write(&path, decode_frozen_fixture(FIXTURE)).unwrap();
+        let wrong_profile = SecureJobStore::with_test_key_and_profile(
+            path,
+            FROZEN_CURRENT_KEY,
+            b"synthetic-other-profile",
+        );
+        assert!(wrong_profile.load().is_err());
+    }
 
     #[test]
     fn loads_job_store_written_by_aes_gcm_010() {
@@ -647,6 +808,25 @@ mod tests {
         bytes[last] ^= 1;
         fs::write(path, bytes).unwrap();
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn failed_temporary_write_preserves_the_last_authenticated_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let store = SecureJobStore::with_test_key(path.clone(), [8; KEY_LENGTH]);
+        let expected = PersistedState::default();
+        store.save(&expected).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        fs::create_dir(path.with_extension("enc.tmp")).unwrap();
+        assert!(store.save(&PersistedState::default()).is_err());
+
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            serde_json::to_value(store.load().unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     #[test]
