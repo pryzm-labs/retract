@@ -9,6 +9,8 @@ use cleaner_domain::{
     DeletionReach, MessageSnapshot, detect_sensitive_data,
 };
 use tokio::sync::RwLock;
+#[cfg(test)]
+use tokio::sync::{Mutex, Notify};
 
 use crate::{
     error::AppError,
@@ -27,6 +29,13 @@ struct DemoData {
     messages: Vec<StoredMessage>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestFailurePoint {
+    DeleteMessagesForEveryone,
+    ClearHistoryForEveryone,
+}
+
 pub struct DemoGateway {
     data: RwLock<DemoData>,
     reason: String,
@@ -38,6 +47,22 @@ pub struct DemoGateway {
     current_reach_delay_ms: AtomicU64,
     #[cfg(test)]
     current_reach_started: AtomicBool,
+    #[cfg(test)]
+    operation_log: Mutex<Vec<String>>,
+    #[cfg(test)]
+    delete_batch_sizes: Mutex<Vec<usize>>,
+    #[cfg(test)]
+    delete_calls: Mutex<Vec<(i64, Vec<i64>)>>,
+    #[cfg(test)]
+    current_reach_calls: Mutex<Vec<(i64, i64)>>,
+    #[cfg(test)]
+    chat_by_id_calls: Mutex<Vec<i64>>,
+    #[cfg(test)]
+    rate_limit_injections: Mutex<Vec<TestFailurePoint>>,
+    #[cfg(test)]
+    injected_failures_seen: AtomicUsize,
+    #[cfg(test)]
+    injected_failure_notify: Notify,
 }
 
 impl DemoGateway {
@@ -55,6 +80,22 @@ impl DemoGateway {
             current_reach_delay_ms: AtomicU64::new(0),
             #[cfg(test)]
             current_reach_started: AtomicBool::new(false),
+            #[cfg(test)]
+            operation_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            delete_batch_sizes: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            delete_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            current_reach_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            chat_by_id_calls: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            rate_limit_injections: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            injected_failures_seen: AtomicUsize::new(0),
+            #[cfg(test)]
+            injected_failure_notify: Notify::new(),
         }
     }
 
@@ -76,6 +117,157 @@ impl DemoGateway {
     #[cfg(test)]
     pub(crate) fn current_reach_started(&self) -> bool {
         self.current_reach_started.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    async fn record(&self, operation: String) {
+        self.operation_log.lock().await.push(operation);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn operation_log(&self) -> Vec<String> {
+        self.operation_log.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn clear_operation_log(&self) {
+        self.operation_log.lock().await.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn clear_test_traces(&self) {
+        self.operation_log.lock().await.clear();
+        self.delete_batch_sizes.lock().await.clear();
+        self.delete_calls.lock().await.clear();
+        self.current_reach_calls.lock().await.clear();
+        self.chat_by_id_calls.lock().await.clear();
+        self.rate_limit_injections.lock().await.clear();
+        self.injected_failures_seen.store(0, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delete_batch_sizes(&self) -> Vec<usize> {
+        self.delete_batch_sizes.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn delete_calls(&self) -> Vec<(i64, Vec<i64>)> {
+        self.delete_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn current_reach_calls(&self) -> Vec<(i64, i64)> {
+        self.current_reach_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn chat_by_id_calls(&self) -> Vec<i64> {
+        self.chat_by_id_calls.lock().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn inject_rate_limit_once(&self, point: TestFailurePoint) {
+        self.rate_limit_injections.lock().await.push(point);
+    }
+
+    #[cfg(test)]
+    async fn take_rate_limit(&self, point: TestFailurePoint) -> bool {
+        let mut injections = self.rate_limit_injections.lock().await;
+        let Some(index) = injections.iter().position(|candidate| *candidate == point) else {
+            return false;
+        };
+        injections.remove(index);
+        drop(injections);
+        self.injected_failures_seen.fetch_add(1, Ordering::AcqRel);
+        self.injected_failure_notify.notify_one();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_injected_failure(&self, expected_count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if self.injected_failures_seen.load(Ordering::Acquire) >= expected_count {
+                    return;
+                }
+                self.injected_failure_notify.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("expected {expected_count} injected synthetic gateway failures")
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_message_reach(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        reach: DeletionReach,
+    ) {
+        let mut data = self.data.write().await;
+        let message = data
+            .messages
+            .iter_mut()
+            .find(|stored| {
+                stored.snapshot.chat_id == chat_id && stored.snapshot.message_id == message_id
+            })
+            .expect("synthetic message exists");
+        message.snapshot.deletion_reach = reach;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_chat_clear_authority(&self, chat_id: i64, allowed: bool) {
+        let mut data = self.data.write().await;
+        let chat = data
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == chat_id)
+            .expect("synthetic chat exists");
+        chat.capabilities.can_clear_for_everyone = allowed;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn append_messages(&self, chat_id: i64, first_message_id: i64, count: usize) {
+        let mut data = self.data.write().await;
+        assert!(data.chats.iter().any(|chat| chat.id == chat_id));
+        let message_ids = (0..count)
+            .map(|offset| {
+                first_message_id
+                    .checked_add(i64::try_from(offset).expect("synthetic message count fits i64"))
+                    .expect("synthetic message ID does not overflow")
+            })
+            .collect::<Vec<_>>();
+        assert!(message_ids.iter().all(|message_id| {
+            *message_id > 0
+                && data.messages.iter().all(|stored| {
+                    stored.snapshot.chat_id != chat_id || stored.snapshot.message_id != *message_id
+                })
+        }));
+        for (offset, message_id) in message_ids.into_iter().enumerate() {
+            let offset = i64::try_from(offset).expect("synthetic message count fits i64");
+            data.messages.push(StoredMessage {
+                snapshot: MessageSnapshot {
+                    chat_id,
+                    message_id,
+                    sender_id: 42,
+                    sender_name: "You".into(),
+                    sent_at: Utc
+                        .timestamp_opt(1_700_000_000 + offset, 0)
+                        .single()
+                        .expect("valid synthetic timestamp"),
+                    is_outgoing: true,
+                    content_kind: ContentKind::Text,
+                    preview: "Synthetic batch message".into(),
+                    privacy_findings: Vec::new(),
+                    album_id: None,
+                    is_pinned: false,
+                    deletion_reach: DeletionReach::Everyone,
+                },
+                deleted: false,
+            });
+        }
     }
 }
 
@@ -119,7 +311,10 @@ impl TelegramGateway for DemoGateway {
 
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError> {
         #[cfg(test)]
-        self.direct_chat_reads.fetch_add(1, Ordering::AcqRel);
+        {
+            self.direct_chat_reads.fetch_add(1, Ordering::AcqRel);
+            self.chat_by_id_calls.lock().await.push(chat_id);
+        }
         let data = self.data.read().await;
         Ok(data
             .chats
@@ -248,6 +443,10 @@ impl TelegramGateway for DemoGateway {
     ) -> Result<Option<DeletionReach>, AppError> {
         #[cfg(test)]
         {
+            self.current_reach_calls
+                .lock()
+                .await
+                .push((chat_id, message_id));
             self.current_reach_started.store(true, Ordering::Release);
             let delay = self.current_reach_delay_ms.load(Ordering::Acquire);
             if delay > 0 {
@@ -271,6 +470,29 @@ impl TelegramGateway for DemoGateway {
         chat_id: i64,
         message_ids: &[i64],
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            let mut sorted_ids = message_ids.to_vec();
+            sorted_ids.sort_unstable();
+            let ids = sorted_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            self.record(format!("delete_messages_for_everyone:{chat_id}:{ids}"))
+                .await;
+            self.delete_batch_sizes.lock().await.push(message_ids.len());
+            self.delete_calls
+                .lock()
+                .await
+                .push((chat_id, message_ids.to_vec()));
+            if self
+                .take_rate_limit(TestFailurePoint::DeleteMessagesForEveryone)
+                .await
+            {
+                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
+            }
+        }
         if message_ids.is_empty() || message_ids.len() > 100 {
             return Err(AppError::Gateway("invalid deletion batch".into()));
         }
@@ -297,6 +519,17 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        {
+            self.record(format!("clear_history_for_everyone:{chat_id}"))
+                .await;
+            if self
+                .take_rate_limit(TestFailurePoint::ClearHistoryForEveryone)
+                .await
+            {
+                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
+            }
+        }
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -316,6 +549,9 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn clear_history_for_everyone_keep_chat(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("clear_history_for_everyone_keep_chat:{chat_id}"))
+            .await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -340,6 +576,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn remove_chat_for_self(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("remove_chat_for_self:{chat_id}")).await;
         let mut data = self.data.write().await;
         let index = data
             .chats
@@ -354,6 +592,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn delete_group(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("delete_group:{chat_id}")).await;
         let mut data = self.data.write().await;
         let index = data
             .chats
@@ -370,6 +610,8 @@ impl TelegramGateway for DemoGateway {
     }
 
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("leave_chat:{chat_id}")).await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -389,6 +631,9 @@ impl TelegramGateway for DemoGateway {
         chat_id: i64,
         sender_id: i64,
     ) -> Result<(), AppError> {
+        #[cfg(test)]
+        self.record(format!("delete_messages_by_sender:{chat_id}:{sender_id}"))
+            .await;
         let mut data = self.data.write().await;
         let chat = data
             .chats
@@ -879,6 +1124,139 @@ fn conversation_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(query: &str) -> SearchRequest {
+        SearchRequest {
+            query: query.into(),
+            chat_ids: Vec::new(),
+            chat_kinds: Vec::new(),
+            content_kinds: Vec::new(),
+            direction: MessageDirection::Any,
+            min_date: None,
+            max_date: None,
+            exclude_pinned: false,
+            privacy_scan: false,
+            limit: 500,
+        }
+    }
+
+    #[test]
+    fn telegram_search_contract_covers_normalized_filters() {
+        tauri::async_runtime::block_on(async {
+            let gateway = DemoGateway::new();
+
+            let query_cases: [(&str, &[(i64, i64)]); 4] = [
+                ("passport apartment", &[(101, 2)]),
+                ("cedar vault", &[(-1001, 11)]),
+                ("priya", &[(-1001, 15)]),
+                ("synthetic-no-match", &[]),
+            ];
+            for (query, expected) in query_cases {
+                let actual = gateway
+                    .search(&request(query))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|message| (message.chat_id, message.message_id))
+                    .collect::<Vec<_>>();
+                assert_eq!(actual.as_slice(), expected, "query case {query:?}");
+            }
+
+            let mut scoped = request("");
+            scoped.chat_ids = vec![-1001];
+            let scoped_results = gateway.search(&scoped).await.unwrap();
+            assert!(!scoped_results.is_empty());
+            assert!(scoped_results.iter().all(|m| m.chat_id == -1001));
+
+            let mut outgoing = request("");
+            outgoing.direction = MessageDirection::Mine;
+            let outgoing_results = gateway.search(&outgoing).await.unwrap();
+            assert!(!outgoing_results.is_empty());
+            assert!(outgoing_results.iter().all(|m| m.is_outgoing));
+
+            let mut files = request("");
+            files.content_kinds = vec![ContentKind::File];
+            let file_results = gateway.search(&files).await.unwrap();
+            assert!(!file_results.is_empty());
+            assert!(
+                file_results
+                    .iter()
+                    .all(|m| m.content_kind == ContentKind::File)
+            );
+
+            let mut groups = request("");
+            groups.chat_kinds = vec![ChatKind::Supergroup];
+            let group_ids = [-1001, -1002, -1003];
+            let group_results = gateway.search(&groups).await.unwrap();
+            assert!(!group_results.is_empty());
+            assert!(group_results.iter().all(|m| group_ids.contains(&m.chat_id)));
+
+            let mut unpinned = request("");
+            unpinned.exclude_pinned = true;
+            let unpinned_results = gateway.search(&unpinned).await.unwrap();
+            assert!(!unpinned_results.is_empty());
+            assert!(unpinned_results.iter().all(|m| !m.is_pinned));
+
+            let boundary = Utc
+                .with_ymd_and_hms(2026, 8, 14, 18, 5, 0)
+                .single()
+                .unwrap();
+            let mut since_boundary = request("");
+            since_boundary.min_date = Some(boundary);
+            let since_results = gateway.search(&since_boundary).await.unwrap();
+            assert!(since_results.iter().all(|m| m.sent_at >= boundary));
+            assert!(
+                since_results
+                    .iter()
+                    .any(|m| { (m.chat_id, m.message_id, m.sent_at) == (-1001, 12, boundary) })
+            );
+
+            let mut through_boundary = request("");
+            through_boundary.max_date = Some(boundary);
+            let through_results = gateway.search(&through_boundary).await.unwrap();
+            assert!(through_results.iter().all(|m| m.sent_at <= boundary));
+            assert!(
+                through_results
+                    .iter()
+                    .any(|m| { (m.chat_id, m.message_id, m.sent_at) == (-1001, 12, boundary) })
+            );
+
+            let mut limited = request("");
+            limited.limit = 1;
+            let limited_results = gateway.search(&limited).await.unwrap();
+            assert_eq!(limited_results.len(), 1);
+            assert_eq!(
+                (limited_results[0].chat_id, limited_results[0].message_id),
+                (-1001, 11)
+            );
+
+            let mut privacy_scan = request("");
+            privacy_scan.privacy_scan = true;
+            let privacy_results = gateway.search(&privacy_scan).await.unwrap();
+            assert!(!privacy_results.is_empty());
+            assert!(
+                privacy_results
+                    .iter()
+                    .all(|message| !message.privacy_findings.is_empty())
+            );
+            assert!(
+                privacy_results
+                    .iter()
+                    .find(|message| (message.chat_id, message.message_id) == (101, 5))
+                    .unwrap()
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::CryptoWallet)
+            );
+            assert!(
+                privacy_results
+                    .iter()
+                    .find(|message| (message.chat_id, message.message_id) == (101, 2))
+                    .unwrap()
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::IdentityDocument)
+            );
+        });
+    }
 
     #[test]
     fn classifies_empty_and_unanswered_cleanup_candidates() {

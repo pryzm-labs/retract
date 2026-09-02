@@ -1,0 +1,64 @@
+[
+  {
+    "name": "creator",
+    "status": { "@type": "chatMemberStatusCreator", "is_member": true },
+    "expectedRole": "owner",
+    "expectedDelete": true,
+    "expectedLeave": false
+  },
+  {
+    "name": "administrator-with-delete",
+    "status": {
+      "@type": "chatMemberStatusAdministrator",
+      "rights": { "can_delete_messages": true }
+    },
+    "expectedRole": "admin_with_delete",
+    "expectedDelete": true,
+    "expectedLeave": true
+  },
+  {
+    "name": "administrator-without-delete",
+    "status": {
+      "@type": "chatMemberStatusAdministrator",
+      "rights": { "can_delete_messages": false }
+    },
+    "expectedRole": "admin_limited",
+    "expectedDelete": false,
+    "expectedLeave": true
+  },
+  {
+    "name": "member",
+    "status": { "@type": "chatMemberStatusMember" },
+    "expectedRole": "member",
+    "expectedDelete": false,
+    "expectedLeave": true
+  },
+  {
+    "name": "restricted-member",
+    "status": { "@type": "chatMemberStatusRestricted", "is_member": true },
+    "expectedRole": "member",
+    "expectedDelete": false,
+    "expectedLeave": true
+  },
+  {
+    "name": "restricted-nonmember",
+    "status": { "@type": "chatMemberStatusRestricted", "is_member": false },
+    "expectedRole": "member",
+    "expectedDelete": false,
+    "expectedLeave": false
+  },
+  {
+    "name": "left",
+    "status": { "@type": "chatMemberStatusLeft" },
+    "expectedRole": "member",
+    "expectedDelete": false,
+    "expectedLeave": false
+  },
+  {
+    "name": "banned",
+    "status": { "@type": "chatMemberStatusBanned" },
+    "expectedRole": "member",
+    "expectedDelete": false,
+    "expectedLeave": false
+  }
+]

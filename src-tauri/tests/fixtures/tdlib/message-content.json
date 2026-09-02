@@ -1,0 +1,101 @@
+[
+  {
+    "name": "text",
+    "content": { "@type": "messageText", "text": { "text": "Synthetic text" } },
+    "expectedKind": "text",
+    "expectedPreview": "Synthetic text",
+    "expectedSensitiveText": "Synthetic text"
+  },
+  {
+    "name": "photo-caption",
+    "content": { "@type": "messagePhoto", "caption": { "text": "Synthetic caption" } },
+    "expectedKind": "photo",
+    "expectedPreview": "Synthetic caption",
+    "expectedSensitiveText": "Synthetic caption"
+  },
+  {
+    "name": "video",
+    "content": { "@type": "messageVideo" },
+    "expectedKind": "video",
+    "expectedPreview": "Video",
+    "expectedSensitiveText": "Video"
+  },
+  {
+    "name": "document-filename",
+    "content": { "@type": "messageDocument", "document": { "file_name": "example.txt" } },
+    "expectedKind": "file",
+    "expectedPreview": "example.txt",
+    "expectedSensitiveText": "example.txt"
+  },
+  {
+    "name": "voice-note",
+    "content": { "@type": "messageVoiceNote" },
+    "expectedKind": "voice",
+    "expectedPreview": "Voice message",
+    "expectedSensitiveText": "Voice message"
+  },
+  {
+    "name": "audio-title",
+    "content": { "@type": "messageAudio", "audio": { "title": "Synthetic audio" } },
+    "expectedKind": "audio",
+    "expectedPreview": "Synthetic audio",
+    "expectedSensitiveText": "Synthetic audio"
+  },
+  {
+    "name": "animation-caption",
+    "content": { "@type": "messageAnimation", "caption": { "text": "Synthetic animation caption" } },
+    "expectedKind": "animation",
+    "expectedPreview": "Synthetic animation caption",
+    "expectedSensitiveText": "Synthetic animation caption"
+  },
+  {
+    "name": "sticker-emoji",
+    "content": { "@type": "messageSticker", "sticker": { "emoji": "🧪" } },
+    "expectedKind": "sticker",
+    "expectedPreview": "🧪",
+    "expectedSensitiveText": "🧪"
+  },
+  {
+    "name": "poll-question",
+    "content": { "@type": "messagePoll", "poll": { "question": { "text": "Synthetic question?" } } },
+    "expectedKind": "poll",
+    "expectedPreview": "Synthetic question?",
+    "expectedSensitiveText": "Synthetic question?"
+  },
+  {
+    "name": "location-coordinates",
+    "content": { "@type": "messageLocation", "location": { "latitude": 0.0, "longitude": 0.0 } },
+    "expectedKind": "location",
+    "expectedPreview": "Location",
+    "expectedSensitiveText": "0, 0"
+  },
+  {
+    "name": "contact",
+    "content": {
+      "@type": "messageContact",
+      "contact": {
+        "phone_number": "0000000000",
+        "first_name": "Synthetic",
+        "last_name": "Contact",
+        "vcard": "EMAIL:synthetic@example.invalid"
+      }
+    },
+    "expectedKind": "contact",
+    "expectedPreview": "Contact · Synthetic Contact",
+    "expectedSensitiveText": "Synthetic Contact 0000000000"
+  },
+  {
+    "name": "service-message",
+    "content": { "@type": "messageChatTitleChanged", "title": "Synthetic title" },
+    "expectedKind": "service",
+    "expectedPreview": "Chat Title Changed",
+    "expectedSensitiveText": "Chat Title Changed"
+  },
+  {
+    "name": "unknown-other",
+    "content": { "@type": "syntheticUnsupportedContent" },
+    "expectedKind": "other",
+    "expectedPreview": "Unsupported message",
+    "expectedSensitiveText": "Unsupported message"
+  }
+]

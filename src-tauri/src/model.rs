@@ -296,3 +296,164 @@ pub struct PersistedState {
     pub plans: Vec<DeletionPlan>,
     pub jobs: Vec<JobRecord>,
 }
+
+#[cfg(test)]
+mod wire_contract_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn contract() -> Value {
+        serde_json::from_str(include_str!(
+            "../../src/test/fixtures/telegram-ipc-contract.json"
+        ))
+        .expect("valid synthetic Telegram IPC contract fixture")
+    }
+
+    #[test]
+    fn telegram_search_request_wire_names_are_frozen() {
+        let mut request: SearchRequest =
+            serde_json::from_value(contract()["searchRequest"].clone()).unwrap();
+        request.validate().unwrap();
+        assert_eq!(request.query, "passport apartment");
+        assert_eq!(request.chat_ids, vec![-1001]);
+        assert_eq!(request.chat_kinds, vec![ChatKind::Supergroup]);
+        assert_eq!(
+            request.content_kinds,
+            vec![ContentKind::Photo, ContentKind::File]
+        );
+        assert!(matches!(request.direction, MessageDirection::Mine));
+        assert_eq!(request.min_date, Some(instant("2026-08-01T00:00:00Z")));
+        assert_eq!(request.max_date, Some(instant("2026-08-31T23:59:59Z")));
+        assert_eq!(request.limit, 500);
+        assert!(request.exclude_pinned);
+        assert!(request.privacy_scan);
+    }
+
+    #[test]
+    fn telegram_search_request_optional_and_default_boundaries_are_frozen() {
+        let mut value = contract()["searchRequest"].clone();
+        let object = value.as_object_mut().unwrap();
+        for field in [
+            "query",
+            "chatIds",
+            "chatKinds",
+            "contentKinds",
+            "direction",
+            "minDate",
+            "maxDate",
+            "excludePinned",
+            "privacyScan",
+            "limit",
+        ] {
+            object.remove(field);
+        }
+        let request: SearchRequest = serde_json::from_value(value).unwrap();
+        assert!(request.query.is_empty());
+        assert!(request.chat_ids.is_empty());
+        assert!(request.chat_kinds.is_empty());
+        assert!(request.content_kinds.is_empty());
+        assert!(matches!(request.direction, MessageDirection::Any));
+        assert!(request.min_date.is_none());
+        assert!(request.max_date.is_none());
+        assert!(!request.exclude_pinned);
+        assert!(!request.privacy_scan);
+        assert_eq!(request.limit, 500);
+
+        for (wire, expected) in [
+            ("any", MessageDirection::Any),
+            ("mine", MessageDirection::Mine),
+            ("others", MessageDirection::Others),
+        ] {
+            let direction: MessageDirection = serde_json::from_value(Value::from(wire)).unwrap();
+            assert!(std::mem::discriminant(&direction) == std::mem::discriminant(&expected));
+        }
+    }
+
+    fn instant(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn telegram_response_wire_names_are_frozen() {
+        let progress = CatalogProgress {
+            phase: "loading",
+            total: 531,
+            processed: 128,
+        };
+        assert_eq!(
+            serde_json::to_value(progress).unwrap(),
+            contract()["catalogProgress"]
+        );
+
+        let auth = AuthSnapshot {
+            stage: AuthStage::WaitingForPassword,
+            hint: Some("synthetic hint".into()),
+            qr_link: None,
+        };
+        assert_eq!(
+            serde_json::to_value(auth).unwrap(),
+            contract()["authSnapshot"]
+        );
+
+        let message = MessageSnapshot {
+            chat_id: -1001,
+            message_id: 14,
+            sender_id: 42,
+            sender_name: "Synthetic user".into(),
+            sent_at: instant("2026-08-15T18:00:00Z"),
+            is_outgoing: true,
+            content_kind: ContentKind::Photo,
+            preview: "Synthetic passport reminder".into(),
+            privacy_findings: vec![cleaner_domain::SensitiveDataKind::IdentityDocument],
+            album_id: Some(7001),
+            is_pinned: false,
+            deletion_reach: cleaner_domain::DeletionReach::Everyone,
+        };
+        let response = SearchResponse {
+            messages: vec![message],
+            returned: 1,
+            truncated: false,
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            contract()["searchResponse"]
+        );
+
+        let plan = PlanView {
+            id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            operation: PlanOperation::SelectedMessages,
+            chat_title: None,
+            target_sender_name: None,
+            summary: PlanSummary {
+                selected: 1,
+                delete_for_everyone: 1,
+                self_only: 0,
+                cannot_delete: 0,
+            },
+            confirmation_tier: ConfirmationTier::Low,
+            fingerprint: "a".repeat(64),
+            created_at: instant("2026-08-15T18:01:00Z"),
+        };
+        assert_eq!(serde_json::to_value(plan).unwrap(), contract()["planView"]);
+
+        let job = JobRecord {
+            id: Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+            plan_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            operation: PlanOperation::SelectedMessages,
+            target_chat_ids: vec![-1001],
+            status: JobStatus::Completed,
+            total: 1,
+            deleted: 1,
+            skipped: 0,
+            failed: 0,
+            next_batch: 1,
+            retry_after_seconds: None,
+            error_codes: Vec::new(),
+            created_at: instant("2026-08-15T18:01:01Z"),
+            updated_at: instant("2026-08-15T18:01:02Z"),
+        };
+        assert_eq!(serde_json::to_value(job).unwrap(), contract()["jobRecord"]);
+    }
+}
