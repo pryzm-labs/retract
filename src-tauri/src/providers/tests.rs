@@ -357,6 +357,50 @@ fn telegram_decimal_locators_enforce_native_ranges_and_canonical_spelling() {
 }
 
 #[test]
+fn telegram_grouping_ids_preserve_nonzero_signed_tdlib_album_ids() {
+    use crate::persistence::ProviderPayloadValidator;
+    let validator = TelegramPayloadValidator;
+    let account = account_id(0x111);
+    for valid in ["-1", "-9223372036854775808", "9223372036854775807"] {
+        let first = TelegramGroupingLocator::new("-100", valid)
+            .unwrap()
+            .resource(account);
+        let second = TelegramGroupingLocator::new("-101", valid)
+            .unwrap()
+            .resource(account);
+        validator.validate_resource(&first).unwrap();
+        validator.validate_resource(&second).unwrap();
+        assert_ne!(first.canonical_key, second.canonical_key);
+        assert_ne!(first.resource_id().unwrap(), second.resource_id().unwrap());
+    }
+    for invalid in [
+        "0",
+        "-0",
+        " 1",
+        "1 ",
+        "+1",
+        "01",
+        "-01",
+        "1.0",
+        "1e3",
+        "9223372036854775808",
+        "-9223372036854775809",
+    ] {
+        assert!(
+            TelegramGroupingLocator::new("-100", invalid).is_err(),
+            "{invalid}"
+        );
+        let mut resource = TelegramGroupingLocator::new("-100", "77")
+            .unwrap()
+            .resource(account);
+        resource.locator_payload["groupingId"] = json!(invalid);
+        resource.canonical_key =
+            serde_json::to_string(&["telegram-grouping-v1", "-100", invalid]).unwrap();
+        assert!(validator.validate_resource(&resource).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn telegram_message_actor_and_grouping_keys_are_unambiguous_and_chat_scoped() {
     let account = account_id(0x111);
     let first = TelegramMessageLocator::new("-100", "9007199254740993")

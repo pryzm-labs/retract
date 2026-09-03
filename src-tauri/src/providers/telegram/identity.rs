@@ -2,9 +2,10 @@ use std::sync::RwLock;
 
 use chrono::Utc;
 use retract_domain::{
-    AccountId, AccountRecord, ActiveContext, ConnectionState, Scope, SourceId, SourceKind,
-    SourceRecord, SourceState,
+    AccountId, AccountRecord, ActiveContext, ConnectionState, SafeError, Scope, SourceId,
+    SourceKind, SourceRecord, SourceState,
 };
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{error::AppError, persistence::FoundationStore};
@@ -13,6 +14,20 @@ use super::locators::{
     TELEGRAM_ACCOUNT_SCHEMA, TELEGRAM_SCHEMA_VERSION, TelegramAccountLocator, TelegramEnvironment,
     TelegramSourceProfile, telegram_provider_key,
 };
+
+/// Backend identity readiness is separate from TDLib authorization readiness.
+/// Failed verification exposes only predefined diagnostics, never TDLib text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IdentityVerificationStatus {
+    #[default]
+    Unavailable,
+    Pending,
+    Ready,
+    Failed {
+        diagnostic: SafeError,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedTelegramIdentity {

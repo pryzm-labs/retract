@@ -259,7 +259,7 @@ impl TelegramGroupingLocator {
 
     fn validate(&self) -> Result<(), AppError> {
         signed_nonzero_i64(&self.chat_id)?;
-        positive_i64(&self.grouping_id)?;
+        signed_nonzero_i64(&self.grouping_id)?;
         Ok(())
     }
 }
@@ -319,7 +319,7 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
         // whenever any accepted schema, range, canonical key, or recipe
         // agreement rule in this validator changes.
         ProviderValidationPolicyKey::try_from(
-            "telegram-payload-policy-2:account-source-conversation-message-actor-grouping-recipe-v1"
+            "telegram-payload-policy-3:account-source-conversation-message-actor-grouping-recipe-v1"
                 .to_owned(),
         )
         .expect("static Telegram validation policy key is valid")

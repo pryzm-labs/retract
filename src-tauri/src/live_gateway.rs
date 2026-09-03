@@ -15,6 +15,7 @@ use cleaner_domain::{
     DeletionReach, MessageSnapshot, detect_sensitive_data,
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
+use retract_domain::{ErrorCode, SafeError};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -26,7 +27,10 @@ use crate::{
     model::{AuthSnapshot, AuthStage, CatalogProgress, MessageDirection, SearchRequest},
     persistence::FoundationStore,
     providers::telegram::{
-        identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
+        identity::{
+            IdentityVerificationStatus, SessionBinding, TelegramAccountProfile,
+            VerifiedTelegramIdentity,
+        },
         locators::TelegramEnvironment,
     },
     tdjson::TdJsonClient,
@@ -79,6 +83,8 @@ pub struct LiveGateway {
     identity: SyncMutex<IdentityState>,
     session_binding: Arc<SessionBinding>,
     identity_store: Option<Arc<FoundationStore>>,
+    #[cfg(test)]
+    identity_attempt_completed: tokio::sync::broadcast::Sender<Uuid>,
     sender_names: RwLock<HashMap<(bool, i64), String>>,
     chat_kinds: RwLock<HashMap<i64, ChatKind>>,
     catalog_loaded: AtomicBool,
@@ -99,6 +105,7 @@ struct IdentityState {
     authorization_ready: bool,
     generation: Option<Uuid>,
     verified: Option<VerifiedTelegramIdentity>,
+    verification_status: IdentityVerificationStatus,
 }
 
 impl LiveGateway {
@@ -133,6 +140,8 @@ impl LiveGateway {
             identity: SyncMutex::new(IdentityState::default()),
             session_binding: Arc::new(SessionBinding::default()),
             identity_store,
+            #[cfg(test)]
+            identity_attempt_completed: tokio::sync::broadcast::channel(16).0,
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
@@ -230,9 +239,15 @@ impl LiveGateway {
                     .as_ref()
                     .map(|identity| identity.session_generation),
                 verified: initial_identity,
+                verification_status: if initially_ready {
+                    IdentityVerificationStatus::Ready
+                } else {
+                    IdentityVerificationStatus::Unavailable
+                },
             }),
             session_binding,
             identity_store,
+            identity_attempt_completed: tokio::sync::broadcast::channel(16).0,
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
@@ -384,10 +399,7 @@ impl LiveGateway {
                 if let Some(generation) = self.begin_identity_generation() {
                     self.catalog_loaded.store(false, Ordering::Release);
                     self.invalidate_chat_summary_cache().await;
-                    let gateway = Arc::clone(self);
-                    tauri::async_runtime::spawn(async move {
-                        gateway.verify_ready_identity(generation).await;
-                    });
+                    self.spawn_identity_verification(generation);
                 }
             }
             "authorizationStateLoggingOut" | "authorizationStateClosing" => self.set_auth(
@@ -419,8 +431,89 @@ impl LiveGateway {
         identity.authorization_ready = true;
         identity.generation = Some(generation);
         identity.verified = None;
-        self.session_binding.begin_generation(generation).ok()?;
+        identity.verification_status = IdentityVerificationStatus::Pending;
+        if self.session_binding.begin_generation(generation).is_err() {
+            identity.verification_status = IdentityVerificationStatus::Failed {
+                diagnostic: SafeError {
+                    code: ErrorCode::IdentityUnavailable,
+                    retry_at: None,
+                },
+            };
+            return None;
+        }
         Some(generation)
+    }
+
+    fn spawn_identity_verification(self: &Arc<Self>, generation: Uuid) {
+        let gateway = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            #[cfg(test)]
+            let completed = gateway.identity_attempt_completed.clone();
+            gateway.verify_ready_identity(generation).await;
+            #[cfg(test)]
+            let _ = completed.send(generation);
+        });
+    }
+
+    pub fn identity_verification_status(&self) -> IdentityVerificationStatus {
+        self.identity.lock().map_or_else(
+            |_| IdentityVerificationStatus::Failed {
+                diagnostic: SafeError {
+                    code: ErrorCode::IdentityUnavailable,
+                    retry_at: None,
+                },
+            },
+            |identity| identity.verification_status.clone(),
+        )
+    }
+
+    /// Retry only a failed verification in the current authenticated session.
+    /// Repeated requests while pending or ready are idempotent; no new session
+    /// generation, catalog refresh, connection replacement or reauth is needed.
+    pub fn retry_identity_verification(self: &Arc<Self>) -> Result<(), SafeError> {
+        let generation = {
+            let mut identity = self.identity.lock().map_err(|_| SafeError {
+                code: ErrorCode::IdentityUnavailable,
+                retry_at: None,
+            })?;
+            let generation = identity
+                .generation
+                .filter(|_| identity.authorization_ready)
+                .ok_or(SafeError {
+                    code: ErrorCode::AuthenticationRequired,
+                    retry_at: None,
+                })?;
+            if !matches!(
+                identity.verification_status,
+                IdentityVerificationStatus::Failed { .. }
+            ) {
+                return Ok(());
+            }
+            self.session_binding
+                .begin_generation(generation)
+                .map_err(|_| SafeError {
+                    code: ErrorCode::IdentityUnavailable,
+                    retry_at: None,
+                })?;
+            identity.verification_status = IdentityVerificationStatus::Pending;
+            generation
+        };
+        self.spawn_identity_verification(generation);
+        Ok(())
+    }
+
+    fn fail_identity_verification(&self, generation: Uuid, code: ErrorCode) {
+        if let Ok(mut identity) = self.identity.lock()
+            && identity.authorization_ready
+            && identity.generation == Some(generation)
+        {
+            identity.verification_status = IdentityVerificationStatus::Failed {
+                diagnostic: SafeError {
+                    code,
+                    retry_at: None,
+                },
+            };
+        }
     }
 
     fn invalidate_identity(&self) {
@@ -428,6 +521,7 @@ impl LiveGateway {
             identity.authorization_ready = false;
             identity.generation = None;
             identity.verified = None;
+            identity.verification_status = IdentityVerificationStatus::Unavailable;
         }
         self.session_binding.invalidate();
         self.own_user_id.store(0, Ordering::Release);
@@ -438,12 +532,15 @@ impl LiveGateway {
 
     async fn verify_ready_identity(self: Arc<Self>, generation: Uuid) {
         let Ok(me) = self.client.request(json!({ "@type": "getMe" })).await else {
+            self.fail_identity_verification(generation, ErrorCode::IdentityUnavailable);
             return;
         };
         if me.get("@type").and_then(Value::as_str) != Some("user") {
+            self.fail_identity_verification(generation, ErrorCode::IdentityUnavailable);
             return;
         }
         let Some(user_id) = value_i64(me.get("id")) else {
+            self.fail_identity_verification(generation, ErrorCode::IdentityUnavailable);
             return;
         };
         if me
@@ -451,6 +548,7 @@ impl LiveGateway {
             .and_then(Value::as_str)
             .is_some_and(|id| id != user_id.to_string())
         {
+            self.fail_identity_verification(generation, ErrorCode::IdentityUnavailable);
             return;
         }
         let environment = if self.config.use_test_dc {
@@ -459,6 +557,7 @@ impl LiveGateway {
             TelegramEnvironment::Production
         };
         let Ok(verified) = VerifiedTelegramIdentity::new(environment, user_id, generation) else {
+            self.fail_identity_verification(generation, ErrorCode::IdentityUnavailable);
             return;
         };
         if !self.identity_generation_is_current(generation) {
@@ -487,6 +586,7 @@ impl LiveGateway {
                 )
                 .is_err()
         {
+            self.fail_identity_verification(generation, ErrorCode::StatePersistenceFailed);
             return;
         }
         let Ok(mut identity) = self.identity.lock() else {
@@ -496,6 +596,7 @@ impl LiveGateway {
             return;
         }
         identity.verified = Some(verified);
+        identity.verification_status = IdentityVerificationStatus::Ready;
         self.own_user_id.store(user_id, Ordering::Release);
         if let Ok(mut label) = self.account_label.write() {
             *label = display_name;
@@ -2247,6 +2348,15 @@ mod tests {
         .expect("verified Telegram identity")
     }
 
+    async fn wait_for_identity_attempt(
+        completed: &mut tokio::sync::broadcast::Receiver<Uuid>,
+    ) -> Uuid {
+        tokio::time::timeout(SCRIPTED_WAIT, completed.recv())
+            .await
+            .expect("identity callback did not complete")
+            .expect("identity callback completion channel")
+    }
+
     fn respond_with_chat_mapping(script: &ScriptedTdJson, case: &Value) {
         let chat_id = value_i64(case.pointer("/chat/id")).unwrap();
         script.respond(
@@ -3114,6 +3224,7 @@ mod tests {
                 json!({ "@type": "error", "code": 500, "message": "SYNTHETIC_FAILURE" }),
             ] {
                 let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+                let mut completed = gateway.identity_attempt_completed.subscribe();
                 script.respond(json!({ "@type": "getMe" }), response);
                 script.emit_update(json!({
                     "@type": "updateAuthorizationState",
@@ -3121,7 +3232,7 @@ mod tests {
                 }));
                 wait_for_auth_stage(&gateway, AuthStage::Ready).await;
                 wait_for_request_count(&script, "getMe", 1).await;
-                tokio::task::yield_now().await;
+                wait_for_identity_attempt(&mut completed).await;
                 assert_eq!(gateway.verified_identity(), None);
                 assert_eq!(gateway.active_context(), None);
                 assert!(gateway.ensure_ready().is_err());
@@ -3137,9 +3248,163 @@ mod tests {
     }
 
     #[test]
+    fn failed_get_me_can_retry_within_the_same_authenticated_session() {
+        use crate::providers::telegram::identity::IdentityVerificationStatus;
+        use retract_domain::{ErrorCode, SafeError};
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+            let mut completed = gateway.identity_attempt_completed.subscribe();
+            assert!(gateway.retry_identity_verification().is_err());
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Unavailable
+            );
+            let first = script.delay_response(json!({ "@type": "getMe" }));
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            wait_for_request_count(&script, "getMe", 1).await;
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Pending
+            );
+            gateway.retry_identity_verification().unwrap();
+            gateway
+                .process_authorization_state(&json!({ "@type": "authorizationStateReady" }))
+                .await;
+            first.respond(
+                json!({ "@type": "error", "code": 500, "message": "PRIVATE_RAW_PROVIDER_DETAIL" }),
+            );
+            let generation = wait_for_identity_attempt(&mut completed).await;
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Failed {
+                    diagnostic: SafeError {
+                        code: ErrorCode::IdentityUnavailable,
+                        retry_at: None
+                    },
+                }
+            );
+            let status_json =
+                serde_json::to_string(&gateway.identity_verification_status()).unwrap();
+            assert!(!status_json.contains("PRIVATE_RAW_PROVIDER_DETAIL"));
+            assert_eq!(gateway.verified_identity(), None);
+            assert_eq!(gateway.active_context(), None);
+
+            let retry = script.delay_response(json!({ "@type": "getMe" }));
+            gateway.retry_identity_verification().unwrap();
+            gateway.retry_identity_verification().unwrap();
+            wait_for_request_count(&script, "getMe", 2).await;
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Pending
+            );
+            gateway
+                .process_authorization_state(&json!({ "@type": "authorizationStateReady" }))
+                .await;
+            retry.respond(json!({ "@type": "user", "id": 42, "first_name": "Recovered account" }));
+            assert_eq!(wait_for_identity_attempt(&mut completed).await, generation);
+            let identity = gateway.verified_identity().unwrap();
+            assert_eq!(identity.user_id, 42);
+            assert_eq!(identity.session_generation, generation);
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Ready
+            );
+            assert_eq!(gateway.info().account_label, "Recovered account");
+            gateway.retry_identity_verification().unwrap();
+            assert_eq!(script.traces().len(), 2);
+            script.assert_drained();
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitPhoneNumber" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForPhone).await;
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Unavailable
+            );
+            assert!(gateway.retry_identity_verification().is_err());
+            assert_eq!(gateway.verified_identity(), None);
+        });
+    }
+
+    #[test]
+    fn failed_identity_mapping_can_retry_and_publish_only_after_durable_success() {
+        use crate::providers::telegram::identity::IdentityVerificationStatus;
+        use retract_domain::{ErrorCode, SafeError};
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let profile = directory.path().join("foundation");
+            let store = FoundationStore::open_with_test_key_and_payload_validator(
+                profile.clone(),
+                StoreBinding {
+                    provider: telegram_provider_key(),
+                    profile: "retry-identity-map".into(),
+                },
+                [0x72; 32],
+                Arc::new(TelegramPayloadValidator),
+            )
+            .unwrap();
+            std::fs::create_dir(profile.join("jobs.enc.tmp")).unwrap();
+            let (gateway, script, _directory) =
+                unverified_scripted_gateway(Some(Arc::clone(&store)), false);
+            let mut completed = gateway.identity_attempt_completed.subscribe();
+            let me = json!({ "@type": "user", "id": 42, "first_name": "Persisted after retry" });
+            script.respond(json!({ "@type": "getMe" }), me.clone());
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            let generation = wait_for_identity_attempt(&mut completed).await;
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Failed {
+                    diagnostic: SafeError {
+                        code: ErrorCode::StatePersistenceFailed,
+                        retry_at: None
+                    },
+                }
+            );
+            assert_eq!(gateway.verified_identity(), None);
+            assert_eq!(gateway.active_context(), None);
+            assert!(store.snapshot().unwrap().identities.is_empty());
+            assert!(gateway.ensure_ready().is_err());
+
+            std::fs::rename(
+                profile.join("jobs.enc.tmp"),
+                profile.join("injected-write-obstruction"),
+            )
+            .unwrap();
+            script.respond(json!({ "@type": "getMe" }), me);
+            gateway.retry_identity_verification().unwrap();
+            assert_eq!(wait_for_identity_attempt(&mut completed).await, generation);
+            let identity = gateway.verified_identity().unwrap();
+            let context = gateway.active_context().unwrap();
+            assert_eq!(identity.session_generation, generation);
+            assert_eq!(context.session_generation, generation);
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Ready
+            );
+            let snapshot = store.snapshot().unwrap();
+            assert_eq!(snapshot.identities.len(), 1);
+            assert_eq!(snapshot.sources.len(), 1);
+            assert_eq!(snapshot.sources[0].scope(), context.scope);
+            assert_eq!(gateway.info().account_label, "Persisted after retry");
+            assert!(gateway.ensure_ready().is_ok());
+            assert_eq!(script.traces().len(), 2);
+            script.assert_drained();
+        });
+    }
+
+    #[test]
     fn delayed_get_me_does_not_block_sign_out_invalidation_or_publish_stale_identity() {
         tauri::async_runtime::block_on(async {
             let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+            let mut completed = gateway.identity_attempt_completed.subscribe();
             let delayed = script.delay_response(json!({ "@type": "getMe" }));
             script.emit_update(json!({
                 "@type": "updateAuthorizationState",
@@ -3158,9 +3423,10 @@ mod tests {
                 "id": 42,
                 "first_name": "Old account"
             }));
-            tokio::task::yield_now().await;
+            wait_for_identity_attempt(&mut completed).await;
             assert_eq!(gateway.verified_identity(), None);
             assert_eq!(gateway.active_context(), None);
+            assert_eq!(gateway.info().account_label, "Telegram account");
             script.assert_drained();
         });
     }
@@ -3240,7 +3506,19 @@ mod tests {
     #[test]
     fn a_pending_old_account_lookup_cannot_replace_a_reconnected_account() {
         tauri::async_runtime::block_on(async {
-            let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+            let store_directory = tempfile::tempdir().unwrap();
+            let store = FoundationStore::open_with_test_key_and_payload_validator(
+                store_directory.path().join("foundation"),
+                StoreBinding {
+                    provider: telegram_provider_key(),
+                    profile: "pending-account-switch".into(),
+                },
+                [0x73; 32],
+                Arc::new(TelegramPayloadValidator),
+            )
+            .unwrap();
+            let (gateway, script, _directory) = unverified_scripted_gateway(Some(store), false);
+            let mut completed = gateway.identity_attempt_completed.subscribe();
             let delayed_old = script.delay_response(json!({ "@type": "getMe" }));
             script.emit_update(json!({
                 "@type": "updateAuthorizationState",
@@ -3262,15 +3540,28 @@ mod tests {
                 "authorization_state": { "@type": "authorizationStateReady" }
             }));
             let current = wait_for_verified_identity(&gateway).await;
+            assert_eq!(
+                wait_for_identity_attempt(&mut completed).await,
+                current.session_generation
+            );
             assert_eq!(current.user_id, 43);
+            let current_context = gateway
+                .active_context()
+                .expect("new account durably mapped");
 
             delayed_old.respond(json!({
                 "@type": "user",
                 "id": 42,
                 "first_name": "Old account"
             }));
-            tokio::task::yield_now().await;
-            assert_eq!(gateway.verified_identity().unwrap().user_id, 43);
+            let old_generation = wait_for_identity_attempt(&mut completed).await;
+            assert_ne!(old_generation, current.session_generation);
+            assert_eq!(gateway.verified_identity(), Some(current));
+            assert_eq!(gateway.active_context(), Some(current_context));
+            assert_eq!(
+                gateway.identity_verification_status(),
+                IdentityVerificationStatus::Ready
+            );
             assert_eq!(gateway.info().account_label, "New account");
             script.assert_drained();
         });
