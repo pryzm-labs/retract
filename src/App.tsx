@@ -595,6 +595,7 @@ export default function App() {
         selected={selected}
         activeChat={activeChat}
         jobs={jobs}
+        legacyHistory={snapshot.legacyHistory}
         busy={busy}
         busyLabel={busyLabel}
         chatRemovalPending={activeChat ? pendingRemovalChatIds.has(refKey(activeChat.ref)) : false}

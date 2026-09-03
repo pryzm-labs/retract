@@ -1,4 +1,4 @@
-import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "../demo";
+import { demoSearch, demoSnapshot, fixtureDescriptor, fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "../demo";
 import { testId, testJob } from "../test/v2-fixtures";
 import { uuid } from "../providers/identity";
 import { fireEvent, render, screen, within } from "@testing-library/react";
@@ -134,5 +134,80 @@ describe("ImpactPanel job activity", () => {
     );
 
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  });
+});
+
+describe("backend action presentation", () => {
+  it("routes the supported sender intent but never aliases an unknown actor intent to sender deletion", async () => {
+    const chat = (await demoSnapshot()).chats.find(c => c.id === fixtureChatId("-1003"))!;
+    const selected = (await demoSearch({ query: "", conversations: [chat.ref], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 100 })).messages.slice(0, 1);
+    const onSenderAction = vi.fn();
+    render(<ImpactPanel {...panelProps([])} selected={selected} onSenderAction={onSenderAction} activeChat={{ ...chat,
+      capabilities: { ...chat.capabilities, canDeleteBySender: false }, intents: [
+        { actionId: "delete_by_sender", label: "Reviewed sender cleanup", requiresActor: true, descriptors: [fixtureDescriptor("delete_by_sender", "high")] },
+        { actionId: "unknown_actor_action", label: "Unrecognized actor action", requiresActor: true, descriptors: [fixtureDescriptor("delete_by_sender", "high")] }
+      ] }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Reviewed sender cleanup" }));
+    expect(onSenderAction).toHaveBeenCalledWith(selected[0]);
+    const unknown = screen.getByRole("button", { name: "Unrecognized actor action" });
+    expect(unknown).toBeDisabled(); fireEvent.click(unknown);
+    expect(onSenderAction).toHaveBeenCalledTimes(1);
+  });
+  it("uses executable descriptors even when role and metadata deny them", async () => {
+    const chat = (await demoSnapshot()).chats[0];
+    const onChatAction = vi.fn();
+    render(<ImpactPanel {...panelProps([])} onChatAction={onChatAction} activeChat={{ ...chat,
+      capabilities: { role: "member", canDeleteOthers: false, canClearForEveryone: false, canRemoveForSelf: false, canDeleteGroup: false, canDeleteBySender: false, canLeaveChat: false },
+      intents: [{ actionId: "clear_history", label: "Backend-approved cleanup", requiresActor: false, descriptors: [fixtureDescriptor("clear_history", "high")] }]
+    }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Backend-approved cleanup" }));
+    expect(onChatAction).toHaveBeenCalledWith("clear_history");
+    expect(screen.getByText("Remove for all participants")).toBeInTheDocument();
+  });
+
+  it("keeps unavailable and manual effects disabled despite owner metadata and hides absent intents", async () => {
+    const chat = (await demoSnapshot()).chats[0];
+    const descriptor = fixtureDescriptor("clear_history", "high");
+    render(<ImpactPanel {...panelProps([])} activeChat={{ ...chat,
+      capabilities: { role: "owner", canDeleteOthers: true, canClearForEveryone: true, canRemoveForSelf: true, canDeleteGroup: true, canDeleteBySender: true, canLeaveChat: true },
+      intents: [
+        { actionId: "clear_history", label: "Unavailable cleanup", requiresActor: false, descriptors: [{ ...descriptor, availability: "unavailable", unavailableReason: { code: "permission_changed", message: "RAW_SECRET", retryAt: null } }] },
+        { actionId: "leave_chat", label: "Manual cleanup", requiresActor: false, descriptors: [{ ...descriptor, availability: "manual_only" }] }
+      ]
+    }} />);
+    expect(screen.getByRole("button", { name: "Unavailable cleanup" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Manual cleanup" })).toBeDisabled();
+    expect(screen.getByText(/Permission to perform this action has changed\./)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Delete group permanently/ })).not.toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("RAW_SECRET");
+  });
+
+  it("shows every ordered compound effect and an independent critical destruction action", async () => {
+    const chat = (await demoSnapshot()).chats[0];
+    const cleanup = fixtureDescriptor("selected_messages", "high");
+    const leave = fixtureDescriptor("leave_chat", "high");
+    render(<ImpactPanel {...panelProps([])} activeChat={{ ...chat, intents: [
+      { actionId: "leave_chat", label: "Cleanup then leave", requiresActor: false, descriptors: [cleanup, leave, fixtureDescriptor("remove_chat_for_self", "high")] },
+      { actionId: "delete_group", label: "Destroy permanently", requiresActor: false, descriptors: [fixtureDescriptor("delete_group", "critical")] }
+    ] }} />);
+    const effects = screen.getByRole("list", { name: "Cleanup then leave effects" });
+    expect(within(effects).getAllByRole("listitem").map(item => item.textContent)).toEqual([
+      expect.stringContaining("Remove for all participants"), expect.stringContaining("Remove membership"), expect.stringContaining("Remove only for your account")
+    ]);
+    expect(screen.getByRole("button", { name: "Destroy permanently" })).toHaveClass("danger");
+    expect(screen.getByText("Critical action")).toBeInTheDocument();
+  });
+
+  it("does not execute a compound intent when even one reviewed effect is unavailable", async () => {
+    const chat = (await demoSnapshot()).chats[0];
+    const onChatAction = vi.fn();
+    render(<ImpactPanel {...panelProps([])} onChatAction={onChatAction} activeChat={{ ...chat, intents: [{
+      actionId: "leave_chat", label: "Partially unavailable cleanup", requiresActor: false,
+      descriptors: [fixtureDescriptor("selected_messages", "high"), { ...fixtureDescriptor("leave_chat", "high"), availability: "unavailable", unavailableReason: { code: "permission_changed", message: "RAW_SECRET", retryAt: null } }]
+    }] }} />);
+    const button = screen.getByRole("button", { name: "Partially unavailable cleanup" });
+    expect(button).toBeDisabled(); fireEvent.click(button);
+    expect(onChatAction).not.toHaveBeenCalled();
+    expect(within(screen.getByRole("list", { name: /Partially unavailable cleanup effects/ })).getAllByRole("listitem")).toHaveLength(2);
   });
 });

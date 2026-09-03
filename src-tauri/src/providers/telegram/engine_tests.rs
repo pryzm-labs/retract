@@ -238,6 +238,154 @@ async fn selection(f: &Fixture) -> crate::model::PlanView {
 }
 
 #[test]
+fn leave_intent_catalog_describes_ordered_cleanup_matching_the_reviewed_plan() {
+    use crate::providers::ports::{PrepareIntent, ReviewedLifecycle};
+    use retract_domain::ActionKind;
+    tauri::async_runtime::block_on(async {
+        for (chat_id, full_history, expected_first) in [
+            (-1002, true, ActionKind::ClearConversation),
+            (-1003, false, ActionKind::DeleteRemoteItem),
+            (-1004, false, ActionKind::DeleteRemoteItem),
+        ] {
+            let f = fixture();
+            if chat_id == -1004 {
+                f.gateway.append_messages(chat_id, 500, 1).await;
+            }
+            let provider = TelegramCompatibilityProvider::new(
+                f.gateway.clone(),
+                f.context.clone(),
+                f.service.clone(),
+            )
+            .unwrap();
+            let target =
+                super::compat::conversation_ref(&f.context.active().scope, chat_id).unwrap();
+            let intents = provider
+                .intents(f.context.active(), vec![target.clone()])
+                .await
+                .unwrap();
+            let intent = intents
+                .iter()
+                .find(|i| i.action_id == "leave_chat")
+                .unwrap();
+            assert_eq!(
+                intent
+                    .descriptors
+                    .iter()
+                    .map(|d| d.kind)
+                    .collect::<Vec<_>>(),
+                vec![
+                    expected_first,
+                    ActionKind::LeaveConversation,
+                    ActionKind::RemoveForCurrentAccount,
+                ]
+            );
+            assert_eq!(
+                intent
+                    .descriptors
+                    .iter()
+                    .map(|d| d.effect)
+                    .collect::<Vec<_>>(),
+                vec![
+                    ExpectedEffect::RemovedForAllParticipants,
+                    ExpectedEffect::MembershipRemoved,
+                    ExpectedEffect::RemovedForCurrentAccountOnly,
+                ]
+            );
+            if !full_history {
+                assert!(intent.label.contains("if any"));
+            }
+            let plan = provider
+                .prepare(
+                    f.context.active(),
+                    PrepareIntent {
+                        action_id: "leave_chat".into(),
+                        targets: vec![target],
+                        actor: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let mut kinds = plan
+                .steps
+                .iter()
+                .map(|s| s.descriptor.kind)
+                .collect::<Vec<_>>();
+            kinds.dedup();
+            assert_eq!(
+                kinds,
+                intent
+                    .descriptors
+                    .iter()
+                    .map(|d| d.kind)
+                    .collect::<Vec<_>>()
+            );
+            assert!(plan.steps.iter().all(|s| !s.targets.is_empty()));
+        }
+    });
+}
+
+#[test]
+fn leave_intent_catalog_marks_empty_cleanup_conditional_and_unavailable_leave_disabled() {
+    use crate::providers::ports::{PrepareIntent, ReviewedLifecycle};
+    use retract_domain::{ActionKind, Availability};
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        let provider = TelegramCompatibilityProvider::new(
+            f.gateway.clone(),
+            f.context.clone(),
+            f.service.clone(),
+        )
+        .unwrap();
+        let target = super::compat::conversation_ref(&f.context.active().scope, -1004).unwrap();
+        let intents = provider
+            .intents(f.context.active(), vec![target.clone()])
+            .await
+            .unwrap();
+        let intent = intents
+            .iter()
+            .find(|i| i.action_id == "leave_chat")
+            .unwrap();
+        assert!(intent.label.contains("if any"));
+        let plan = provider
+            .prepare(
+                f.context.active(),
+                PrepareIntent {
+                    action_id: "leave_chat".into(),
+                    targets: vec![target],
+                    actor: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|s| s.descriptor.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ActionKind::LeaveConversation,
+                ActionKind::RemoveForCurrentAccount
+            ]
+        );
+        let owner = super::compat::conversation_ref(&f.context.active().scope, -1001).unwrap();
+        let intents = provider
+            .intents(f.context.active(), vec![owner])
+            .await
+            .unwrap();
+        let intent = intents
+            .iter()
+            .find(|i| i.action_id == "leave_chat")
+            .unwrap();
+        assert!(
+            intent
+                .descriptors
+                .iter()
+                .all(|d| d.availability == Availability::Unavailable)
+        );
+    });
+}
+
+#[test]
 fn scoped_constructor_rejects_repository_for_a_different_verified_account() {
     let first = fixture();
     let second = fixture();

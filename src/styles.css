@@ -353,6 +353,14 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 .chat-action.cleanup-primary:hover { border-color: #64aa96; background: #dff2ea; }
 .chat-action.danger { color: #99423e; background: #fbf4f3; border-color: #efd8d6; }
 .chat-action.danger:hover { background: var(--red-soft); border-color: #deb9b6; }
+.intent-action + .intent-action { margin-top: 10px; }
+.action-effects { margin: 8px 0 12px; padding-left: 19px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.action-effects small { display: block; font-size: 10px; }
+.critical-action-label { color: var(--red); margin: 5px 0; font-size: 11px; font-weight: 650; }
+.chat-action:disabled { cursor: not-allowed; opacity: .6; }
+.job-details { max-height: calc(100vh - 48px); overflow-y: auto; }
+.job-diagnostics { padding-left: 19px; font-size: 12px; line-height: 1.5; }
+.job-counts strong { font-size: 16px; }
 
 .empty-jobs { margin: 10px 0 0; color: #899499; font-size: 9px; line-height: 1.45; }
 .job-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #edf0f0; }

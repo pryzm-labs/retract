@@ -35,6 +35,23 @@ describe("Retract desktop UI", () => {
     expect(screen.queryByRole("button", { name: /Reset demo fixtures/i })).not.toBeInTheDocument();
   });
 
+  it("keeps legacy history review guidance accessible without blocking connection settings", async () => {
+    const snapshot = await api.bootstrapSnapshot();
+    const legacy = { id: testId("legacy-detail"), planId: testId("legacy-plan"), operation: "selected_messages" as const, status: "cancelled" as const,
+      total: 9, deleted: 2, skipped: 3, failed: 4, nextBatch: 1,
+      diagnostics: [{ code: "migration_requires_new_review" as const, message: "RAW_SECRET", retryAt: null }], createdAt: "2026-09-03T00:00:00Z", updatedAt: "2026-09-03T00:00:00Z" };
+    const withHistory = { ...snapshot, legacyHistory: [legacy], recentJobs: [testJob("blocked-history", "blocked", { diagnostics: [{ code: "scope_mismatch", message: "RAW_SECRET", retryAt: null }] })] };
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue(withHistory);
+    vi.spyOn(api, "snapshot").mockResolvedValue(withHistory);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: `View details for legacy cleanup ${legacy.id}` }));
+    expect(screen.getByRole("dialog", { name: "Cleanup job details" })).toHaveTextContent("A new review is required");
+    expect(document.body).not.toHaveTextContent("RAW_SECRET");
+    fireEvent.click(screen.getByRole("button", { name: "Close job details" }));
+    fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+    expect(await screen.findByRole("heading", { name: "Telegram connection" })).toBeInTheDocument();
+  });
+
   it("leaves the password gate before the full Telegram catalog finishes loading", async () => {
     const demoSnapshot = await api.snapshot(fixtureContext);
     const demoSettings = await api.connectionSettings(fixtureContext);
@@ -82,7 +99,7 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: /Design Team/ }));
     expect(await screen.findByText("CHAT AUTHORITY")).toBeInTheDocument();
     expect(screen.getAllByText("Owner").length).toBeGreaterThan(0);
-    expect(screen.getByText("Permanently delete group")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Permanently delete group" })).toBeInTheDocument();
   });
 
   it("makes admin-wide message cleanup explicit before leave-and-remove", async () => {
@@ -131,8 +148,7 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Empty invite/ }));
 
-    expect(screen.getByText("Delete history and remove for me")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
 
     expect(await screen.findByRole("heading", { name: "Remove “Empty invite” from your chat list?" })).toBeInTheDocument();
     expect(screen.getByText(/other participant or group members keep their copies/i)).toBeInTheDocument();
@@ -141,7 +157,7 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
 
     expect(await screen.findByText("Waiting for Telegram to finish removing this chat…")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Removing chat…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove chat from my list" })).toBeDisabled();
     expect(screen.getByText("Removing…").closest("button")).toBeDisabled();
   });
 
@@ -169,7 +185,7 @@ describe("Retract desktop UI", () => {
     render(<App />);
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Empty invite/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
     fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
 
@@ -196,7 +212,7 @@ describe("Retract desktop UI", () => {
     const refresh = vi.spyOn(api, "refreshChats").mockResolvedValue([emptyChat]);
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /Empty invite/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
     fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
     await screen.findByText("Waiting for Telegram to finish removing this chat…");

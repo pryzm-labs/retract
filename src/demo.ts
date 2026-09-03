@@ -469,16 +469,40 @@ export async function demoIntents(refs: ScopedResourceRef[]): Promise<IntentDesc
     ...(chat.capabilities.canDeleteBySender ? ["delete_by_sender" as const] : []),
     ...((chat.kind === "supergroup" || chat.kind === "basic_group") && (chat.capabilities.role !== "member" || chat.capabilities.canLeaveChat) && messages.some(message => message.chatId === chat.id && message.isOutgoing) ? ["delete_my_messages" as const] : [])
   ] : ["selected_messages"];
-  return ops.map(operation => ({ actionId: operation, label: operation, requiresActor: operation === "delete_by_sender", descriptors: [fixtureDescriptor(operation, operation === "delete_group" ? "critical" : operation === "selected_messages" ? "low" : "high")] }));
+  return ops.map(operation => {
+    const tier = operation === "delete_group" ? "critical" : operation === "selected_messages" ? "low" : "high";
+    const labels: Record<PlanOperation, string> = {
+      selected_messages: "Delete selected messages for everyone", delete_my_messages: "Delete all my messages",
+      clear_history: "Revoke history & remove chat", clear_history_and_leave: "Clear all history & leave",
+      delete_all_messages_and_leave: "Delete all possible history & leave", delete_group: "Permanently delete group",
+      remove_chat_for_self: chat && conversationState(chat) === "empty" ? "Remove chat from my list" : "Delete history & remove for me",
+      delete_by_sender: "Delete messages by sender",
+      leave_chat: chat?.capabilities.canClearForEveryone ? `Clear all history & leave ${chat.kind === "channel" ? "channel" : "group"}`
+        : chat?.capabilities.canDeleteOthers ? `Delete all possible history & leave ${chat.kind === "channel" ? "channel" : "group"} (eligible messages, if any)`
+        : `Revoke my messages & leave ${chat?.kind === "channel" ? "channel" : "group"} (eligible messages, if any)`
+    };
+    const descriptors = operation === "leave_chat"
+      ? [fixtureDescriptor(chat?.capabilities.canClearForEveryone ? "clear_history" : "selected_messages", "high"), fixtureDescriptor("leave_chat", "high"), fixtureDescriptor("remove_chat_for_self", "high")]
+      : [fixtureDescriptor(operation, tier)];
+    return { actionId: operation, label: labels[operation], requiresActor: operation === "delete_by_sender", descriptors };
+  });
 }
 function completeFixturePlan(draft: DraftPlan): DraftPlan & PlanView {
   const selected = (draft.refs ?? []).flatMap(([chatId, messageId]) => messages.filter(m => m.chatId === chatId && m.messageId === messageId));
   const conversation = chats.find(chat => chat.id === draft.chatId);
   const targets = selected.filter(m => m.deletionReach === "everyone").map(m => m.ref);
   if (conversation && !["delete_my_messages"].includes(draft.operation)) targets.push(conversation.ref);
-  const descriptor = fixtureDescriptor(draft.operation, draft.confirmationTier);
+  const contentTargets = selected.filter(m => m.deletionReach === "everyone").map(m => m.ref);
+  const leaves = ["leave_chat", "clear_history_and_leave", "delete_all_messages_and_leave"].includes(draft.operation);
+  const steps: RemediationPlan["steps"] = leaves && conversation ? [
+    ...(draft.operation === "clear_history_and_leave"
+      ? [{ descriptor: fixtureDescriptor("clear_history", draft.confirmationTier), targets: [conversation.ref] }]
+      : contentTargets.length ? [{ descriptor: fixtureDescriptor("selected_messages", draft.confirmationTier), targets: contentTargets }] : []),
+    { descriptor: fixtureDescriptor("leave_chat", draft.confirmationTier), targets: [conversation.ref] },
+    { descriptor: fixtureDescriptor("remove_chat_for_self", draft.confirmationTier), targets: [conversation.ref] }
+  ] : [{ descriptor: fixtureDescriptor(draft.operation, draft.confirmationTier), targets }];
   const plan: RemediationPlan = {
-    id: draft.id, scope: fixtureContext.scope, targets, steps: [{ descriptor, targets }],
+    id: draft.id, scope: fixtureContext.scope, targets, steps,
     confirmation: { tier: draft.confirmationTier, acknowledgementRequired: true, ownerAuthRequired: true, exactText: ["high", "critical"].includes(draft.confirmationTier) ? draft.chatTitle ?? null : null },
     recipe: { schema: "telegram.compatibility_recipe", version: 1, payload: { operation: draft.operation, conversationConfirmationTitle: draft.chatTitle ?? null, actorConfirmationName: draft.targetSenderName ?? null, items: selected.map(m => ({ reach: m.deletionReach })) } },
     restartPolicy: "requires_new_review", createdAt: draft.createdAt, fingerprint: draft.fingerprint

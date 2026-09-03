@@ -1,4 +1,8 @@
 import { sameScope, type Uuid } from "../providers/identity";
+import { useState } from "react";
+import type { IntentDescriptor, LegacyHistoryRecord } from "../providers/contract";
+import { ActionEffects } from "./ActionEffects";
+import { JobDetails } from "./JobDetails";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -20,6 +24,7 @@ interface ImpactPanelProps {
   selected: MessageSnapshot[];
   activeChat?: ChatSummary;
   jobs: JobRecord[];
+  legacyHistory?: LegacyHistoryRecord[];
   busy: boolean;
   busyLabel: string | null;
   chatRemovalPending: boolean;
@@ -32,7 +37,9 @@ interface ImpactPanelProps {
   onCancelJob: (jobId: Uuid) => void;
 }
 
-export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatRemovalPending, hiddenSelectionCount, onReview, onChatAction, onOwnMessagesAction, onSenderAction, onClearSelection, onCancelJob }: ImpactPanelProps) {
+export function ImpactPanel({ selected, activeChat, jobs, legacyHistory = [], busy, busyLabel, chatRemovalPending, hiddenSelectionCount, onReview, onChatAction, onOwnMessagesAction, onSenderAction, onClearSelection, onCancelJob }: ImpactPanelProps) {
+  const [detailId, setDetailId] = useState<Uuid | null>(null);
+  const detailJob = [...jobs, ...legacyHistory].find(job => job.id === detailId);
   const everyone = selected.filter((message) => message.deletionReach === "everyone").length;
   const selfOnly = selected.filter((message) => message.deletionReach === "self_only").length;
   const blocked = selected.filter((message) => message.deletionReach === "none").length;
@@ -42,7 +49,17 @@ export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatR
     && selected.every((message) => sameScope(message.scope, activeChat.scope) && message.chatId === activeChat.id && message.senderId === selected[0].senderId)
       ? selected[0]
       : undefined;
-  const canDeleteOwnHistory = activeChat?.intents.some(intent => intent.actionId === "delete_my_messages" && intent.descriptors.some(d => d.availability === "executable" || d.availability === "live_preflight_required"));
+  function handler(intent: IntentDescriptor): (() => void) | undefined {
+    if (intent.requiresActor) return intent.actionId === "delete_by_sender" && senderCandidate?.actorRef ? () => onSenderAction(senderCandidate) : undefined;
+    switch (intent.actionId) {
+      case "delete_my_messages": return onOwnMessagesAction;
+      case "clear_history": case "clear_history_and_leave": case "delete_all_messages_and_leave": case "remove_chat_for_self": case "delete_group": case "leave_chat": {
+        const operation = intent.actionId;
+        return () => onChatAction(operation);
+      }
+      default: return undefined;
+    }
+  }
 
   return (
     <aside className="impact-panel" aria-label="Selection impact">
@@ -95,63 +112,20 @@ export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatR
             {chatRemovalPending && (
               <p className="chat-removal-status" role="status"><LoaderCircle className="spin" size={14} />Waiting for Telegram to finish removing this chat…</p>
             )}
-            <ul className="capability-list">
-              <li className={activeChat.capabilities.canDeleteOthers ? "yes" : "no"}>
-                {activeChat.capabilities.canDeleteOthers ? <CheckCircle2 /> : <CircleSlash2 />}
-                Delete other people’s messages
-              </li>
-              <li className={activeChat.capabilities.canClearForEveryone ? "yes" : "no"}>
-                {activeChat.capabilities.canClearForEveryone ? <CheckCircle2 /> : <CircleSlash2 />}
-                Clear history for everyone
-              </li>
-              <li className={activeChat.capabilities.canRemoveForSelf ? "yes" : "no"}>
-                {activeChat.capabilities.canRemoveForSelf ? <CheckCircle2 /> : <CircleSlash2 />}
-                Delete history and remove for me
-              </li>
-              <li className={activeChat.capabilities.canDeleteGroup ? "yes" : "no"}>
-                {activeChat.capabilities.canDeleteGroup ? <CheckCircle2 /> : <CircleSlash2 />}
-                Permanently delete group
-              </li>
-              <li className={activeChat.capabilities.canLeaveChat ? "yes" : "no"}>
-                {activeChat.capabilities.canLeaveChat ? <CheckCircle2 /> : <CircleSlash2 />}
-                Leave and remove for me
-              </li>
-            </ul>
-            {activeChat.capabilities.canLeaveChat && (
-              <button type="button" className="chat-action cleanup-primary" onClick={() => onChatAction("leave_chat")} disabled={busy || chatRemovalPending}>
-                {activeChat.capabilities.canClearForEveryone
-                  ? <><History size={15} /> Clear all history &amp; leave {activeChat.kind === "channel" ? "channel" : "group"}</>
-                  : activeChat.capabilities.canDeleteOthers
-                    ? <><Eraser size={15} /> Delete all possible history &amp; leave {activeChat.kind === "channel" ? "channel" : "group"}</>
-                    : <><LogOut size={15} /> Revoke my messages &amp; leave {activeChat.kind === "channel" ? "channel" : "group"}</>}
-                <ChevronRight size={15} />
-              </button>
-            )}
-            {activeChat.capabilities.canClearForEveryone && (
-              <button type="button" className="chat-action" onClick={() => onChatAction("clear_history")} disabled={busy || chatRemovalPending}>
-                <History size={15} /> Revoke history &amp; remove chat <ChevronRight size={15} />
-              </button>
-            )}
-            {activeChat.capabilities.canRemoveForSelf && (
-              <button type="button" className="chat-action" onClick={() => onChatAction("remove_chat_for_self")} disabled={busy || chatRemovalPending}>
-                {chatRemovalPending ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} {chatRemovalPending ? "Removing chat…" : activeChat.conversationState === "empty" ? "Remove chat from my list" : "Delete history & remove for me"} <ChevronRight size={15} />
-              </button>
-            )}
-            {canDeleteOwnHistory && (
-              <button type="button" className="chat-action" onClick={onOwnMessagesAction} disabled={busy || chatRemovalPending}>
-                <Eraser size={15} /> Delete all my messages <ChevronRight size={15} />
-              </button>
-            )}
-            {activeChat.capabilities.canDeleteBySender && senderCandidate && (
-              <button type="button" className="chat-action" onClick={() => onSenderAction(senderCandidate)} disabled={busy || chatRemovalPending}>
-                <Users size={15} /> Delete every message by {senderCandidate.senderName} <ChevronRight size={15} />
-              </button>
-            )}
-            {activeChat.capabilities.canDeleteGroup && (
-              <button type="button" className="chat-action danger" onClick={() => onChatAction("delete_group")} disabled={busy || chatRemovalPending}>
-                <Trash2 size={15} /> Delete group permanently <ChevronRight size={15} />
-              </button>
-            )}
+            {activeChat.intents.map(intent => {
+              const onAction = handler(intent);
+              const available = intent.descriptors.length > 0 && intent.descriptors.every(d => d.availability === "executable" || d.availability === "live_preflight_required");
+              const critical = intent.descriptors.some(d => d.confirmationTier === "critical");
+              return <div className="intent-action" key={intent.actionId}>
+                <button type="button" className={`chat-action ${critical ? "danger" : intent.descriptors.length > 1 ? "cleanup-primary" : ""}`}
+                  onClick={onAction} disabled={busy || chatRemovalPending || !available || !onAction}>
+                  {critical ? <Trash2 size={15} /> : <Eraser size={15} />}<span>{intent.label}</span><ChevronRight size={15} />
+                </button>
+                {critical && <p className="critical-action-label">Critical action</p>}
+                <ActionEffects descriptors={intent.descriptors} label={`${intent.label} effects`} />
+                {intent.requiresActor && <p className="candidate-note">{senderCandidate?.actorRef ? `Selected sender: ${senderCandidate.senderName}` : "Select messages from one sender to review this action."}</p>}
+              </div>;
+            })}
           </section>
         )}
 
@@ -162,13 +136,18 @@ export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatR
               <h2>Job activity</h2>
             </div>
           </div>
-          {recentJobs.length === 0 ? (
+          {recentJobs.length === 0 && legacyHistory.length === 0 ? (
             <p className="empty-jobs">No deletions have run in this local profile.</p>
-          ) : recentJobs.map((job) => <JobRow key={job.id} job={job} busy={busy} onCancel={onCancelJob} />)}
+          ) : recentJobs.map((job) => <JobRow key={job.id} job={job} busy={busy} onCancel={onCancelJob} onDetails={() => setDetailId(job.id)} />)}
+          {legacyHistory.slice(0, 3).map(job => <div className="job-row" key={job.id}>
+            <span className="job-copy"><strong>Legacy cleanup</strong><small>New review required</small></span>
+            <button type="button" className="job-cancel" aria-label={`View details for legacy cleanup ${job.id}`} onClick={() => setDetailId(job.id)}>Details</button>
+          </div>)}
           <p className="job-log-note"><ShieldCheck size={13} />Job logs contain IDs and counts, not message content.</p>
         </section>
       </div>
 
+      {detailJob && <JobDetails key={detailJob.id} job={detailJob} onClose={() => setDetailId(null)} />}
     </aside>
   );
 }
@@ -177,7 +156,7 @@ function ImpactRow({ icon, tone, count, label }: { icon: React.ReactNode; tone: 
   return <div className={`impact-row tone-${tone}`}><span className="impact-icon">{icon}</span><span>{label}</span><strong>{count.toLocaleString()}</strong></div>;
 }
 
-function JobRow({ job, busy, onCancel }: { job: JobRecord; busy: boolean; onCancel: (jobId: Uuid) => void }) {
+function JobRow({ job, busy, onCancel, onDetails }: { job: JobRecord; busy: boolean; onCancel: (jobId: Uuid) => void; onDetails: () => void }) {
   const active = job.status === "queued" || job.status === "running";
   return (
     <div className="job-row" role="group" aria-label={`Cleanup job ${job.id}`}>
@@ -187,6 +166,7 @@ function JobRow({ job, busy, onCancel }: { job: JobRecord; busy: boolean; onCanc
         <small>{job.retryAfterSeconds ? `rate limited · retry in ${job.retryAfterSeconds}s` : job.status}{job.deleted > 0 ? ` · ${job.deleted} deleted` : ""}</small>
       </span>
       {active && <button type="button" className="job-cancel" disabled={busy} onClick={() => onCancel(job.id)}>Cancel</button>}
+      <button type="button" className="job-cancel" aria-label={`View details for cleanup job ${job.id}`} aria-haspopup="dialog" onClick={onDetails}>Details</button>
     </div>
   );
 }

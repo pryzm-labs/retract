@@ -57,7 +57,13 @@ function installTransport(options: {
         return envelope({ items: visible.map(wireMessage), nextCursor: null });
       }
       case "prepare_selection_v2": return envelope(wirePlan(captured, request.payload.messageRefs as unknown[]));
-      case "prepare_intent_v2": return envelope(wirePlan(captured, request.payload.targets as unknown[]));
+      case "prepare_intent_v2": {
+        const plan = wirePlan(captured, request.payload.targets as unknown[]);
+        if (request.payload.actionId === "remove_chat_for_self") {
+          plan.steps = plan.steps.map(step => ({ ...step, descriptor: { ...step.descriptor, kind: "remove_for_current_account", effect: "removed_for_current_account_only" } }));
+        }
+        return envelope(plan);
+      }
       case "get_intents_v2": return envelope(options.intents ? await options.intents(request.payload.targets as unknown[]) : []);
       case "authorize_plan_v2": return envelope({});
       case "start_execution_v2": return envelope(options.execute ? await options.execute() : null);
@@ -288,7 +294,7 @@ describe("per-conversation cleanup reconciliation", () => {
     await screen.findByText("First lossless target");
     for (const [index, chat] of [first, second].entries()) {
       fireEvent.click(navigation().getByRole("button", { name: new RegExp(chat.title) }));
-      fireEvent.click(screen.getByRole("button", { name: "Delete history & remove for me" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove for me" }));
       fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
       fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
       await screen.findByText("Waiting for Telegram to finish removing this chat…");
@@ -315,15 +321,15 @@ describe("per-conversation cleanup reconciliation", () => {
       intents: async () => ++intentCount === 1 ? [ownIntent] : updatedCatalog.promise });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: new RegExp(first.title) }));
-    await screen.findByRole("button", { name: "Delete all my messages" });
+    await screen.findByRole("button", { name: "Delete my messages" });
     currentJobs = [firstJob, completed(secondJob)];
     await act(async () => { await vi.advanceTimersByTimeAsync(700); });
     expect(intentCount).toBe(1);
-    expect(screen.getByRole("button", { name: "Delete all my messages" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete my messages" })).toBeInTheDocument();
     currentJobs = [completed(firstJob), completed(secondJob)];
     await act(async () => { await vi.advanceTimersByTimeAsync(700); });
     await act(async () => updatedCatalog.resolve([{ ...ownIntent, descriptors: [{ ...deletionDescriptor, availability: "executable" }] }]));
-    expect(await screen.findByRole("button", { name: "Delete all my messages" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Delete my messages" })).toBeInTheDocument();
     expect(intentCount).toBe(2);
     // Publishing the loaded catalog must not recursively trigger another read.
     await act(async () => { await vi.advanceTimersByTimeAsync(700); });
@@ -343,7 +349,7 @@ describe("per-conversation cleanup reconciliation", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(700); });
     expect(navigation().getByRole("button", { name: /Fresh permission record/ })).toBeInTheDocument();
     await act(async () => oldCatalog.resolve([ownIntent]));
-    expect(screen.queryByRole("button", { name: "Delete all my messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete my messages" })).not.toBeInTheDocument();
     expect(intentCount).toBe(2);
     expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
   });
@@ -445,7 +451,7 @@ describe("late v2 responses across account and source changes", () => {
     fireEvent.click(await screen.findByRole("button", { name: new RegExp(fixture.chats[0].title) }));
     await waitFor(() => expect(intentCount).toBe(2));
     await act(async () => oldCatalog.resolve([{ actionId: "delete_my_messages", label: "Old source permission", requiresActor: false, descriptors: [deletionDescriptor] }]));
-    expect(screen.queryByRole("button", { name: "Delete all my messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Old source permission" })).not.toBeInTheDocument();
     expect(await screen.findByText(sourceMessage.preview)).toBeInTheDocument();
   });
 });

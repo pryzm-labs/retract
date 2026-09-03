@@ -219,6 +219,59 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
             .into_iter()
             .flat_map(|a| a.descriptors)
             .collect::<Vec<_>>();
+        // Discovery describes the existing leave preparation policy without
+        // enumerating history or freezing targets. The final plan remains the
+        // authority for whether any eligible message-cleanup steps exist.
+        let leave_description = if targets.len() == 1
+            && targets[0].resource.resource_kind == ResourceKind::Conversation
+        {
+            use retract_domain::{ActionKind, ConfirmationTier, ExpectedEffect};
+            let chat = self
+                .gateway
+                .chat_by_id(chat_id(&targets[0])?)
+                .await
+                .map_err(boundary_error)?
+                .ok_or_else(|| safe(ErrorCode::NotFound))?;
+            self.check_active(context)?;
+            let c = &chat.capabilities;
+            let (cleanup_kind, label) = if c.can_clear_for_everyone {
+                (ActionKind::ClearConversation, "Clear all history & leave")
+            } else if c.can_delete_others {
+                (
+                    ActionKind::DeleteRemoteItem,
+                    "Delete eligible messages from all participants, if any, & leave",
+                )
+            } else {
+                (
+                    ActionKind::DeleteRemoteItem,
+                    "Revoke my eligible messages, if any, & leave",
+                )
+            };
+            let ordered = [
+                (cleanup_kind, ExpectedEffect::RemovedForAllParticipants),
+                (
+                    ActionKind::LeaveConversation,
+                    ExpectedEffect::MembershipRemoved,
+                ),
+                (
+                    ActionKind::RemoveForCurrentAccount,
+                    ExpectedEffect::RemovedForCurrentAccountOnly,
+                ),
+            ]
+            .into_iter()
+            .map(|(kind, effect)| {
+                let mut action = super::compat::descriptor(kind, effect, ConfirmationTier::High);
+                if !c.can_leave_chat {
+                    action.availability = retract_domain::Availability::Unavailable;
+                    action.unavailable_reason = Some(safe(ErrorCode::PermissionChanged));
+                }
+                action
+            })
+            .collect::<Vec<_>>();
+            Some((label, ordered))
+        } else {
+            None
+        };
         let ids: &[(&str, &str, bool)] = if targets
             .iter()
             .all(|t| t.resource.resource_kind == ResourceKind::Content)
@@ -247,6 +300,16 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
             .iter()
             .map(|(id, label, actor)| {
                 use retract_domain::{ActionKind, ConfirmationTier, ExpectedEffect};
+                if *id == "leave_chat" {
+                    if let Some((label, descriptors)) = &leave_description {
+                        return IntentDescriptor {
+                            action_id: (*id).into(),
+                            label: (*label).into(),
+                            requires_actor: false,
+                            descriptors: descriptors.clone(),
+                        };
+                    }
+                }
                 let kind = match *id {
                     "selected_messages" | "delete_my_messages" => ActionKind::DeleteRemoteItem,
                     "clear_history" => ActionKind::ClearConversation,
