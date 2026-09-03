@@ -1,8 +1,8 @@
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::fs;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
@@ -11,7 +11,9 @@ use aes_gcm::{
     Aes256Gcm, KeyInit,
     aead::{Aead, Generate, Payload},
 };
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
+#[cfg(any(target_os = "macos", test))]
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{error::AppError, model::PersistedState};
 
@@ -56,6 +58,7 @@ enum MacVaultState {
 #[cfg(target_os = "macos")]
 static MAC_VAULT: OnceLock<Mutex<MacVaultState>> = OnceLock::new();
 
+#[cfg(test)]
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecureJobStore {
     key: [u8; KEY_LENGTH],
@@ -67,6 +70,7 @@ pub struct SecureJobStore {
     loaded_legacy_unbound: AtomicBool,
 }
 
+#[cfg(test)]
 impl SecureJobStore {
     pub fn open(data_dir: PathBuf) -> Result<Self, AppError> {
         fs::create_dir_all(&data_dir)?;

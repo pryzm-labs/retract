@@ -109,6 +109,7 @@ struct IdentityState {
 }
 
 impl LiveGateway {
+    #[cfg(test)]
     pub fn connect(config: LiveGatewayConfig) -> Result<Arc<Self>, AppError> {
         Self::connect_with_optional_identity_store(config, None)
     }
@@ -611,6 +612,10 @@ impl LiveGateway {
 
     pub fn active_context(&self) -> Option<retract_domain::ActiveContext> {
         self.session_binding.current()
+    }
+
+    pub(crate) fn session_binding(&self) -> Arc<SessionBinding> {
+        self.session_binding.clone()
     }
 
     fn set_auth(&self, stage: AuthStage, hint: Option<&str>, qr_link: Option<&str>) {

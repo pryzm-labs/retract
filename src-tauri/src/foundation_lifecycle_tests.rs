@@ -1,287 +1,164 @@
-//! Pre-migration RED gate: real legacy parser/service/AES-GCM store, synthetic I/O.
-//! Task 6 must rewire these entry points to v2 without weakening the behavior.
-
-use std::{path::Path, sync::Arc, time::Duration};
-
-use serde_json::{Value, json};
-use uuid::Uuid;
-
+//! Task 1's eleven behavioral expectations, now exercising the real registered
+//! v2 commands, shared lifecycle and authenticated v3 files. No native-ID shim.
 use crate::{
-    demo_gateway::DemoGateway,
-    model::{
-        AuthorizePlanRequest, ExecuteRequest, JobRecord, JobStatus, MessageRef, PersistedState,
-        PlanView, PrepareSelectionRequest,
-    },
-    secure_store::SecureJobStore,
-    service::CleanerService,
+    compatibility::{fixtures::*, tests::invoke},
+    persistence::FoundationStore,
 };
+use retract_domain::*;
+use serde_json::{Value, json};
+use std::sync::{Arc, atomic::Ordering};
 
-const KEY: [u8; 32] = [0x71; 32];
-
-fn fixture() -> Value {
-    serde_json::from_str(include_str!(
-        "../../src/test/fixtures/provider-lifecycle.json"
-    ))
-    .expect("complete synthetic lifecycle fixture")
-}
-
-// Explicit temporary legacy adapter for the already numeric Telegram engine.
-// These supplemental native fields let later lifecycle tests reach the engine
-// independently of the RED string parser below. No f64/JavaScript conversion.
-fn legacy_selection(context: Value, refs: Vec<Value>) -> PrepareSelectionRequest {
-    let message_refs = refs
-        .iter()
-        .map(|reference| {
-            let locator = &reference["resource"]["locatorPayload"];
-            json!({
-                "chatId": locator["chatId"].as_str().unwrap().parse::<i64>().unwrap(),
-                "messageId": locator["messageId"].as_str().unwrap().parse::<i64>().unwrap(),
-                "ref": reference
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::from_value(json!({
-        "contractVersion": 2, "context": context,
-        "payload": { "messageRefs": refs }, "messageRefs": message_refs
-    }))
-    .unwrap()
-}
-
-async fn service(path: &Path) -> (Arc<DemoGateway>, Arc<CleanerService>) {
-    let gateway = Arc::new(DemoGateway::new());
-    gateway
-        .append_messages(-1001, 9_007_199_254_740_992, 2)
-        .await;
-    let service = CleanerService::new(
-        gateway.clone(),
-        SecureJobStore::with_test_key(path.to_path_buf(), KEY),
-    )
-    .unwrap();
-    (gateway, service)
-}
-
-async fn prepare(service: &CleanerService, context: Value) -> PlanView {
+fn selected(other: bool) -> Vec<Value> {
     let data = fixture();
-    let messages = if context["scope"] == data["otherScope"] {
-        &data["otherAccountMessages"]
+    let name = if other {
+        "otherAccountMessages"
     } else {
-        &data["messages"]
+        "messages"
     };
-    service
-        .prepare_selection(legacy_selection(
-            context,
-            vec![messages[0]["ref"].clone(), messages[1]["ref"].clone()],
-        ))
-        .await
-        .expect("the real legacy engine can prepare the two exact i64 targets")
-}
-
-async fn authorize(service: &CleanerService, plan: &PlanView, context: Value) {
-    let request: AuthorizePlanRequest = serde_json::from_value(json!({
-        "contractVersion": 2, "context": context,
-        "planId": plan.id, "fingerprint": plan.fingerprint,
-        "payload": { "planId": plan.id, "fingerprint": plan.fingerprint }
-    }))
-    .unwrap();
-    service.authorize_plan(request).await.unwrap();
-}
-
-fn execution(plan: &PlanView, context: Value) -> ExecuteRequest {
-    let payload = json!({
-        "planId": plan.id, "fingerprint": plan.fingerprint,
-        "irreversibleAcknowledged": true, "typedChatTitle": null
-    });
-    let mut request = payload.clone();
-    request["contractVersion"] = json!(2);
-    request["context"] = context;
-    request["payload"] = payload;
-    serde_json::from_value(request).unwrap()
-}
-
-async fn settled(service: &CleanerService, job_id: Uuid) -> JobRecord {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let job = service
-                .jobs()
-                .await
-                .into_iter()
-                .find(|job| job.id == job_id)
-                .unwrap();
-            let wire = serde_json::to_value(&job).unwrap();
-            if job.status.is_terminal() || wire["status"] == "blocked" {
-                return job;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("synthetic job reaches a terminal or scope-blocked state")
-}
-
-async fn persisted(path: &Path, job_id: Uuid) -> PersistedState {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let state = SecureJobStore::with_test_key(path.to_path_buf(), KEY)
-                .load()
-                .unwrap();
-            if state
-                .jobs
-                .iter()
-                .any(|job| job.id == job_id && job.status.is_terminal())
-            {
-                return state;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("terminal job was actually encrypted and saved")
+    vec![data[name][0]["ref"].clone(), data[name][1]["ref"].clone()]
 }
 
 #[test]
 fn foundation_lifecycle_application_boundary_accepts_lossless_string_identifiers() {
-    let parsed = serde_json::from_value::<MessageRef>(json!({
-        "chatId": "-1001", "messageId": "9007199254740993"
-    }));
-    assert!(
-        parsed.is_ok(),
-        "the application boundary must accept lossless string identifiers: {parsed:?}"
-    );
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, _) = telegram(directory.path(), active.clone()).await;
+        let plan = harness.prepare(&active, selected(false));
+        let mut ids = plan
+            .targets
+            .iter()
+            .map(|r| {
+                r.resource.locator_payload["messageId"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["9007199254740992", "9007199254740993"]);
+        assert!(
+            plan.targets
+                .iter()
+                .all(|r| r.resource.locator_payload["chatId"] == "-1001")
+        );
+    });
 }
 
 #[test]
 fn foundation_lifecycle_nonnumeric_target_survives_the_complete_shared_lifecycle() {
     tauri::async_runtime::block_on(async {
         let data = fixture();
-        let context = data["syntheticContext"].clone();
+        let active = context("syntheticContext");
         let reference = data["messages"][2]["ref"].clone();
         let conversation = data["messages"][2]["conversation"].clone();
         assert_eq!(
             reference["resource"]["locatorPayload"]["messageId"],
             "message:part/0007"
         );
-
-        // R4: one scenario owns every downstream assertion. It is intentionally
-        // blocked at this real parser today, not claimed as end-to-end GREEN.
-        // Tasks 4/6 replace the boundaries with the shared registered synthetic
-        // provider path. Never route this target through legacy_selection or
-        // substitute an i64 for its opaque native ID to reach the next step.
-        let request = serde_json::from_value::<PrepareSelectionRequest>(json!({
-            "contractVersion": 2, "context": context,
-            "payload": { "messageRefs": [reference] },
-            "messageRefs": [{ "chatId": -1001, "messageId": "message:part/0007" }]
-        }))
-        .expect("the full shared lifecycle must accept the literal nonnumeric target at its application boundary");
-
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.enc");
-        let gateway = Arc::new(DemoGateway::new());
-        let original = CleanerService::new(
-            gateway.clone(),
-            SecureJobStore::with_test_key(path.clone(), KEY),
-        )
-        .expect("open the real encrypted service for the synthetic lifecycle");
-        let plan = original
-            .prepare_selection(request)
-            .await
-            .expect("prepare the exact opaque target through the shared service");
-        assert_eq!(plan.summary.selected, 1);
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let original = synthetic(directory.path(), io.clone());
+        let plan = original.prepare(&active, vec![reference.clone()]);
+        assert_eq!(plan.targets.len(), 1);
         assert_eq!(
-            serde_json::to_value(&plan).unwrap()["scope"],
-            context["scope"]
+            serde_json::to_value(&plan.scope).unwrap(),
+            data["syntheticContext"]["scope"]
         );
-
-        let prepared_state = SecureJobStore::with_test_key(path.clone(), KEY)
-            .load()
-            .expect("preparation must durably save the frozen opaque plan");
-        let prepared_plan = prepared_state
-            .plans
-            .iter()
-            .find(|stored| stored.id == plan.id)
-            .unwrap();
-        let prepared_wire = serde_json::to_value(prepared_plan).unwrap();
-        assert_eq!(prepared_wire["targets"], json!([reference]));
+        let prepared = encrypted_state(directory.path(), &active, KEY).unwrap();
+        let prepared_plan = prepared.plans.iter().find(|p| p.id == plan.id).unwrap();
         assert_eq!(
-            prepared_wire["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            serde_json::to_value(&prepared_plan.targets).unwrap(),
+            json!([reference])
+        );
+        assert_eq!(
+            prepared_plan.targets[0].resource.locator_payload["messageId"],
             "message:part/0007"
         );
-
-        // Existing real authorization/execution, not a test-only provider engine.
-        authorize(&original, &plan, context.clone()).await;
-        let job = original
-            .start_execution(execution(&plan, context.clone()))
-            .await
-            .expect("the authorization must start this exact scoped frozen plan");
+        original.authorize(&active, &plan);
+        let job = original.start(&active, &plan).unwrap();
         assert_eq!(job.plan_id, plan.id);
-        assert_eq!(job.total, 1);
-        let job_wire = serde_json::to_value(&job).unwrap();
-        assert_eq!(job_wire["scope"], context["scope"]);
-        assert_eq!(job_wire["dirtyRefs"], json!([conversation]));
-        let finished = settled(&original, job.id).await;
+        assert_eq!(job.counters.eligible, 1);
+        assert_eq!(job.scope, active.scope);
+        assert_eq!(
+            serde_json::to_value(&job.dirty_refs).unwrap(),
+            json!([conversation])
+        );
+        let finished = original.settled(&active, job.id).await;
         assert_eq!(finished.status, JobStatus::Completed);
-        assert_eq!(finished.deleted, 1);
-
-        let durable = persisted(&path, job.id).await;
-        let ciphertext = std::fs::read(&path).expect("read the actual encrypted file");
+        assert_eq!(finished.counters.deleted, 1);
+        let durable = encrypted_state(directory.path(), &active, KEY).unwrap();
+        let ciphertext = std::fs::read(directory.path().join("jobs.enc")).unwrap();
         assert!(ciphertext.starts_with(b"RTRCT03"));
         assert!(
             !ciphertext
                 .windows(b"message:part/0007".len())
-                .any(|bytes| bytes == b"message:part/0007")
+                .any(|p| p == b"message:part/0007")
         );
-        assert!(
-            SecureJobStore::with_test_key(path.clone(), [0x72; 32])
-                .load()
-                .is_err()
-        );
-        let durable_plan = durable
-            .plans
-            .iter()
-            .find(|stored| stored.id == plan.id)
-            .unwrap();
-        let durable_wire = serde_json::to_value(durable_plan).unwrap();
-        assert_eq!(durable_wire["scope"], context["scope"]);
-        assert_eq!(durable_wire["targets"], json!([reference]));
+        assert!(encrypted_state(directory.path(), &active, [0x72; 32]).is_err());
+        let durable_plan = durable.plans.iter().find(|p| p.id == plan.id).unwrap();
+        assert_eq!(durable_plan.scope, active.scope);
         assert_eq!(
-            durable_wire["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            serde_json::to_value(&durable_plan.targets).unwrap(),
+            json!([reference])
+        );
+        assert_eq!(
+            durable_plan.targets[0].resource.locator_payload["messageId"],
             "message:part/0007"
         );
-
+        while original.service.has_workers().await {
+            tokio::task::yield_now().await;
+        }
+        let old_store = Arc::downgrade(&original.store);
         drop(original);
-        let reloaded = CleanerService::new(
-            gateway.clone(),
-            SecureJobStore::with_test_key(path.clone(), KEY),
-        )
-        .expect("recover the real service from the authenticated scoped job file");
-        let mutations_before_recovery = gateway.operation_log().await;
-        reloaded.resume_incomplete().await;
-        let recovered = settled(&reloaded, job.id).await;
-        assert_eq!(recovered.status, JobStatus::Completed);
-        assert_eq!(recovered.deleted, 1);
-        assert_eq!(gateway.operation_log().await, mutations_before_recovery);
-        let recovered_wire = serde_json::to_value(&recovered).unwrap();
-        assert_eq!(recovered_wire["scope"], context["scope"]);
-        assert_eq!(recovered_wire["dirtyRefs"], json!([conversation]));
-
-        // This is the existing refresh parser/service signature, another boundary
-        // to rewire to v2. Return the stored scoped ref unchanged; do not extract
-        // or parse its native chat ID merely to satisfy the legacy Vec<i64> API.
-        let refresh_refs = serde_json::from_value(recovered_wire["dirtyRefs"].clone())
-            .expect("targeted refresh must accept the recovered scoped conversation refs");
-        let refreshed = reloaded.refresh_chats(refresh_refs).await.unwrap();
-        assert_eq!(refreshed.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&refreshed[0]).unwrap()["ref"],
-            conversation
+        assert!(
+            old_store.upgrade().is_none(),
+            "recovery must reopen ciphertext, not reuse an in-memory store"
         );
-        let after_refresh = SecureJobStore::with_test_key(path, KEY).load().unwrap();
-        let retained = after_refresh
-            .plans
-            .iter()
-            .find(|stored| stored.id == plan.id)
-            .unwrap();
+        let before = io.calls.lock().unwrap().clone();
+        let reloaded = synthetic(directory.path(), io.clone());
+        invoke(
+            &reloaded.webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":active,"payload":{}}),
+        )
+        .unwrap();
+        let recovered = reloaded.settled(&active, job.id).await;
+        assert_eq!(recovered.status, JobStatus::Completed);
+        assert_eq!(recovered.counters.deleted, 1);
+        assert_eq!(*io.calls.lock().unwrap(), before);
+        assert_eq!(recovered.scope, active.scope);
         assert_eq!(
-            serde_json::to_value(retained).unwrap()["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            serde_json::to_value(&recovered.dirty_refs).unwrap(),
+            json!([conversation])
+        );
+        let refreshed = reloaded
+            .call(
+                "refresh_chats_v2",
+                &active,
+                json!({"conversations":recovered.dirty_refs}),
+            )
+            .unwrap();
+        assert_eq!(refreshed.as_array().unwrap().len(), 1);
+        let refreshed_ref = json!({"scope":refreshed[0]["scope"],"id":refreshed[0]["id"],"resource":refreshed[0]["resource"]});
+        assert_eq!(refreshed_ref, conversation);
+        assert_eq!(io.catalog.load(Ordering::SeqCst), 0);
+        assert_eq!(io.refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            before[0][0].resource.locator_payload["messageId"],
+            "message:part/0007"
+        );
+        let after = encrypted_state(directory.path(), &active, KEY).unwrap();
+        assert_eq!(
+            after
+                .plans
+                .iter()
+                .find(|p| p.id == plan.id)
+                .unwrap()
+                .targets[0]
+                .resource
+                .locator_payload["messageId"],
             "message:part/0007"
         );
     });
@@ -291,13 +168,14 @@ fn foundation_lifecycle_nonnumeric_target_survives_the_complete_shared_lifecycle
 fn foundation_lifecycle_account_changes_invalidate_the_plan_binding() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let (_, service) = service(&directory.path().join("jobs.enc")).await;
-        let data = fixture();
-        let first = prepare(&service, data["context"].clone()).await;
-        let other = prepare(&service, data["otherContext"].clone()).await;
+        let (a, _) = telegram(directory.path(), context("context")).await;
+        let first = a.prepare(&context("context"), selected(false));
+        drop(a);
+        let (b, _) = telegram(directory.path(), context("otherContext")).await;
+        let other = b.prepare(&context("otherContext"), selected(true));
         assert_ne!(
             first.fingerprint, other.fingerprint,
-            "the same native targets in another account must not reuse an unscoped plan binding"
+            "same native targets in another account must not reuse the plan binding"
         );
     });
 }
@@ -306,32 +184,32 @@ fn foundation_lifecycle_account_changes_invalidate_the_plan_binding() {
 fn foundation_lifecycle_changed_persisted_scope_rejects_the_original_fingerprint() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.enc");
-        let (gateway, original) = service(&path).await;
-        let data = fixture();
-        let plan = prepare(&original, data["context"].clone()).await;
-        let store = SecureJobStore::with_test_key(path.clone(), KEY);
-        let mut wire = serde_json::to_value(store.load().unwrap()).unwrap();
-        wire["plans"][0]["scope"] = data["otherScope"].clone();
-        // Keep ID, targets and fingerprint unchanged: a new random plan ID must
-        // not let the cross-account comparison pass without actually binding scope.
-        let changed = serde_json::from_value::<PersistedState>(wire)
-            .expect("scope tampering must not be mistaken for an invalid test fixture");
-        store.save(&changed).unwrap();
-        drop(original);
-        // A future v2 loader may reject the binding here, but that adaptation
-        // must assert its specific safe binding-error code, not accept any error.
-        let reloaded = CleanerService::new(gateway, SecureJobStore::with_test_key(path, KEY))
-            .expect("the current legacy store must load before checking authorization rejection");
-        let request = serde_json::from_value(json!({
-            "contractVersion": 2, "context": data["context"],
-            "planId": plan.id, "fingerprint": plan.fingerprint,
-            "payload": { "planId": plan.id, "fingerprint": plan.fingerprint }
-        }))
+        let active = context("context");
+        let (original, _) = telegram(directory.path(), active.clone()).await;
+        let plan = original.prepare(&active, selected(false));
+        let mut changed = encrypted_state(directory.path(), &active, KEY).unwrap();
+        changed.plans[0].scope = context("otherContext").scope;
+        assert_eq!(changed.plans[0].id, plan.id);
+        assert_eq!(changed.plans[0].fingerprint, plan.fingerprint);
+        let aad = "{\"format\":\"RTRCT03\",\"schema\":3,\"provider\":\"telegram\",\"profile\":\"lifecycle\",\"scope\":\"profile\"}";
+        let ciphertext = crate::secure_store::encrypt_authenticated(
+            b"RTRCT03",
+            &KEY,
+            aad.as_bytes(),
+            &serde_json::to_vec(&changed).unwrap(),
+        )
         .unwrap();
+        drop(original);
+        std::fs::write(directory.path().join("jobs.enc"), ciphertext).unwrap();
+        let result = FoundationStore::open_with_test_key_and_payload_validator(
+            directory.path().to_path_buf(),
+            binding(&active),
+            KEY,
+            Arc::new(crate::providers::telegram::locators::TelegramPayloadValidator),
+        );
         assert!(
-            reloaded.authorize_plan(request).await.is_err(),
-            "changing only persisted account scope must invalidate the original plan fingerprint"
+            matches!(result,Err(crate::error::AppError::SecureStore(ref message)) if message=="invalid remediation plan"),
+            "scope tamper must fail the authenticated plan-binding validator: {result:?}"
         );
     });
 }
@@ -340,33 +218,25 @@ fn foundation_lifecycle_changed_persisted_scope_rejects_the_original_fingerprint
 fn foundation_lifecycle_prepared_plan_persists_scoped_opaque_targets() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.enc");
-        let (_, service) = service(&path).await;
-        let data = fixture();
-        let plan = prepare(&service, data["context"].clone()).await;
-        let state = SecureJobStore::with_test_key(path, KEY).load().unwrap();
-        let stored = state
-            .plans
+        let active = context("context");
+        let (harness, _) = telegram(directory.path(), active.clone()).await;
+        let plan = harness.prepare(&active, selected(false));
+        let state = encrypted_state(directory.path(), &active, KEY).unwrap();
+        let stored = state.plans.iter().find(|p| p.id == plan.id).unwrap();
+        let mut ids = stored
+            .targets
             .iter()
-            .find(|candidate| candidate.id == plan.id)
-            .unwrap();
-        assert_eq!(
-            stored
-                .items
-                .iter()
-                .map(|item| item.message_id)
-                .collect::<Vec<_>>(),
-            vec![9_007_199_254_740_992, 9_007_199_254_740_993]
-        );
-        let wire = serde_json::to_value(stored).unwrap();
-        assert_eq!(
-            wire["scope"], data["context"]["scope"],
-            "encrypted frozen plans must bind the provider/account/source, not only numeric native targets"
-        );
-        assert_eq!(
-            wire["targets"],
-            json!([data["messages"][0]["ref"], data["messages"][1]["ref"]])
-        );
+            .map(|r| r.resource.locator_payload["messageId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["9007199254740992", "9007199254740993"]);
+        assert_eq!(stored.scope, active.scope);
+        let mut expected: Vec<ScopedResourceRef> = selected(false)
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        expected.sort_by_key(|r| r.id);
+        assert_eq!(stored.targets, expected);
     });
 }
 
@@ -374,46 +244,31 @@ fn foundation_lifecycle_prepared_plan_persists_scoped_opaque_targets() {
 fn foundation_lifecycle_encrypted_job_roundtrip_retains_scoped_dirty_refs() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.enc");
-        let (gateway, service) = service(&path).await;
-        let data = fixture();
-        let plan = prepare(&service, data["context"].clone()).await;
-        authorize(&service, &plan, data["context"].clone()).await;
-        let job = service
-            .start_execution(execution(&plan, data["context"].clone()))
-            .await
-            .unwrap();
-        let finished = settled(&service, job.id).await;
-        assert_eq!(finished.deleted, 2);
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let plan = harness.prepare(&active, selected(false));
+        harness.authorize(&active, &plan);
+        let job = harness.start(&active, &plan).unwrap();
+        let finished = harness.settled(&active, job.id).await;
+        assert_eq!(finished.counters.deleted, 2);
         assert_eq!(
             gateway.delete_calls().await,
             vec![(-1001, vec![9_007_199_254_740_992, 9_007_199_254_740_993])]
         );
-        let state = persisted(&path, job.id).await;
-        let ciphertext = std::fs::read(&path).unwrap();
+        let state = encrypted_state(directory.path(), &active, KEY).unwrap();
+        let ciphertext = std::fs::read(directory.path().join("jobs.enc")).unwrap();
         assert!(
             !ciphertext
                 .windows(b"9007199254740993".len())
-                .any(|part| part == b"9007199254740993")
+                .any(|p| p == b"9007199254740993")
         );
-        assert!(
-            SecureJobStore::with_test_key(path.clone(), [0x72; 32])
-                .load()
-                .is_err()
-        );
-        let wire = serde_json::to_value(
-            state
-                .jobs
-                .iter()
-                .find(|candidate| candidate.id == job.id)
-                .unwrap(),
-        )
-        .unwrap();
+        assert!(encrypted_state(directory.path(), &active, [0x72; 32]).is_err());
+        let stored = state.jobs.iter().find(|j| j.id == job.id).unwrap();
         assert_eq!(
-            wire["dirtyRefs"], data["dirtyRefs"],
-            "an actual AES-GCM save/reload must retain scoped dirty conversation refs"
+            serde_json::to_value(&stored.dirty_refs).unwrap(),
+            fixture()["dirtyRefs"]
         );
-        assert_eq!(wire["scope"], data["context"]["scope"]);
+        assert_eq!(stored.scope, active.scope);
     });
 }
 
@@ -421,25 +276,13 @@ fn foundation_lifecycle_encrypted_job_roundtrip_retains_scoped_dirty_refs() {
 fn foundation_lifecycle_foreign_account_execution_never_mutates_gateway() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let (gateway, service) = service(&directory.path().join("jobs.enc")).await;
-        let data = fixture();
-        let plan = prepare(&service, data["context"].clone()).await;
-        authorize(&service, &plan, data["context"].clone()).await;
-        let result = service
-            .start_execution(execution(&plan, data["otherContext"].clone()))
-            .await;
-        if let Ok(job) = &result {
-            settled(&service, job.id).await;
-        }
-        assert!(
-            gateway.operation_log().await.is_empty(),
-            "a foreign-account request must not reach a mutation; observed {:?}",
-            gateway.operation_log().await
-        );
-        assert!(
-            result.is_err(),
-            "execution must fail closed on expected-context mismatch"
-        );
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let plan = harness.prepare(&active, selected(false));
+        harness.authorize(&active, &plan);
+        let result = harness.start(&context("otherContext"), &plan);
+        assert!(gateway.operation_log().await.is_empty());
+        assert_eq!(result.unwrap_err()["code"], "scope_mismatch");
     });
 }
 
@@ -447,31 +290,42 @@ fn foundation_lifecycle_foreign_account_execution_never_mutates_gateway() {
 fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.enc");
-        let (gateway, preparation) = service(&path).await;
-        let data = fixture();
-        let view = prepare(&preparation, data["context"].clone()).await;
-        let store = SecureJobStore::with_test_key(path.clone(), KEY);
-        let mut state = store.load().unwrap();
-        let plan = state.plans.iter().find(|plan| plan.id == view.id).unwrap();
-        let mut job = JobRecord::new(plan);
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let plan = harness.prepare(&active, selected(false));
+        let legacy =
+            crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(&plan)
+                .unwrap();
+        let mut job =
+            crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
+                &active.scope,
+                &legacy,
+                &crate::model::JobRecord::new(&legacy),
+                true,
+            )
+            .unwrap();
         job.status = JobStatus::Running;
-        let job_id = job.id;
-        state.jobs.push(job);
-        store.save(&state).unwrap();
-        drop(preparation);
-        // The new runtime has authenticated ciphertext but no verified account.
-        // That is not authority to attach this queued legacy job to its session.
-        let resumed =
-            CleanerService::new(gateway.clone(), SecureJobStore::with_test_key(path, KEY)).unwrap();
-        resumed.resume_incomplete().await;
-        let finished = settled(&resumed, job_id).await;
-        assert!(
-            gateway.operation_log().await.is_empty(),
-            "encrypted recovery without verified scope must not replay native deletions: {:?}",
-            gateway.operation_log().await
+        let id = job.id;
+        harness
+            .store
+            .transaction(|s| {
+                s.jobs.push(job);
+                Ok(())
+            })
+            .unwrap();
+        *harness.connection.active.write().unwrap() = None;
+        invoke(
+            &harness.webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":null,"payload":{}}),
+        )
+        .unwrap();
+        let state = encrypted_state(directory.path(), &active, KEY).unwrap();
+        assert!(gateway.operation_log().await.is_empty());
+        assert_ne!(
+            state.jobs.iter().find(|j| j.id == id).unwrap().status,
+            JobStatus::Completed
         );
-        assert_ne!(finished.status, JobStatus::Completed);
     });
 }
 
@@ -479,16 +333,22 @@ fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay
 fn foundation_lifecycle_targeted_refresh_returns_scoped_string_conversations() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let (gateway, service) = service(&directory.path().join("jobs.enc")).await;
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
         let before = gateway.chat_read_counts();
-        let chats = service.refresh_chats(vec![-1001, -1001]).await.unwrap();
-        assert_eq!(chats.len(), 1);
+        let conversation = fixture()["dirtyRefs"][0].clone();
+        let chats = harness
+            .call(
+                "refresh_chats_v2",
+                &active,
+                json!({"conversations":[conversation,conversation]}),
+            )
+            .unwrap();
+        assert_eq!(chats.as_array().unwrap().len(), 1);
         assert_eq!(gateway.chat_read_counts(), (before.0, before.1 + 1));
-        let wire = serde_json::to_value(&chats[0]).unwrap();
         assert_eq!(
-            wire["ref"],
-            fixture()["dirtyRefs"][0],
-            "targeted reconciliation must return the scoped opaque conversation ref, not a naked native chat ID"
+            json!({"scope":chats[0]["scope"],"id":chats[0]["id"],"resource":chats[0]["resource"]}),
+            conversation
         );
     });
 }
@@ -497,17 +357,21 @@ fn foundation_lifecycle_targeted_refresh_returns_scoped_string_conversations() {
 fn foundation_lifecycle_unknown_locator_version_is_rejected_before_resolution() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let (_, service) = service(&directory.path().join("jobs.enc")).await;
-        let data = fixture();
-        let mut reference = data["messages"][0]["ref"].clone();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let mut reference = fixture()["messages"][0]["ref"].clone();
         reference["resource"]["locatorVersion"] = json!(999);
-        let result = service
-            .prepare_selection(legacy_selection(data["context"].clone(), vec![reference]))
-            .await;
+        let result = harness.call(
+            "prepare_selection_v2",
+            &active,
+            json!({"messageRefs":[reference]}),
+        );
         assert!(
             result.is_err(),
-            "unsupported locator versions must not produce executable plans"
+            "unsupported locator versions must not produce plans"
         );
+        assert!(gateway.operation_log().await.is_empty());
+        assert!(harness.store.snapshot().unwrap().plans.is_empty());
     });
 }
 
@@ -515,16 +379,20 @@ fn foundation_lifecycle_unknown_locator_version_is_rejected_before_resolution() 
 fn foundation_lifecycle_canonical_payload_disagreement_is_rejected() {
     tauri::async_runtime::block_on(async {
         let directory = tempfile::tempdir().unwrap();
-        let (_, service) = service(&directory.path().join("jobs.enc")).await;
-        let data = fixture();
-        let mut reference = data["messages"][0]["ref"].clone();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let mut reference = fixture()["messages"][0]["ref"].clone();
         reference["resource"]["canonicalKey"] = json!("[\"-1001\",\"9007199254740993\"]");
-        let result = service
-            .prepare_selection(legacy_selection(data["context"].clone(), vec![reference]))
-            .await;
+        let result = harness.call(
+            "prepare_selection_v2",
+            &active,
+            json!({"messageRefs":[reference]}),
+        );
         assert!(
             result.is_err(),
-            "canonical identity and locator payload disagreement must fail closed"
+            "canonical identity/locator payload disagreement must fail closed"
         );
+        assert!(gateway.operation_log().await.is_empty());
+        assert!(harness.store.snapshot().unwrap().plans.is_empty());
     });
 }

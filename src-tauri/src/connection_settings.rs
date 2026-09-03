@@ -83,7 +83,7 @@ pub struct EffectiveLiveSettings {
     pub use_test_dc: bool,
 }
 
-pub fn get_view(app: &AppHandle) -> Result<ConnectionSettingsView, AppError> {
+pub fn get_view<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<ConnectionSettingsView, AppError> {
     let data_dir = app
         .path()
         .app_local_data_dir()
@@ -130,7 +130,10 @@ pub fn get_view(app: &AppHandle) -> Result<ConnectionSettingsView, AppError> {
     })
 }
 
-pub fn save(app: &AppHandle, request: SaveConnectionSettingsRequest) -> Result<(), AppError> {
+pub fn save<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    request: SaveConnectionSettingsRequest,
+) -> Result<(), AppError> {
     let data_dir = app
         .path()
         .app_local_data_dir()
@@ -174,7 +177,9 @@ pub fn save(app: &AppHandle, request: SaveConnectionSettingsRequest) -> Result<(
     write_settings(&data_dir, &settings)
 }
 
-pub fn effective_live(app: &AppHandle) -> Result<Option<EffectiveLiveSettings>, AppError> {
+pub fn effective_live<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<EffectiveLiveSettings>, AppError> {
     let data_dir = app
         .path()
         .app_local_data_dir()
@@ -331,11 +336,11 @@ fn environment_requests_live() -> bool {
     .any(|name| std::env::var_os(name).is_some())
 }
 
-fn detect_tdlib_path(app: &AppHandle) -> Option<PathBuf> {
+fn detect_tdlib_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     bundled_tdlib_path(app).or_else(detect_unbundled_tdlib_path)
 }
 
-fn bundled_tdlib_path(app: &AppHandle) -> Option<PathBuf> {
+fn bundled_tdlib_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("libtdjson.dylib"));

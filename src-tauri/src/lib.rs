@@ -1,3 +1,4 @@
+pub mod compatibility;
 mod connection_settings;
 #[cfg(test)]
 mod demo_gateway;
@@ -9,372 +10,90 @@ mod live_gateway;
 mod local_auth;
 mod model;
 pub mod persistence;
+pub mod provider_service;
 pub mod providers;
 mod secure_store;
 mod service;
+#[cfg(test)]
 mod setup_gateway;
 mod tdjson;
 
+use provider_service::ProviderService;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-
-use cleaner_domain::ChatSummary;
-use error::{AppError, CommandError};
-use model::{
-    AppSnapshot, AuthSnapshot, AuthValueRequest, AuthorizePlanRequest, CatalogProgress,
-    ExecuteRequest, JobRecord, PlanView, PrepareChatActionRequest, PrepareSelectionRequest,
-    PrepareSenderActionRequest, SearchRequest, SearchResponse,
-};
-use service::CleanerService;
-use setup_gateway::SetupGateway;
-use tauri::{AppHandle, Manager, State};
+use tauri::Manager;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
-struct RuntimeState {
-    service: RwLock<Arc<CleanerService>>,
+/// Read leases span each command; settings obtains the exclusive lease before
+/// inspecting workers, invalidating the old service and installing a replacement.
+pub(crate) struct RuntimeState {
+    pub(crate) service: RwLock<Arc<ProviderService>>,
 }
-
 impl RuntimeState {
-    fn new(service: Arc<CleanerService>) -> Self {
+    pub(crate) fn new(service: Arc<ProviderService>) -> Self {
         Self {
             service: RwLock::new(service),
         }
     }
-
-    async fn current(&self) -> Arc<CleanerService> {
-        self.service.read().await.clone()
-    }
-
-    async fn replace(&self, service: Arc<CleanerService>) {
-        *self.service.write().await = service;
-    }
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveConnectionSettingsResult {
-    connection_settings: connection_settings::ConnectionSettingsView,
-    snapshot: AppSnapshot,
-}
-
-#[tauri::command]
-async fn get_snapshot(runtime: State<'_, Arc<RuntimeState>>) -> Result<AppSnapshot, CommandError> {
-    let service = runtime.current().await;
-    service.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn get_bootstrap_snapshot(
-    runtime: State<'_, Arc<RuntimeState>>,
-) -> Result<AppSnapshot, CommandError> {
-    let service = runtime.current().await;
-    service.bootstrap_snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn get_auth_snapshot(
-    runtime: State<'_, Arc<RuntimeState>>,
-) -> Result<AuthSnapshot, CommandError> {
-    let service = runtime.current().await;
-    Ok(service.auth_snapshot())
-}
-
-#[tauri::command]
-async fn get_catalog_progress(
-    runtime: State<'_, Arc<RuntimeState>>,
-) -> Result<CatalogProgress, CommandError> {
-    let service = runtime.current().await;
-    Ok(service.catalog_progress())
-}
-
-#[tauri::command]
-async fn search_messages(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: SearchRequest,
-) -> Result<SearchResponse, CommandError> {
-    let service = runtime.current().await;
-    service.search(request).await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn refresh_chats(
-    runtime: State<'_, Arc<RuntimeState>>,
-    chat_ids: Vec<i64>,
-) -> Result<Vec<ChatSummary>, CommandError> {
-    let service = runtime.current().await;
-    service.refresh_chats(chat_ids).await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn prepare_selection(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: PrepareSelectionRequest,
-) -> Result<PlanView, CommandError> {
-    let service = runtime.current().await;
-    service.prepare_selection(request).await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn prepare_own_messages(
-    runtime: State<'_, Arc<RuntimeState>>,
-    chat_id: i64,
-) -> Result<PlanView, CommandError> {
-    let service = runtime.current().await;
-    service
-        .prepare_own_messages(chat_id)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn prepare_chat_action(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: PrepareChatActionRequest,
-) -> Result<PlanView, CommandError> {
-    let service = runtime.current().await;
-    service
-        .prepare_chat_action(request)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn prepare_sender_action(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: PrepareSenderActionRequest,
-) -> Result<PlanView, CommandError> {
-    let service = runtime.current().await;
-    service
-        .prepare_sender_action(request)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn request_qr_auth(runtime: State<'_, Arc<RuntimeState>>) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service.request_qr_auth().await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn submit_phone(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthValueRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service
-        .submit_phone(&request.value)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn submit_email_address(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthValueRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service
-        .submit_email_address(&request.value)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn submit_email_code(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthValueRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service
-        .submit_email_code(&request.value)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn submit_code(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthValueRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service
-        .submit_code(&request.value)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn submit_password(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthValueRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service
-        .submit_password(&request.value)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-async fn start_execution(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: ExecuteRequest,
-) -> Result<JobRecord, CommandError> {
-    let service = runtime.current().await;
-    service.start_execution(request).await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn authorize_plan(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: AuthorizePlanRequest,
-) -> Result<(), CommandError> {
-    let service = runtime.current().await;
-    service.authorize_plan(request).await.map_err(Into::into)
-}
-
-#[tauri::command]
-async fn get_jobs(runtime: State<'_, Arc<RuntimeState>>) -> Result<Vec<JobRecord>, CommandError> {
-    let service = runtime.current().await;
-    Ok(service.jobs().await)
-}
-
-#[tauri::command]
-async fn cancel_job(
-    runtime: State<'_, Arc<RuntimeState>>,
-    job_id: Uuid,
-) -> Result<JobRecord, CommandError> {
-    let service = runtime.current().await;
-    service.cancel_job(job_id).await.map_err(Into::into)
-}
-
-#[tauri::command]
-fn get_connection_settings(
-    app: AppHandle,
-) -> Result<connection_settings::ConnectionSettingsView, CommandError> {
-    connection_settings::get_view(&app).map_err(Into::into)
-}
-
-#[tauri::command]
-async fn save_connection_settings(
-    app: AppHandle,
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: connection_settings::SaveConnectionSettingsRequest,
-) -> Result<SaveConnectionSettingsResult, CommandError> {
-    let current = runtime.current().await;
-    if current
-        .jobs()
-        .await
-        .iter()
-        .any(|job| !job.status.is_terminal())
-    {
-        return Err(CommandError::from(error::AppError::InvalidRequest(
-            "wait for the active cleanup job to finish or cancel it before changing connections"
-                .into(),
-        )));
-    }
-    connection_settings::save(&app, request).map_err(CommandError::from)?;
-
-    current.shutdown().await;
-    let next = create_service(&app).map_err(CommandError::from)?;
-    next.resume_incomplete().await;
-    runtime.replace(Arc::clone(&next)).await;
-
-    Ok(SaveConnectionSettingsResult {
-        connection_settings: connection_settings::get_view(&app).map_err(CommandError::from)?,
-        snapshot: next.snapshot().await.map_err(CommandError::from)?,
-    })
-}
-
-fn create_service(app: &AppHandle) -> Result<Arc<CleanerService>, AppError> {
-    let base_data_dir = app
+fn create_service<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Arc<ProviderService>, error::AppError> {
+    let Some(settings) = connection_settings::effective_live(app)? else {
+        return Ok(ProviderService::setup());
+    };
+    let base = app
         .path()
         .app_local_data_dir()
-        .map_err(|error| AppError::SecureStore(error.to_string()))?;
-    let effective_live = match connection_settings::effective_live(app) {
-        Ok(Some(settings)) => Some(Ok(settings)),
-        Ok(None) => None,
-        Err(error) => Some(Err(error)),
-    };
-    let test_dc = effective_live
-        .as_ref()
-        .and_then(|settings| settings.as_ref().ok())
-        .is_some_and(|settings| settings.use_test_dc);
-    let live_profile = base_data_dir.join(if test_dc {
+        .map_err(|_| error::AppError::StatePersistenceFailed)?;
+    let profile = if settings.use_test_dc {
         "telegram-test"
     } else {
         "telegram-production"
-    });
-    let live = effective_live.map(|settings| {
-        settings.and_then(|settings| {
-            secure_store::load_tdlib_database_key(&live_profile).and_then(|key| {
-                live_gateway::LiveGateway::connect(live_gateway::LiveGatewayConfig::new(
-                    settings.library_path,
-                    settings.api_id,
-                    settings.api_hash,
-                    settings.use_test_dc,
-                    live_profile.clone(),
-                    key,
-                ))
-            })
-        })
-    });
-    let (gateway, store): (Arc<dyn gateway::TelegramGateway>, _) = match live {
-        Some(Ok(gateway)) => (gateway, secure_store::SecureJobStore::open(live_profile)?),
-        Some(Err(error)) => (
-            SetupGateway::new(format!(
-                "Telegram could not start: {error}. Open connection settings and verify the configuration."
-            )),
-            secure_store::SecureJobStore::open_setup(base_data_dir.join("setup"))?,
-        ),
-        None => (
-            SetupGateway::new("Configure Telegram to start using Retract."),
-            secure_store::SecureJobStore::open_setup(base_data_dir.join("setup"))?,
-        ),
     };
-    CleanerService::new(gateway, store)
+    let path = base.join(profile);
+    // Lock/migrate/validate before any native connection or resumable executor.
+    // FoundationStore reuses its Arc registration for this same profile during
+    // replacement; there is one lock, one validator and one cached vault key.
+    let store = persistence::FoundationStore::open_with_payload_validator(
+        path.clone(),
+        persistence::StoreBinding {
+            provider: providers::telegram::locators::telegram_provider_key(),
+            profile: profile.into(),
+        },
+        Arc::new(providers::telegram::locators::TelegramPayloadValidator),
+    )?;
+    let key = secure_store::load_tdlib_database_key(&path)?;
+    let gateway = live_gateway::LiveGateway::connect_with_identity_store(
+        live_gateway::LiveGatewayConfig::new(
+            settings.library_path,
+            settings.api_id,
+            settings.api_hash,
+            settings.use_test_dc,
+            path,
+            key,
+        ),
+        store.clone(),
+    )?;
+    Ok(ProviderService::new(
+        providers::telegram::application::TelegramConnection::new(gateway, store),
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let application = tauri::Builder::default()
+    let application = compatibility::commands_v2::register(tauri::Builder::default())
         .setup(|app| {
+            // Failed configuration/connection keeps the setup surface reachable;
+            // no placeholder account, live store or executor is manufactured.
             let service = create_service(app.handle())
-                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
-            app.manage(Arc::new(RuntimeState::new(Arc::clone(&service))));
-            tauri::async_runtime::spawn(async move {
-                service.resume_incomplete().await;
-            });
+                .unwrap_or_else(|error| ProviderService::failed(error::boundary_error(error)));
+            app.manage(Arc::new(RuntimeState::new(service)));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_snapshot,
-            get_bootstrap_snapshot,
-            get_auth_snapshot,
-            get_catalog_progress,
-            search_messages,
-            refresh_chats,
-            prepare_selection,
-            prepare_own_messages,
-            prepare_chat_action,
-            prepare_sender_action,
-            request_qr_auth,
-            submit_phone,
-            submit_email_address,
-            submit_email_code,
-            submit_code,
-            submit_password,
-            authorize_plan,
-            start_execution,
-            get_jobs,
-            cancel_job,
-            get_connection_settings,
-            save_connection_settings
-        ])
         .build(tauri::generate_context!())
         .expect("failed to build Retract");
     let shutdown_started = Arc::new(AtomicBool::new(false));
@@ -386,8 +105,7 @@ pub fn run() {
             let app = app.clone();
             let runtime = app.state::<Arc<RuntimeState>>().inner().clone();
             tauri::async_runtime::spawn(async move {
-                let service = runtime.current().await;
-                service.shutdown().await;
+                runtime.service.write().await.shutdown().await;
                 secure_store::clear_cached_secrets();
                 app.exit(code.unwrap_or(0));
             });

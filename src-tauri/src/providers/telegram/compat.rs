@@ -194,10 +194,11 @@ impl TelegramExecutionRecipe {
     }
 }
 
+#[derive(Clone)]
 pub struct TelegramCompatibilityProvider {
-    gateway: std::sync::Arc<dyn crate::gateway::TelegramGateway>,
-    context: std::sync::Arc<super::engine_context::EngineContext>,
-    engine: std::sync::Arc<crate::service::CleanerService>,
+    pub(super) gateway: std::sync::Arc<dyn crate::gateway::TelegramGateway>,
+    pub(super) context: std::sync::Arc<super::engine_context::EngineContext>,
+    pub(super) engine: std::sync::Arc<crate::service::CleanerService>,
 }
 
 impl TelegramCompatibilityProvider {

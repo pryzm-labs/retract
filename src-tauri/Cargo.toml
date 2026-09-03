@@ -41,4 +41,5 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
 security-framework = "3"
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 tempfile = "3"

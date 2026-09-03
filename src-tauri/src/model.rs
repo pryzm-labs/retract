@@ -61,7 +61,7 @@ impl AuthSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDirection {
     #[default]
@@ -156,6 +156,7 @@ pub struct PrepareSenderActionRequest {
     pub sender_id: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthValueRequest {
     pub value: String,
@@ -278,6 +279,7 @@ impl JobRecord {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn backfill_target_chat_ids(&mut self, plan: &DeletionPlan) {
         if self.target_chat_ids.is_empty() {
             self.target_chat_ids = affected_chat_ids(plan);

@@ -245,6 +245,33 @@ pub trait ImportInspector: Send + Sync {
 pub trait ProviderRegistration: Send + Sync {
     fn descriptor(&self) -> ProviderDescriptor;
 
+    fn reviewed_lifecycle(
+        &self,
+    ) -> Result<Arc<dyn ReviewedLifecycle>, super::registry::ProviderRegistryError> {
+        Err(super::registry::ProviderRegistryError::unsupported(
+            ProviderCapability::AutomaticRemediation,
+        ))
+    }
+
+    fn application_query(
+        &self,
+    ) -> Result<Arc<dyn ApplicationQuery>, super::registry::ProviderRegistryError> {
+        Err(super::registry::ProviderRegistryError::unsupported(
+            ProviderCapability::ContentSearch,
+        ))
+    }
+
+    fn payload_validator(
+        &self,
+    ) -> Result<
+        Arc<dyn crate::persistence::ProviderPayloadValidator>,
+        super::registry::ProviderRegistryError,
+    > {
+        Err(super::registry::ProviderRegistryError::unsupported(
+            ProviderCapability::ContentSearch,
+        ))
+    }
+
     fn query_source(&self) -> Result<Arc<dyn QuerySource>, super::registry::ProviderRegistryError> {
         Err(super::registry::ProviderRegistryError::unsupported(
             ProviderCapability::ContentSearch,
@@ -274,4 +301,114 @@ pub trait ProviderRegistration: Send + Sync {
             ProviderCapability::ImportInspection,
         ))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrepareIntent {
+    pub action_id: String,
+    pub targets: Vec<ScopedResourceRef>,
+    pub actor: Option<ScopedResourceRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReviewedPlanRef {
+    pub plan_id: Uuid,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartReviewed {
+    pub plan_id: Uuid,
+    pub fingerprint: String,
+    pub irreversible_acknowledged: bool,
+    pub typed_chat_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IntentDescriptor {
+    pub action_id: String,
+    pub label: String,
+    pub requires_actor: bool,
+    pub descriptors: Vec<ActionDescriptor>,
+}
+
+/// Whole reviewed lifecycle; the raw batch port cannot authorize a native call.
+#[async_trait]
+pub trait ReviewedLifecycle: Send + Sync {
+    async fn intents(
+        &self,
+        context: &ActiveContext,
+        targets: Vec<ScopedResourceRef>,
+    ) -> Result<Vec<IntentDescriptor>, retract_domain::SafeError>;
+    async fn prepare(
+        &self,
+        context: &ActiveContext,
+        intent: PrepareIntent,
+    ) -> Result<RemediationPlan, retract_domain::SafeError>;
+    async fn authorize(
+        &self,
+        context: &ActiveContext,
+        plan: ReviewedPlanRef,
+    ) -> Result<(), retract_domain::SafeError>;
+    async fn start(
+        &self,
+        context: &ActiveContext,
+        request: StartReviewed,
+    ) -> Result<retract_domain::ScopedJobRecord, retract_domain::SafeError>;
+    async fn jobs(
+        &self,
+        context: &ActiveContext,
+    ) -> Result<Vec<retract_domain::ScopedJobRecord>, retract_domain::SafeError>;
+    async fn cancel(
+        &self,
+        context: &ActiveContext,
+        job_id: Uuid,
+    ) -> Result<retract_domain::ScopedJobRecord, retract_domain::SafeError>;
+    async fn recover(&self, context: &ActiveContext) -> Result<(), retract_domain::SafeError>;
+    async fn has_workers(&self) -> bool;
+    async fn stop(&self);
+}
+
+/// Extended scoped query boundary preserves provider-owned filters and targeted
+/// conversation resolution without widening an isolated refresh into a catalog read.
+#[async_trait]
+pub trait ApplicationQuery: Send + Sync {
+    async fn conversations(
+        &self,
+        context: &ActiveContext,
+    ) -> Result<Vec<ConversationRecord>, retract_domain::SafeError>;
+    async fn search_filtered(
+        &self,
+        context: &ActiveContext,
+        request: crate::compatibility::model_v2::SearchRequest,
+    ) -> Result<Page<ContentRecord>, retract_domain::SafeError>;
+    async fn refresh(
+        &self,
+        context: &ActiveContext,
+        refs: Vec<ScopedResourceRef>,
+    ) -> Result<Vec<ConversationRecord>, retract_domain::SafeError>;
+}
+
+/// Provider-owned connection/bootstrap. Only authenticated backend state may
+/// supply context or a registration; no command supplies an account binding.
+#[async_trait]
+pub trait ApplicationConnection: Send + Sync {
+    fn context(&self) -> Option<ActiveContext>;
+    fn store(&self) -> Option<Arc<crate::persistence::FoundationStore>>;
+    fn bootstrap(
+        &self,
+    ) -> Result<crate::compatibility::model_v2::BootstrapSnapshot, retract_domain::SafeError>;
+    async fn registration(
+        &self,
+    ) -> Result<Arc<dyn ProviderRegistration>, retract_domain::SafeError>;
+    async fn auth(
+        &self,
+        request: crate::compatibility::model_v2::AuthRequest,
+    ) -> Result<(), retract_domain::SafeError>;
+    async fn retry_identity(&self) -> Result<(), retract_domain::SafeError>;
+    async fn shutdown(&self);
 }

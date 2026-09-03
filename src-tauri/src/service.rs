@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use chrono::Utc;
@@ -24,10 +24,11 @@ use crate::{
         JobRecord, JobStatus, MessageRef, PersistedState, PlanView, PrepareChatActionRequest,
         PrepareSelectionRequest, PrepareSenderActionRequest, SearchRequest, SearchResponse,
     },
-    providers::telegram::engine_context::{
-        EngineContext, LegacyTelegramRepository, SessionGateway, TelegramStateRepository,
-    },
-    secure_store::SecureJobStore,
+    providers::telegram::engine_context::{EngineContext, SessionGateway, TelegramStateRepository},
+};
+#[cfg(test)]
+use crate::{
+    providers::telegram::engine_context::LegacyTelegramRepository, secure_store::SecureJobStore,
 };
 
 pub struct CleanerService {
@@ -35,20 +36,15 @@ pub struct CleanerService {
     plans: RwLock<HashMap<Uuid, DeletionPlan>>,
     jobs: RwLock<HashMap<Uuid, JobRecord>>,
     cancellation: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
-    system_grants: Mutex<HashMap<Uuid, SystemGrant>>,
+    system_grants: Mutex<crate::providers::lifecycle::GrantBook>,
     store: Arc<dyn TelegramStateRepository>,
     context: Option<Arc<EngineContext>>,
     transition_lock: Mutex<()>,
     persistence_failed: AtomicBool,
 }
 
-struct SystemGrant {
-    fingerprint: String,
-    expires_at: Instant,
-    context: Option<retract_domain::ActiveContext>,
-}
-
 impl CleanerService {
+    #[cfg(test)]
     pub fn new(
         gateway: Arc<dyn TelegramGateway>,
         store: SecureJobStore,
@@ -104,7 +100,7 @@ impl CleanerService {
             plans: RwLock::new(plans),
             jobs: RwLock::new(jobs),
             cancellation: Mutex::new(HashMap::new()),
-            system_grants: Mutex::new(HashMap::new()),
+            system_grants: Mutex::new(crate::providers::lifecycle::GrantBook::default()),
             store: Arc::new(LegacyTelegramRepository(store)),
             context: None,
             transition_lock: Mutex::new(()),
@@ -132,7 +128,7 @@ impl CleanerService {
             plans: RwLock::new(persisted.plans.into_iter().map(|p| (p.id, p)).collect()),
             jobs: RwLock::new(persisted.jobs.into_iter().map(|j| (j.id, j)).collect()),
             cancellation: Mutex::new(HashMap::new()),
-            system_grants: Mutex::new(HashMap::new()),
+            system_grants: Mutex::new(crate::providers::lifecycle::GrantBook::default()),
             store,
             context: Some(context),
             transition_lock: Mutex::new(()),
@@ -154,6 +150,28 @@ impl CleanerService {
         self.context
             .as_ref()
             .is_some_and(|bound| Arc::ptr_eq(bound, context))
+    }
+
+    pub(crate) fn reviewed_plan(
+        &self,
+        id: Uuid,
+    ) -> Result<retract_domain::RemediationPlan, AppError> {
+        self.store.envelope(id)
+    }
+    pub(crate) async fn has_workers(&self) -> bool {
+        !self.cancellation.lock().await.is_empty()
+    }
+    pub(crate) async fn stop_workers(&self) {
+        for token in self.cancellation.lock().await.values() {
+            token.store(true, Ordering::Release);
+        }
+        loop {
+            if self.cancellation.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.system_grants.lock().await.clear();
     }
 
     async fn publish_plan(&self, mut plan: DeletionPlan) -> Result<PlanView, AppError> {
@@ -419,15 +437,11 @@ impl CleanerService {
 
         let mut grants = self.system_grants.lock().await;
         self.check_context()?;
-        let grant = grants.remove(&plan.id).ok_or_else(|| {
-            AppError::SystemAuthentication(
-                "confirm this frozen plan with macOS immediately before execution".into(),
-            )
-        })?;
-        if grant.fingerprint != plan.fingerprint
-            || grant.expires_at < Instant::now()
-            || grant.context != self.context.as_ref().map(|c| c.active().clone())
-        {
+        if !grants.consume(
+            plan.id,
+            &plan.fingerprint,
+            self.context.as_ref().map(|c| c.active()),
+        ) {
             return Err(AppError::SystemAuthentication(
                 "the plan-bound authentication grant is invalid or expired".into(),
             ));
@@ -482,13 +496,10 @@ impl CleanerService {
         }
         let mut grants = self.system_grants.lock().await;
         self.check_context()?;
-        grants.insert(
+        grants.issue(
             plan.id,
-            SystemGrant {
-                fingerprint: plan.fingerprint,
-                expires_at: Instant::now() + Duration::from_secs(60),
-                context: self.context.as_ref().map(|c| c.active().clone()),
-            },
+            plan.fingerprint,
+            self.context.as_ref().map(|c| c.active().clone()),
         );
         Ok(())
     }
@@ -715,101 +726,23 @@ impl CleanerService {
         cancellation: &AtomicBool,
     ) -> Result<bool, AppError> {
         let batches = plan.everyone_batches(100)?;
-        let next_batch = self
+        let next = self
             .jobs
             .read()
             .await
             .get(&job_id)
-            .map(|job| job.next_batch)
+            .map(|j| j.next_batch)
             .unwrap_or_default();
-        for (index, batch) in batches.into_iter().enumerate().skip(next_batch) {
-            loop {
-                if cancellation.load(Ordering::Acquire) {
-                    self.finish_cancelled(job_id).await?;
-                    return Ok(true);
-                }
-
-                // Telegram capabilities can change after review. Recheck every ID on
-                // every attempt, including after a FLOOD_WAIT pause.
-                let mut allowed = Vec::new();
-                let mut skipped = 0;
-                let mut reach_error = None;
-                for &message_id in &batch.message_ids {
-                    match self.gateway.current_reach(batch.chat_id, message_id).await {
-                        Ok(Some(DeletionReach::Everyone)) => allowed.push(message_id),
-                        Ok(_) => skipped += 1,
-                        Err(error) => {
-                            reach_error = Some(error);
-                            break;
-                        }
-                    }
-                }
-
-                if self.stop_if_cancelled(job_id, cancellation).await? {
-                    return Ok(true);
-                }
-
-                let failed_count = if reach_error.is_some() {
-                    batch.message_ids.len().saturating_sub(skipped)
-                } else {
-                    allowed.len()
-                };
-                let result = if let Some(error) = reach_error {
-                    Err(error)
-                } else if allowed.is_empty() {
-                    Ok(())
-                } else {
-                    self.gateway
-                        .delete_messages_for_everyone(batch.chat_id, &allowed)
-                        .await
-                };
-
-                if let Err(error) = &result
-                    && let Some(seconds) = telegram_retry_after(error)
-                {
-                    if self.wait_for_retry(job_id, cancellation, seconds).await? {
-                        return Ok(true);
-                    }
-                    continue;
-                }
-
-                let fatal = result.as_ref().err().is_some_and(|error| {
-                    matches!(error_code(error), "ambiguous_outcome" | "stale_context")
-                });
-                self.transition(|_, jobs| {
-                    let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-                    job.skipped += skipped;
-                    job.next_batch = index + 1;
-                    job.clear_retry();
-                    match result {
-                        Ok(()) => job.deleted += allowed.len(),
-                        Err(error) => {
-                            if error_code(&error) == "ambiguous_outcome" {
-                                job.uncertain += failed_count;
-                            } else {
-                                job.failed += failed_count;
-                            }
-                            push_error_once(job, error_code(&error));
-                        }
-                    }
-                    if fatal {
-                        job.status = if job.deleted > 0 {
-                            JobStatus::Partial
-                        } else {
-                            JobStatus::Failed
-                        };
-                    }
-                    job.updated_at = Utc::now();
-                    Ok(())
-                })
-                .await?;
-                if fatal {
-                    return Ok(true);
-                }
-                break;
-            }
-        }
-        Ok(false)
+        crate::providers::lifecycle::run_frozen_batches(
+            &TelegramFrozenDriver {
+                service: self,
+                job_id,
+                cancellation,
+            },
+            batches,
+            next,
+        )
+        .await
     }
 
     async fn run_clear_history_and_leave(
@@ -1142,6 +1075,90 @@ impl CleanerService {
 
     async fn persist(&self) -> Result<(), AppError> {
         self.transition(|_, _| Ok(())).await
+    }
+}
+
+struct TelegramFrozenDriver<'a> {
+    service: &'a CleanerService,
+    job_id: Uuid,
+    cancellation: &'a AtomicBool,
+}
+#[async_trait::async_trait]
+impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_> {
+    type Target = i64;
+    type Batch = cleaner_domain::DeletionBatch;
+    type Error = AppError;
+    fn targets<'a>(&self, batch: &'a Self::Batch) -> &'a [i64] {
+        &batch.message_ids
+    }
+    async fn cancelled(&self) -> Result<bool, AppError> {
+        self.service
+            .stop_if_cancelled(self.job_id, self.cancellation)
+            .await
+    }
+    async fn reach(&self, batch: &Self::Batch, id: &i64) -> Result<bool, AppError> {
+        self.service
+            .gateway
+            .current_reach(batch.chat_id, *id)
+            .await
+            .map(|r| r == Some(DeletionReach::Everyone))
+    }
+    async fn mutate(&self, batch: &Self::Batch, ids: &[i64]) -> Result<(), AppError> {
+        self.service
+            .gateway
+            .delete_messages_for_everyone(batch.chat_id, ids)
+            .await
+    }
+    fn retry_seconds(&self, error: &AppError) -> Option<u64> {
+        telegram_retry_after(error)
+    }
+    fn fatal(&self, error: &AppError) -> bool {
+        matches!(error_code(error), "ambiguous_outcome" | "stale_context")
+    }
+    fn uncertain(&self, error: &AppError) -> bool {
+        error_code(error) == "ambiguous_outcome"
+    }
+    async fn wait(&self, seconds: u64) -> Result<bool, AppError> {
+        self.service
+            .wait_for_retry(self.job_id, self.cancellation, seconds)
+            .await
+    }
+    async fn progress(
+        &self,
+        progress: crate::providers::lifecycle::FrozenProgress<'_, AppError>,
+    ) -> Result<(), AppError> {
+        let crate::providers::lifecycle::FrozenProgress {
+            next,
+            skipped,
+            deleted,
+            failed,
+            uncertain,
+            error,
+            fatal,
+        } = progress;
+        self.service
+            .transition(|_, jobs| {
+                let job = jobs.get_mut(&self.job_id).ok_or(AppError::NotFound)?;
+                job.skipped += skipped;
+                job.deleted += deleted;
+                job.failed += failed;
+                job.uncertain += uncertain;
+                job.next_batch = next;
+                job.clear_retry();
+                if let Some(error) = error {
+                    push_error_once(job, error_code(error));
+                }
+                if fatal {
+                    job.status = if job.deleted > 0 {
+                        JobStatus::Partial
+                    } else {
+                        JobStatus::Failed
+                    };
+                }
+                job.updated_at = Utc::now();
+                Ok(())
+            })
+            .await
     }
 }
 

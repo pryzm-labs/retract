@@ -1,22 +1,23 @@
 //! Immutable account/session and transactional v3 projection for the existing
 //! Telegram engine. A failed publication quarantines the owning engine.
 use async_trait::async_trait;
-use retract_domain::{ActiveContext, ErrorCode, RemediationPlan, Scope, ScopedJobRecord};
+use retract_domain::{ActiveContext, RemediationPlan, Scope};
 use std::sync::{Arc, Mutex};
 
 use super::{
     compat::{
         TelegramCompatibilityProvider, TelegramExecutionRecipe, invalid_recipe,
-        legacy_diagnostic_code, safe_diagnostic,
+        legacy_diagnostic_code,
     },
     identity::{SessionBinding, VerifiedTelegramIdentity},
 };
+#[cfg(test)]
+use crate::secure_store::SecureJobStore;
 use crate::{
     error::AppError,
     gateway::TelegramGateway,
     model::{JobRecord, JobStatus, PersistedState},
     persistence::FoundationStore,
-    secure_store::SecureJobStore,
 };
 
 pub struct EngineContext {
@@ -97,11 +98,16 @@ pub trait TelegramStateRepository: Send + Sync {
     fn scope(&self) -> Option<&Scope>;
     fn load(&self) -> Result<PersistedState, AppError>;
     fn save(&self, state: &PersistedState) -> Result<(), AppError>;
+    fn envelope(&self, _id: uuid::Uuid) -> Result<RemediationPlan, AppError> {
+        Err(AppError::NotFound)
+    }
 }
 
 // Staged only until Task 6 removes the legacy production constructor. The
 // scoped constructor cannot select or fall back to this repository.
+#[cfg(test)]
 pub(crate) struct LegacyTelegramRepository(pub SecureJobStore);
+#[cfg(test)]
 impl TelegramStateRepository for LegacyTelegramRepository {
     fn scope(&self) -> Option<&Scope> {
         None
@@ -114,80 +120,28 @@ impl TelegramStateRepository for LegacyTelegramRepository {
     }
 }
 
-type Projection = (Vec<RemediationPlan>, Vec<ScopedJobRecord>);
 pub struct FoundationTelegramRepository {
-    store: Arc<FoundationStore>,
-    scope: Scope,
-    last: Mutex<Option<Projection>>,
+    shared: crate::providers::lifecycle::ScopedRepository,
+    last: Mutex<Option<crate::providers::lifecycle::Projection>>,
 }
 impl FoundationTelegramRepository {
     pub fn new(store: Arc<FoundationStore>, scope: Scope) -> Result<Self, AppError> {
-        let state = store.snapshot()?;
-        if !state.sources.iter().any(|source| source.scope() == scope) {
-            return Err(stale_context());
-        }
-        // Foreign historical work is visible but owns no active worker. It must
-        // not prevent settings changes which can restore the original identity.
-        if state.jobs.iter().any(|job| {
-            job.scope != scope
-                && !job.status.is_terminal()
-                && job.status != retract_domain::JobStatus::Blocked
-        }) {
-            store.transaction(|state| {
-                for job in &mut state.jobs {
-                    if job.scope != scope && !job.status.is_terminal() {
-                        if job.status == retract_domain::JobStatus::Running {
-                            // A replaced session may have interrupted an in-flight
-                            // request. Never promote that unknown outcome to a
-                            // safely blocked/retryable job, even if the old worker
-                            // subsequently loses the repository CAS race.
-                            job.status = if job.counters.deleted > 0 {
-                                retract_domain::JobStatus::Partial
-                            } else {
-                                retract_domain::JobStatus::Failed
-                            };
-                            job.diagnostics.push(safe_diagnostic("ambiguous_outcome"));
-                        } else {
-                            job.status = retract_domain::JobStatus::Blocked;
-                            job.diagnostics.push(safe_diagnostic("scope_mismatch"));
-                        }
-                        job.retry_at = None;
-                    }
-                }
-                Ok(())
-            })?;
-        }
         Ok(Self {
-            store,
-            scope,
+            shared: crate::providers::lifecycle::ScopedRepository::new(store, scope)?,
             last: Mutex::new(None),
         })
     }
-    fn projection(&self, state: &crate::persistence::FoundationState) -> Projection {
-        let mut plans = state
-            .plans
-            .iter()
-            .filter(|p| p.scope == self.scope)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut jobs = state
-            .jobs
-            .iter()
-            .filter(|j| j.scope == self.scope)
-            .cloned()
-            .collect::<Vec<_>>();
-        plans.sort_by_key(|p| p.id);
-        jobs.sort_by_key(|j| j.id);
-        (plans, jobs)
-    }
 }
 impl TelegramStateRepository for FoundationTelegramRepository {
+    fn envelope(&self, id: uuid::Uuid) -> Result<RemediationPlan, AppError> {
+        self.shared.envelope(id)
+    }
     fn scope(&self) -> Option<&Scope> {
-        Some(&self.scope)
+        Some(self.shared.scope())
     }
     fn load(&self) -> Result<PersistedState, AppError> {
         let mut last = self.last.lock().map_err(|_| AppError::StateUnavailable)?;
-        let projection = self.projection(&self.store.snapshot()?);
+        let projection = self.shared.load()?;
         let mut state = PersistedState::default();
         for plan in &projection.0 {
             // Descriptive-only Task 4 payloads have no executor meaning.
@@ -246,17 +200,7 @@ impl TelegramStateRepository for FoundationTelegramRepository {
                 .map(|d| legacy_diagnostic_code(d.code).into())
                 .collect();
             legacy.scoped_diagnostics = job.diagnostics.clone();
-            let can_resume = job.started_authorized
-                && envelope.restart_policy == retract_domain::RestartPolicy::ResumeFrozenTargets
-                && job.counters.uncertain == 0
-                && !job.diagnostics.iter().any(|d| {
-                    matches!(
-                        d.code,
-                        ErrorCode::AmbiguousOutcome
-                            | ErrorCode::StatePersistenceFailed
-                            | ErrorCode::RestartRequiresNewReview
-                    )
-                });
+            let can_resume = crate::providers::lifecycle::resumable(envelope, job);
             if !legacy.status.is_terminal() && !can_resume {
                 legacy.retry_at = None;
                 legacy.retry_after_seconds = None;
@@ -293,7 +237,8 @@ impl TelegramStateRepository for FoundationTelegramRepository {
         let mut plans = Vec::new();
         for legacy in &state.plans {
             let mut rebound = legacy.clone();
-            let envelope = TelegramCompatibilityProvider::bind_plan(&self.scope, &mut rebound)?;
+            let envelope =
+                TelegramCompatibilityProvider::bind_plan(self.shared.scope(), &mut rebound)?;
             if rebound != *legacy {
                 return Err(invalid_recipe());
             }
@@ -313,8 +258,12 @@ impl TelegramStateRepository for FoundationTelegramRepository {
                 .ok_or_else(invalid_recipe)?;
             let previous = expected.1.iter().find(|j| j.id == job.id);
             let authorized = previous.is_none_or(|j| j.started_authorized);
-            let normalized =
-                TelegramCompatibilityProvider::normalize_job(&self.scope, legacy, job, authorized)?;
+            let normalized = TelegramCompatibilityProvider::normalize_job(
+                self.shared.scope(),
+                legacy,
+                job,
+                authorized,
+            )?;
             if let Some(previous) = previous
                 && (normalized.next_batch < previous.next_batch
                     || normalized.counters.deleted < previous.counters.deleted
@@ -330,16 +279,7 @@ impl TelegramStateRepository for FoundationTelegramRepository {
         }
         plans.sort_by_key(|p| p.id);
         jobs.sort_by_key(|j| j.id);
-        self.store.transaction(|candidate| {
-            if self.projection(candidate) != *expected {
-                return Err(AppError::StatePersistenceFailed);
-            }
-            candidate.plans.retain(|p| p.scope != self.scope);
-            candidate.jobs.retain(|j| j.scope != self.scope);
-            candidate.plans.extend(plans.clone());
-            candidate.jobs.extend(jobs.clone());
-            Ok(())
-        })?;
+        self.shared.commit(plans.clone(), jobs.clone())?;
         *last = Some((plans, jobs));
         Ok(())
     }

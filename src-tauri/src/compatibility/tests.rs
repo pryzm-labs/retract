@@ -1,0 +1,484 @@
+//! Execute the production registration through Tauri's synthetic runtime.
+use serde_json::{Value, json};
+use std::sync::Arc;
+use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
+
+use crate::{compatibility::commands_v2, provider_service::ProviderService};
+
+fn setup() -> tauri::WebviewWindow<MockRuntime> {
+    with_service(ProviderService::setup())
+}
+
+fn with_service(service: Arc<ProviderService>) -> tauri::WebviewWindow<MockRuntime> {
+    let app = commands_v2::register(mock_builder())
+        .manage(Arc::new(crate::RuntimeState::new(service)))
+        .build(mock_context(noop_assets()))
+        .unwrap();
+    tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn compatibility_v2_failed_setup_exposes_safe_retryable_status_without_an_identity() {
+    let webview = with_service(ProviderService::failed(crate::error::boundary_error(
+        crate::error::AppError::Gateway("private bootstrap path /private/secret".into()),
+    )));
+    let bootstrap = invoke(
+        &webview,
+        "get_bootstrap_snapshot_v2",
+        json!({"contractVersion":2,"context":null,"payload":{}}),
+    )
+    .unwrap();
+    assert_eq!(bootstrap["context"], Value::Null);
+    assert_eq!(bootstrap["payload"]["identity"]["state"], "failed");
+    assert_eq!(
+        bootstrap["payload"]["identity"]["diagnostic"]["code"],
+        "permission_changed"
+    );
+    assert!(!bootstrap.to_string().contains("secret"));
+    let error=invoke(&webview,"save_connection_settings_v2",json!({"contractVersion":2,"context":null,"payload":{"tdlibPath":"","apiId":0,"apiHash":"synthetic-invalid","useTestDc":false}})).unwrap_err();
+    assert_eq!(error["code"], "scope_mismatch");
+}
+
+pub(crate) fn invoke(
+    webview: &tauri::WebviewWindow<MockRuntime>,
+    command: &str,
+    request: Value,
+) -> Result<Value, Value> {
+    tauri::test::get_ipc_response(
+        webview,
+        tauri::webview::InvokeRequest {
+            cmd: command.into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(json!({"request": request})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        },
+    )
+    .map(|body| body.deserialize().unwrap())
+}
+
+#[test]
+fn compatibility_v2_setup_has_no_invented_identity_and_rejects_old_versions() {
+    let webview = setup();
+    let bootstrap = invoke(
+        &webview,
+        "get_bootstrap_snapshot_v2",
+        json!({
+            "contractVersion": 2, "context": null, "payload": {}
+        }),
+    )
+    .unwrap();
+    assert_eq!(bootstrap["contractVersion"], 2);
+    assert_eq!(bootstrap["context"], Value::Null);
+    assert_eq!(bootstrap["payload"]["identity"]["state"], "unavailable");
+    for version in [0, 1, 3, 999] {
+        let error = invoke(
+            &webview,
+            "get_bootstrap_snapshot_v2",
+            json!({
+                "contractVersion": version, "context": null, "payload": {}
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error["code"], "unsupported_contract_version");
+    }
+}
+
+#[test]
+fn compatibility_v2_every_active_handler_requires_captured_context() {
+    let webview = setup();
+    for command in [
+        "get_snapshot_v2",
+        "search_messages_v2",
+        "refresh_chats_v2",
+        "prepare_selection_v2",
+        "prepare_intent_v2",
+        "authorize_plan_v2",
+        "start_execution_v2",
+        "get_jobs_v2",
+        "cancel_job_v2",
+    ] {
+        let error = invoke(
+            &webview,
+            command,
+            json!({
+                "contractVersion": 2, "context": null, "payload": {}
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error["code"], "identity_unavailable", "{command}: {error}");
+    }
+}
+
+#[test]
+fn compatibility_v2_registration_has_no_legacy_identity_or_destructive_fallback() {
+    let webview = setup();
+    for command in [
+        "get_snapshot",
+        "get_bootstrap_snapshot",
+        "search_messages",
+        "refresh_chats",
+        "prepare_selection",
+        "prepare_own_messages",
+        "prepare_chat_action",
+        "prepare_sender_action",
+        "authorize_plan",
+        "start_execution",
+        "get_jobs",
+        "cancel_job",
+    ] {
+        let error = invoke(&webview, command, json!({"chatId": -1001})).unwrap_err();
+        assert_eq!(error, Value::String(format!("Command {command} not found")));
+    }
+}
+
+#[test]
+fn compatibility_v2_rejects_version_scope_generation_and_malformed_refs_before_effects() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let reference = fixture()["messages"][0]["ref"].clone();
+        let original =
+            json!({"contractVersion":2,"context":active,"payload":{"messageRefs":[reference]}});
+        let cases = [
+            ("/contractVersion", json!(1), "unsupported_contract_version"),
+            ("/context", Value::Null, "identity_unavailable"),
+            (
+                "/context/scope/provider",
+                json!("synthetic"),
+                "scope_mismatch",
+            ),
+            (
+                "/context/scope/accountId",
+                json!("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                "scope_mismatch",
+            ),
+            (
+                "/context/scope/sourceId",
+                json!("22222222-2222-4222-8222-222222222222"),
+                "scope_mismatch",
+            ),
+            (
+                "/context/sessionGeneration",
+                json!("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                "stale_context",
+            ),
+            (
+                "/context/sessionGeneration",
+                json!("not-a-uuid"),
+                "scope_mismatch",
+            ),
+            (
+                "/payload/messageRefs/0/id",
+                json!("00000000-0000-0000-0000-000000000000"),
+                "scope_mismatch",
+            ),
+            (
+                "/payload/messageRefs/0/resource/locatorVersion",
+                json!(99),
+                "scope_mismatch",
+            ),
+        ];
+        for (path, value, code) in cases {
+            let mut raw = original.clone();
+            *raw.pointer_mut(path).unwrap() = value;
+            let error = invoke(&harness.webview, "prepare_selection_v2", raw).unwrap_err();
+            assert_eq!(error["code"], code, "{path}: {error}");
+            assert!(gateway.operation_log().await.is_empty());
+            assert!(harness.store.snapshot().unwrap().plans.is_empty());
+        }
+        let plan = harness.prepare(&active, vec![reference]);
+        harness.authorize(&active, &plan);
+        let mut stale = active.clone();
+        stale.session_generation = uuid::Uuid::new_v4();
+        for (command, payload) in [
+            ("get_jobs_v2", json!({})),
+            ("cancel_job_v2", json!({"jobId":uuid::Uuid::new_v4()})),
+            (
+                "authorize_plan_v2",
+                json!({"planId":plan.id,"fingerprint":plan.fingerprint}),
+            ),
+            (
+                "start_execution_v2",
+                json!({"planId":plan.id,"fingerprint":plan.fingerprint,"irreversibleAcknowledged":true,"typedChatTitle":null}),
+            ),
+        ] {
+            assert_eq!(
+                harness.call(command, &stale, payload).unwrap_err()["code"],
+                "stale_context"
+            );
+        }
+        assert!(gateway.operation_log().await.is_empty());
+        assert!(harness.store.snapshot().unwrap().jobs.is_empty());
+    });
+}
+
+#[test]
+fn compatibility_v2_owned_group_cleanup_and_all_filtered_search_fields_remain_available() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let conversation = fixture()["dirtyRefs"][0].clone();
+        let before = gateway.chat_read_counts();
+        let intents = harness
+            .call(
+                "get_intents_v2",
+                &active,
+                json!({"actionId":"catalog","targets":[conversation],"actor":null}),
+            )
+            .unwrap();
+        assert!(
+            intents
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["actionId"] == "delete_my_messages")
+        );
+        let own_intent = intents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["actionId"] == "delete_my_messages")
+            .unwrap();
+        assert_eq!(own_intent["descriptors"][0]["kind"], "delete_remote_item");
+        assert_eq!(own_intent["descriptors"][0]["confirmationTier"], "high");
+        let clear_intent = intents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["actionId"] == "clear_history")
+            .unwrap();
+        assert_eq!(clear_intent["descriptors"].as_array().unwrap().len(), 1);
+        assert_eq!(clear_intent["descriptors"][0]["kind"], "clear_conversation");
+        let own = harness
+            .call(
+                "prepare_intent_v2",
+                &active,
+                json!({"actionId":"delete_my_messages","targets":[conversation],"actor":null}),
+            )
+            .unwrap();
+        assert_eq!(own["recipe"]["payload"]["operation"], "delete_my_messages");
+        let filters = json!({"schema":"telegram.search_filters","version":1,"payload":{"chatKinds":["supergroup"],"contentKinds":["photo"],"direction":"others","minDate":"2020-01-01T00:00:00Z","maxDate":"2030-01-01T00:00:00Z","excludePinned":true,"privacyScan":false}});
+        let page = harness
+            .call(
+                "search_messages_v2",
+                &active,
+                json!({"query":"","conversations":[conversation],"filters":filters,"limit":500}),
+            )
+            .unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        for record in page["items"].as_array().unwrap() {
+            assert_eq!(record["kind"], "image");
+            assert_eq!(record["resource"]["locatorPayload"]["messageId"], "13");
+            assert_eq!(record["providerMetadata"]["payload"]["outgoing"], false);
+            assert_eq!(record["providerMetadata"]["payload"]["pinned"], false);
+        }
+        assert_eq!(gateway.chat_read_counts().0, before.0);
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn compatibility_v2_blocked_foreign_history_does_not_lock_settings() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (first, _) = telegram(directory.path(), active.clone()).await;
+        let plan = first.prepare(&active, vec![fixture()["messages"][0]["ref"].clone()]);
+        let native =
+            crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(&plan)
+                .unwrap();
+        let job = crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
+            &active.scope,
+            &native,
+            &crate::model::JobRecord::new(&native),
+            true,
+        )
+        .unwrap();
+        first
+            .store
+            .transaction(|s| {
+                s.jobs.push(job);
+                Ok(())
+            })
+            .unwrap();
+        drop(first);
+        let other = context("otherContext");
+        let (next, gateway) = telegram(directory.path(), other.clone()).await;
+        assert_eq!(
+            next.store.snapshot().unwrap().jobs[0].status,
+            retract_domain::JobStatus::Blocked
+        );
+        assert!(!next.service.has_workers().await);
+        // Valid shape, intentionally invalid settings: must reach settings
+        // validation rather than reject because foreign historical jobs exist.
+        let error=invoke(&next.webview,"save_connection_settings_v2",json!({"contractVersion":2,"context":other,"payload":{"tdlibPath":"","apiId":0,"apiHash":"synthetic-invalid","useTestDc":false}})).unwrap_err();
+        assert_eq!(error["code"], "scope_mismatch");
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn compatibility_v2_errors_never_copy_private_native_content() {
+    use crate::error::{AppError, boundary_error};
+    for error in [
+        AppError::Gateway("private attachment secret.jpg".into()),
+        AppError::SecureStore("/private/auth-token".into()),
+        AppError::SystemAuthentication("password:123456".into()),
+    ] {
+        let wire = serde_json::to_value(boundary_error(error)).unwrap();
+        assert_eq!(wire.as_object().unwrap().len(), 3);
+        let text = wire.to_string();
+        for secret in ["secret.jpg", "auth-token", "123456"] {
+            assert!(!text.contains(secret));
+        }
+        serde_json::from_value::<retract_domain::SafeError>(wire).unwrap();
+    }
+}
+
+#[test]
+fn historical_v1_request_and_error_types_are_compatibility_only() {
+    let request: crate::model::AuthValueRequest =
+        serde_json::from_value(json!({"value":"synthetic-code"})).unwrap();
+    assert_eq!(request.value, "synthetic-code");
+    let error = crate::error::CommandError::from(crate::error::AppError::NotFound);
+    assert_eq!(
+        serde_json::to_value(error).unwrap(),
+        json!({"code":"not_found","message":"the requested record was not found"})
+    );
+}
+
+#[test]
+fn compatibility_v2_bootstrap_discovers_verified_identity_but_mutations_require_context() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let response = invoke(
+            &harness.webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":null,"payload":{}}),
+        )
+        .unwrap();
+        assert_eq!(response["context"], serde_json::to_value(&active).unwrap());
+        assert_eq!(response["payload"]["identity"]["state"], "ready");
+        let mut stale = active.clone();
+        stale.session_generation = uuid::Uuid::new_v4();
+        assert_eq!(
+            harness
+                .call("get_bootstrap_snapshot_v2", &stale, json!({}))
+                .unwrap_err()["code"],
+            "stale_context"
+        );
+        for command in ["submit_auth_v2", "retry_identity_v2"] {
+            assert_eq!(
+                invoke(
+                    &harness.webview,
+                    command,
+                    json!({"contractVersion":2,"context":null,"payload":{}})
+                )
+                .unwrap_err()["code"],
+                "stale_context"
+            );
+        }
+        assert_eq!(gateway.chat_read_counts().0, 0);
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn compatibility_v2_async_refresh_discards_old_context_results() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let harness = synthetic(directory.path(), io.clone());
+        io.invalidate_refresh
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            harness
+                .call(
+                    "refresh_chats_v2",
+                    &active,
+                    json!({"conversations":[fixture()["messages"][2]["conversation"]]})
+                )
+                .unwrap_err()["code"],
+            "stale_context"
+        );
+        assert_eq!(io.refreshes.load(std::sync::atomic::Ordering::Acquire), 1);
+        assert_eq!(io.catalog.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(io.calls.lock().unwrap().is_empty());
+        assert!(harness.store.snapshot().unwrap().jobs.is_empty());
+    });
+}
+
+#[test]
+fn compatibility_v2_nonnumeric_recovery_resumes_an_actual_durable_retry_checkpoint() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use std::sync::atomic::Ordering;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        io.rate_limit_once.store(true, Ordering::Release);
+        let original = synthetic(directory.path(), io.clone());
+        let plan = original.prepare(&active, vec![fixture()["messages"][2]["ref"].clone()]);
+        original.authorize(&active, &plan);
+        let job = original.start(&active, &plan).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if original.store.snapshot().unwrap().jobs.iter().any(|j| {
+                    j.id == job.id
+                        && j.status == retract_domain::JobStatus::Queued
+                        && j.retry_at.is_some()
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(io.calls.lock().unwrap().is_empty());
+        // Capture real production-written bytes at the crash point. Teardown
+        // stops the old worker, then replay restores these exact bytes: no test
+        // creates/seals a plan, grant, job, progress cursor or retry timestamp.
+        let checkpoint = std::fs::read(directory.path().join("jobs.enc")).unwrap();
+        original.service.shutdown().await;
+        let previous = Arc::downgrade(&original.store);
+        drop(original);
+        assert!(previous.upgrade().is_none());
+        std::fs::write(directory.path().join("jobs.enc"), checkpoint).unwrap();
+        *io.active.write().unwrap() = Some(active.clone());
+        let recovered = synthetic(directory.path(), io.clone());
+        invoke(
+            &recovered.webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":active,"payload":{}}),
+        )
+        .unwrap();
+        let finished = recovered.settled(&active, job.id).await;
+        assert_eq!(finished.status, retract_domain::JobStatus::Completed);
+        assert_eq!(finished.counters.deleted, 1);
+        assert_eq!(finished.next_batch, 1);
+        assert_eq!(io.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            io.calls.lock().unwrap()[0][0].resource.locator_payload["messageId"],
+            "message:part/0007"
+        );
+        assert_eq!(io.catalog.load(Ordering::Acquire), 0);
+        let state = encrypted_state(directory.path(), &active, KEY).unwrap();
+        assert_eq!(state.jobs[0], finished);
+    });
+}
