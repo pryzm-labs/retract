@@ -150,17 +150,141 @@ fn foundation_lifecycle_application_boundary_accepts_lossless_string_identifiers
 }
 
 #[test]
-fn foundation_lifecycle_application_boundary_accepts_nonnumeric_provider_references() {
-    let data = fixture();
-    let parsed = serde_json::from_value::<PrepareSelectionRequest>(json!({
-        "contractVersion": 2, "context": data["syntheticContext"],
-        "payload": { "messageRefs": [data["messages"][2]["ref"]] },
-        "messageRefs": [{ "chatId": -1001, "messageId": "message:part/0007" }]
-    }));
-    assert!(
-        parsed.is_ok(),
-        "shared selection must accept opaque synthetic refs, not only Telegram integers: {parsed:?}"
-    );
+fn foundation_lifecycle_nonnumeric_target_survives_the_complete_shared_lifecycle() {
+    tauri::async_runtime::block_on(async {
+        let data = fixture();
+        let context = data["syntheticContext"].clone();
+        let reference = data["messages"][2]["ref"].clone();
+        let conversation = data["messages"][2]["conversation"].clone();
+        assert_eq!(
+            reference["resource"]["locatorPayload"]["messageId"],
+            "message:part/0007"
+        );
+
+        // R4: one scenario owns every downstream assertion. It is intentionally
+        // blocked at this real parser today, not claimed as end-to-end GREEN.
+        // Tasks 4/6 replace the boundaries with the shared registered synthetic
+        // provider path. Never route this target through legacy_selection or
+        // substitute an i64 for its opaque native ID to reach the next step.
+        let request = serde_json::from_value::<PrepareSelectionRequest>(json!({
+            "contractVersion": 2, "context": context,
+            "payload": { "messageRefs": [reference] },
+            "messageRefs": [{ "chatId": -1001, "messageId": "message:part/0007" }]
+        }))
+        .expect("the full shared lifecycle must accept the literal nonnumeric target at its application boundary");
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let gateway = Arc::new(DemoGateway::new());
+        let original = CleanerService::new(
+            gateway.clone(),
+            SecureJobStore::with_test_key(path.clone(), KEY),
+        )
+        .expect("open the real encrypted service for the synthetic lifecycle");
+        let plan = original
+            .prepare_selection(request)
+            .await
+            .expect("prepare the exact opaque target through the shared service");
+        assert_eq!(plan.summary.selected, 1);
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["scope"],
+            context["scope"]
+        );
+
+        let prepared_state = SecureJobStore::with_test_key(path.clone(), KEY)
+            .load()
+            .expect("preparation must durably save the frozen opaque plan");
+        let prepared_plan = prepared_state
+            .plans
+            .iter()
+            .find(|stored| stored.id == plan.id)
+            .unwrap();
+        let prepared_wire = serde_json::to_value(prepared_plan).unwrap();
+        assert_eq!(prepared_wire["targets"], json!([reference]));
+        assert_eq!(
+            prepared_wire["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            "message:part/0007"
+        );
+
+        // Existing real authorization/execution, not a test-only provider engine.
+        authorize(&original, &plan, context.clone()).await;
+        let job = original
+            .start_execution(execution(&plan, context.clone()))
+            .await
+            .expect("the authorization must start this exact scoped frozen plan");
+        assert_eq!(job.plan_id, plan.id);
+        assert_eq!(job.total, 1);
+        let job_wire = serde_json::to_value(&job).unwrap();
+        assert_eq!(job_wire["scope"], context["scope"]);
+        assert_eq!(job_wire["dirtyRefs"], json!([conversation]));
+        let finished = settled(&original, job.id).await;
+        assert_eq!(finished.status, JobStatus::Completed);
+        assert_eq!(finished.deleted, 1);
+
+        let durable = persisted(&path, job.id).await;
+        let ciphertext = std::fs::read(&path).expect("read the actual encrypted file");
+        assert!(ciphertext.starts_with(b"RTRCT03"));
+        assert!(
+            !ciphertext
+                .windows(b"message:part/0007".len())
+                .any(|bytes| bytes == b"message:part/0007")
+        );
+        assert!(
+            SecureJobStore::with_test_key(path.clone(), [0x72; 32])
+                .load()
+                .is_err()
+        );
+        let durable_plan = durable
+            .plans
+            .iter()
+            .find(|stored| stored.id == plan.id)
+            .unwrap();
+        let durable_wire = serde_json::to_value(durable_plan).unwrap();
+        assert_eq!(durable_wire["scope"], context["scope"]);
+        assert_eq!(durable_wire["targets"], json!([reference]));
+        assert_eq!(
+            durable_wire["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            "message:part/0007"
+        );
+
+        drop(original);
+        let reloaded = CleanerService::new(
+            gateway.clone(),
+            SecureJobStore::with_test_key(path.clone(), KEY),
+        )
+        .expect("recover the real service from the authenticated scoped job file");
+        let mutations_before_recovery = gateway.operation_log().await;
+        reloaded.resume_incomplete().await;
+        let recovered = settled(&reloaded, job.id).await;
+        assert_eq!(recovered.status, JobStatus::Completed);
+        assert_eq!(recovered.deleted, 1);
+        assert_eq!(gateway.operation_log().await, mutations_before_recovery);
+        let recovered_wire = serde_json::to_value(&recovered).unwrap();
+        assert_eq!(recovered_wire["scope"], context["scope"]);
+        assert_eq!(recovered_wire["dirtyRefs"], json!([conversation]));
+
+        // This is the existing refresh parser/service signature, another boundary
+        // to rewire to v2. Return the stored scoped ref unchanged; do not extract
+        // or parse its native chat ID merely to satisfy the legacy Vec<i64> API.
+        let refresh_refs = serde_json::from_value(recovered_wire["dirtyRefs"].clone())
+            .expect("targeted refresh must accept the recovered scoped conversation refs");
+        let refreshed = reloaded.refresh_chats(refresh_refs).await.unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&refreshed[0]).unwrap()["ref"],
+            conversation
+        );
+        let after_refresh = SecureJobStore::with_test_key(path, KEY).load().unwrap();
+        let retained = after_refresh
+            .plans
+            .iter()
+            .find(|stored| stored.id == plan.id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(retained).unwrap()["targets"][0]["resource"]["locatorPayload"]["messageId"],
+            "message:part/0007"
+        );
+    });
 }
 
 #[test]
@@ -191,15 +315,14 @@ fn foundation_lifecycle_changed_persisted_scope_rejects_the_original_fingerprint
         wire["plans"][0]["scope"] = data["otherScope"].clone();
         // Keep ID, targets and fingerprint unchanged: a new random plan ID must
         // not let the cross-account comparison pass without actually binding scope.
-        let Ok(changed) = serde_json::from_value::<PersistedState>(wire) else {
-            return; // Rejecting an invalid authenticated record at decode is safe.
-        };
+        let changed = serde_json::from_value::<PersistedState>(wire)
+            .expect("scope tampering must not be mistaken for an invalid test fixture");
         store.save(&changed).unwrap();
         drop(original);
-        let Ok(reloaded) = CleanerService::new(gateway, SecureJobStore::with_test_key(path, KEY))
-        else {
-            return; // Rejecting the mismatched frozen binding on load is safe.
-        };
+        // A future v2 loader may reject the binding here, but that adaptation
+        // must assert its specific safe binding-error code, not accept any error.
+        let reloaded = CleanerService::new(gateway, SecureJobStore::with_test_key(path, KEY))
+            .expect("the current legacy store must load before checking authorization rejection");
         let request = serde_json::from_value(json!({
             "contractVersion": 2, "context": data["context"],
             "planId": plan.id, "fingerprint": plan.fingerprint,
