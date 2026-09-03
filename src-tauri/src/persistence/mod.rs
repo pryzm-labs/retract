@@ -4,7 +4,8 @@ mod model;
 
 pub use foundation_store::FoundationStore;
 pub use model::{
-    FoundationState, LegacyHistoryEntry, LegacyStoreFormat, MigrationProvenance, StoreBinding,
+    FoundationState, LegacyHistoryEntry, LegacyStoreFormat, MigrationProvenance,
+    ProviderPayloadValidator, StoreBinding, VerifiedNativeAccountIdentity,
 };
 
 #[cfg(test)]

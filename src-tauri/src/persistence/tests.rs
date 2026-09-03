@@ -12,19 +12,22 @@ use cleaner_domain::PlanOperation;
 use retract_domain::{
     AccountRecord, ActionDescriptor, ActionStep, Availability, BatchConstraints,
     ConfirmationRequirements, ConfirmationTier, ErrorCode, ExpectedEffect, JobCounters, JobStatus,
-    LegacyOperation, LegacyTerminalStatus, ProviderKey, RemediationPlan, RestartPolicy, Scope,
-    ScopedJobRecord, ScopedResourceRef, SourceRecord, VersionedPayload,
+    LegacyOperation, LegacyTerminalStatus, ProviderKey, ProviderResourceRef, RemediationPlan,
+    ResourceKind, RestartPolicy, Scope, ScopedJobRecord, ScopedResourceRef, SourceRecord,
+    VersionedPayload,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    FoundationState, FoundationStore, LegacyStoreFormat, RealStoreIo, StoreBinding, StoreIo,
+    FoundationState, FoundationStore, LegacyStoreFormat, ProviderPayloadValidator, RealStoreIo,
+    StoreBinding, StoreIo, VerifiedNativeAccountIdentity, foundation_store::store_aad,
 };
 use crate::{
     error::AppError,
     model::{JobStatus as LegacyJobStatus, PersistedState},
-    secure_store::SecureJobStore,
+    secure_store::{SecureJobStore, decrypt_authenticated},
 };
 
 const LEGACY_KEY: [u8; 32] = [0x61; 32];
@@ -40,6 +43,143 @@ fn binding() -> StoreBinding {
         provider: provider("telegram"),
         profile: PROFILE.into(),
     }
+}
+
+#[derive(Debug)]
+struct StrictTestPayloadValidator;
+
+impl ProviderPayloadValidator for StrictTestPayloadValidator {
+    fn validate_account(
+        &self,
+        account: &AccountRecord,
+    ) -> Result<VerifiedNativeAccountIdentity, AppError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct NativeIdentity {
+            environment: String,
+            user_id: String,
+        }
+
+        if account.native_identity.schema != "telegram.account"
+            || account.native_identity.version != 1
+            || account.avatar.is_some()
+        {
+            return Err(invalid_test_payload());
+        }
+        let identity: NativeIdentity =
+            serde_json::from_value(account.native_identity.payload.clone())
+                .map_err(|_| invalid_test_payload())?;
+        if identity.environment != "test" || !canonical_positive_i64(&identity.user_id) {
+            return Err(invalid_test_payload());
+        }
+        VerifiedNativeAccountIdentity::try_from(format!(
+            "{}:{}",
+            identity.environment, identity.user_id
+        ))
+    }
+
+    fn validate_source(
+        &self,
+        source: &SourceRecord,
+        _account: &AccountRecord,
+    ) -> Result<(), AppError> {
+        if source.schema_profile.schema != "telegram.live"
+            || source.schema_profile.version != 1
+            || source.schema_profile.payload != json!({})
+        {
+            return Err(invalid_test_payload());
+        }
+        Ok(())
+    }
+
+    fn validate_resource(&self, resource: &ProviderResourceRef) -> Result<(), AppError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct MessageLocator {
+            chat_id: String,
+            message_id: String,
+        }
+
+        if resource.provider != provider("telegram")
+            || resource.resource_kind != ResourceKind::Content
+            || resource.locator_schema != "telegram.message"
+            || resource.locator_version != 1
+        {
+            return Err(invalid_test_payload());
+        }
+        let locator: MessageLocator = serde_json::from_value(resource.locator_payload.clone())
+            .map_err(|_| invalid_test_payload())?;
+        if !canonical_nonzero_i64(&locator.chat_id)
+            || !canonical_positive_i64(&locator.message_id)
+            || resource.canonical_key
+                != serde_json::to_string(&(locator.chat_id, locator.message_id)).unwrap()
+        {
+            return Err(invalid_test_payload());
+        }
+        Ok(())
+    }
+
+    fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Recipe {
+            operation: String,
+            batch_size: u32,
+            target_keys: Vec<String>,
+        }
+
+        if plan.recipe.schema != "telegram.delete-messages" || plan.recipe.version != 1 {
+            return Err(invalid_test_payload());
+        }
+        let recipe: Recipe = serde_json::from_value(plan.recipe.payload.clone())
+            .map_err(|_| invalid_test_payload())?;
+        let target_keys = plan
+            .targets
+            .iter()
+            .map(|target| target.resource.canonical_key.clone())
+            .collect::<Vec<_>>();
+        if recipe.operation != "selected"
+            || recipe.batch_size != 1
+            || recipe.target_keys != target_keys
+            || plan
+                .steps
+                .iter()
+                .any(|step| step.descriptor.batch.max_targets != recipe.batch_size)
+        {
+            return Err(invalid_test_payload());
+        }
+        Ok(())
+    }
+}
+
+fn invalid_test_payload() -> AppError {
+    AppError::SecureStore("synthetic provider payload validation failed".into())
+}
+
+fn canonical_nonzero_i64(value: &str) -> bool {
+    value
+        .parse::<i64>()
+        .is_ok_and(|parsed| parsed != 0 && parsed.to_string() == value)
+}
+
+fn canonical_positive_i64(value: &str) -> bool {
+    value
+        .parse::<i64>()
+        .is_ok_and(|parsed| parsed > 0 && parsed.to_string() == value)
+}
+
+fn strict_validator() -> Arc<dyn ProviderPayloadValidator> {
+    Arc::new(StrictTestPayloadValidator)
+}
+
+fn open_validated(directory: &Path) -> Arc<FoundationStore> {
+    FoundationStore::open_with_test_key_and_payload_validator(
+        directory.to_path_buf(),
+        binding(),
+        CURRENT_KEY,
+        strict_validator(),
+    )
+    .unwrap()
 }
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -109,6 +249,10 @@ fn source() -> SourceRecord {
 
 fn plan() -> RemediationPlan {
     let targets = vec![target(0), target(1)];
+    let target_keys = targets
+        .iter()
+        .map(|target| target.resource.canonical_key.clone())
+        .collect::<Vec<_>>();
     let mut plan = RemediationPlan {
         id: Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap(),
         scope: scope(),
@@ -141,7 +285,11 @@ fn plan() -> RemediationPlan {
         recipe: VersionedPayload {
             schema: "telegram.delete-messages".into(),
             version: 1,
-            payload: json!({"operation": "selected", "batchSize": 1}),
+            payload: json!({
+                "operation": "selected",
+                "batchSize": 1,
+                "targetKeys": target_keys
+            }),
         },
         restart_policy: RestartPolicy::ResumeFrozenTargets,
         created_at: "2026-09-03T00:00:00Z".parse().unwrap(),
@@ -278,6 +426,57 @@ fn migrates_frozen_rtrct02_and_keeps_the_backup_readable_by_the_old_reader() {
         )
         .load()
         .is_err()
+    );
+}
+
+#[test]
+fn ordinary_transactions_cannot_clear_migrated_legacy_history() {
+    let directory = tempfile::tempdir().unwrap();
+    write_fixture(directory.path(), "rtrct02");
+    let store =
+        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
+            .unwrap();
+    let original = store.snapshot().unwrap();
+    let original_bytes = fs::read(directory.path().join("jobs.enc")).unwrap();
+
+    assert!(
+        store
+            .transaction(|state| {
+                state.legacy_history.clear();
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(store.snapshot().unwrap(), original);
+    assert_eq!(
+        fs::read(directory.path().join("jobs.enc")).unwrap(),
+        original_bytes
+    );
+}
+
+#[test]
+fn ordinary_transactions_cannot_rewrite_migration_provenance() {
+    let directory = tempfile::tempdir().unwrap();
+    write_fixture(directory.path(), "rtrct02");
+    let store =
+        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
+            .unwrap();
+    let original = store.snapshot().unwrap();
+    let original_bytes = fs::read(directory.path().join("jobs.enc")).unwrap();
+
+    assert!(
+        store
+            .transaction(|state| {
+                state.migration.as_mut().unwrap().source_sha256 =
+                    format!("sha256:{}", "0".repeat(64));
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(store.snapshot().unwrap(), original);
+    assert_eq!(
+        fs::read(directory.path().join("jobs.enc")).unwrap(),
+        original_bytes
     );
 }
 
@@ -479,6 +678,17 @@ fn fresh_v3_files_are_private_and_authenticated_to_provider_and_profile() {
         provider: provider("synthetic"),
         profile: PROFILE.into(),
     };
+    let wrong_provider_error = decrypt_authenticated(
+        &fs::read(&active).unwrap(),
+        b"RTRCT03",
+        &CURRENT_KEY,
+        &store_aad(&wrong_provider).unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_provider_error,
+        AppError::SecureStore(message) if message == "job store authentication failed"
+    ));
     assert!(
         FoundationStore::open_with_test_key(
             directory.path().to_path_buf(),
@@ -491,6 +701,17 @@ fn fresh_v3_files_are_private_and_authenticated_to_provider_and_profile() {
         provider: provider("telegram"),
         profile: "telegram-other".into(),
     };
+    let wrong_profile_error = decrypt_authenticated(
+        &fs::read(&active).unwrap(),
+        b"RTRCT03",
+        &CURRENT_KEY,
+        &store_aad(&wrong_profile).unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        wrong_profile_error,
+        AppError::SecureStore(message) if message == "job store authentication failed"
+    ));
     assert!(
         FoundationStore::open_with_test_key(
             directory.path().to_path_buf(),
@@ -513,6 +734,18 @@ fn callers_share_one_arc_but_an_independent_writer_gets_profile_in_use() {
         FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), [0x99; 32])
             .unwrap();
     assert!(Arc::ptr_eq(&first, &shared));
+
+    let conflicting_binding = StoreBinding {
+        provider: provider("synthetic"),
+        profile: PROFILE.into(),
+    };
+    let error = FoundationStore::open_with_test_key(
+        directory.path().to_path_buf(),
+        conflicting_binding,
+        CURRENT_KEY,
+    )
+    .unwrap_err();
+    assert!(matches!(error, AppError::ProfileInUse));
 
     let error = FoundationStore::open_independent_with_test_key(
         directory.path().to_path_buf(),
@@ -550,9 +783,7 @@ fn an_independent_open_checks_the_profile_lock_before_fetching_the_key() {
 #[test]
 fn transactions_validate_identity_ownership_plan_fingerprints_and_cursor_bounds() {
     let directory = tempfile::tempdir().unwrap();
-    let store =
-        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
-            .unwrap();
+    let store = open_validated(directory.path());
     store
         .transaction(|state| {
             install_valid_graph(state);
@@ -605,18 +836,98 @@ fn transactions_validate_identity_ownership_plan_fingerprints_and_cursor_bounds(
 }
 
 #[test]
-fn provider_recipes_are_content_free_and_unknown_versions_are_inertly_preserved() {
+fn two_account_ids_cannot_alias_one_verified_native_identity() {
     let directory = tempfile::tempdir().unwrap();
-    let store =
-        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
-            .unwrap();
+    let store = open_validated(directory.path());
+    let first = account();
+    let mut alias = first.clone();
+    alias.id = retract_domain::AccountId::try_from(
+        Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap(),
+    )
+    .unwrap();
+
+    assert!(
+        store
+            .transaction(|state| {
+                state.identities.extend([first, alias]);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(store.snapshot().unwrap().identities.is_empty());
+}
+
+#[test]
+fn adapter_validates_all_provider_payloads_and_unknown_recipe_jobs_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = open_validated(directory.path());
+    assert!(
+        store
+            .transaction(|state| {
+                let mut unsafe_account = account();
+                unsafe_account.native_identity.payload["privateValue"] =
+                    json!("SYNTHETIC_PRIVATE_CONTENT");
+                state.identities.push(unsafe_account);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(store.snapshot().unwrap().identities.is_empty());
+
+    assert!(
+        store
+            .transaction(|state| {
+                state.identities.push(account());
+                let mut unsafe_source = source();
+                unsafe_source.schema_profile.payload["opaque"] = json!("SYNTHETIC_PRIVATE_CONTENT");
+                state.sources.push(unsafe_source);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(store.snapshot().unwrap().sources.is_empty());
+
+    for corrupt in ["private_payload", "canonical_disagreement"] {
+        assert!(
+            store
+                .transaction(|state| {
+                    let mut plan = plan();
+                    for target in plan.targets.iter_mut().chain(
+                        plan.steps
+                            .iter_mut()
+                            .flat_map(|step| step.targets.iter_mut()),
+                    ) {
+                        match corrupt {
+                            "private_payload" => {
+                                target.resource.locator_payload["privateValue"] =
+                                    json!("SYNTHETIC_PRIVATE_CONTENT");
+                            }
+                            "canonical_disagreement" => {
+                                target.resource.locator_payload["chatId"] = json!("-2000");
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    plan.seal().unwrap();
+                    let job = job(&plan);
+                    state.identities.push(account());
+                    state.sources.push(source());
+                    state.plans.push(plan);
+                    state.jobs.push(job);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(store.snapshot().unwrap().plans.is_empty());
+    }
+
     assert!(
         store
             .transaction(|state| {
                 state.identities.push(account());
                 state.sources.push(source());
                 let mut unsafe_plan = plan();
-                unsafe_plan.recipe.payload = json!({"messageBody": "SYNTHETIC_PRIVATE_CONTENT"});
+                unsafe_plan.recipe.payload["opaque"] = json!("SYNTHETIC_PRIVATE_CONTENT");
                 unsafe_plan.seal().unwrap();
                 state.plans.push(unsafe_plan);
                 Ok(())
@@ -625,31 +936,67 @@ fn provider_recipes_are_content_free_and_unknown_versions_are_inertly_preserved(
     );
     assert!(store.snapshot().unwrap().plans.is_empty());
 
+    assert!(
+        store
+            .transaction(|state| {
+                state.identities.push(account());
+                state.sources.push(source());
+                let mut unknown = plan();
+                unknown.recipe.version = 999;
+                unknown.seal().unwrap();
+                let job = job(&unknown);
+                state.plans.push(unknown);
+                state.jobs.push(job);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(store.snapshot().unwrap().jobs.is_empty());
+
+    assert!(
+        store
+            .transaction(|state| {
+                state.identities.push(account());
+                state.sources.push(source());
+                let mut mismatched = plan();
+                mismatched.recipe.payload["targetKeys"][0] = json!("[\"-9999\",\"1\"]");
+                mismatched.seal().unwrap();
+                let job = job(&mismatched);
+                state.plans.push(mismatched);
+                state.jobs.push(job);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(store.snapshot().unwrap().jobs.is_empty());
+}
+
+#[test]
+fn default_store_entry_is_fail_closed_for_provider_backed_v3_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = open_validated(directory.path());
     store
         .transaction(|state| {
-            state.identities.push(account());
-            state.sources.push(source());
-            let mut unknown = plan();
-            unknown.recipe.version = 999;
-            unknown.seal().unwrap();
-            state.plans.push(unknown);
+            install_valid_graph(state);
             Ok(())
         })
         .unwrap();
-    let state = store.snapshot().unwrap();
-    assert_eq!(state.plans[0].recipe.version, 999);
+    drop(store);
+
     assert!(
-        state.jobs.is_empty(),
-        "the foundation must not infer executable work"
+        FoundationStore::open_with_test_key(
+            directory.path().to_path_buf(),
+            binding(),
+            CURRENT_KEY,
+        )
+        .is_err()
     );
 }
 
 #[test]
 fn failed_private_write_never_publishes_the_candidate() {
     let directory = tempfile::tempdir().unwrap();
-    let store =
-        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
-            .unwrap();
+    let store = open_validated(directory.path());
     let original_bytes = fs::read(directory.path().join("jobs.enc")).unwrap();
     fs::create_dir(directory.path().join("jobs.enc.tmp")).unwrap();
 
@@ -698,11 +1045,12 @@ fn failed_candidate_verification_preserves_the_committed_snapshot_and_file() {
         real: RealStoreIo,
         armed: AtomicBool::new(false),
     });
-    let store = FoundationStore::open_with_test_key_and_io(
+    let store = FoundationStore::open_with_test_key_and_io_and_payload_validator(
         directory.path().to_path_buf(),
         binding(),
         CURRENT_KEY,
         io.clone(),
+        strict_validator(),
     )
     .unwrap();
     let original = fs::read(directory.path().join("jobs.enc")).unwrap();
@@ -751,11 +1099,12 @@ fn a_post_replace_sync_failure_reloads_authoritative_disk_before_later_mutation(
         real: RealStoreIo,
         armed: AtomicBool::new(false),
     });
-    let store = FoundationStore::open_with_test_key_and_io(
+    let store = FoundationStore::open_with_test_key_and_io_and_payload_validator(
         directory.path().to_path_buf(),
         binding(),
         CURRENT_KEY,
         io.clone(),
+        strict_validator(),
     )
     .unwrap();
     io.armed.store(true, Ordering::Release);
@@ -787,9 +1136,7 @@ fn a_post_replace_sync_failure_reloads_authoritative_disk_before_later_mutation(
 #[test]
 fn concurrent_transactions_never_overwrite_a_newer_snapshot() {
     let directory = tempfile::tempdir().unwrap();
-    let store =
-        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
-            .unwrap();
+    let store = open_validated(directory.path());
     let barrier = Arc::new(std::sync::Barrier::new(3));
     let mut threads = Vec::new();
     for index in 0..2 {
@@ -798,6 +1145,7 @@ fn concurrent_transactions_never_overwrite_a_newer_snapshot() {
         threads.push(std::thread::spawn(move || {
             let mut account = account();
             account.id = retract_domain::AccountId::try_from(Uuid::from_u128(100 + index)).unwrap();
+            account.native_identity.payload["userId"] = json!((42 + index).to_string());
             barrier.wait();
             store.transaction(|state| {
                 state.identities.push(account);

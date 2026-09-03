@@ -11,7 +11,10 @@ use zeroize::Zeroizing;
 
 use super::{
     migration::migrate_legacy,
-    model::{FoundationState, LegacyStoreFormat, StoreBinding},
+    model::{
+        FoundationState, LegacyStoreFormat, ProviderPayloadValidator, RejectProviderPayloads,
+        StoreBinding,
+    },
 };
 use crate::{
     error::AppError,
@@ -64,6 +67,7 @@ pub struct FoundationStore {
     profile_dir: PathBuf,
     active_path: PathBuf,
     binding: StoreBinding,
+    payload_validator: Arc<dyn ProviderPayloadValidator>,
     state: Mutex<RuntimeState>,
     io: Arc<dyn StoreIo>,
     _profile_lock: File,
@@ -83,7 +87,23 @@ impl FoundationStore {
     /// Opens the profile's only writer. The profile lock is acquired before the
     /// existing cached job-store key is requested.
     pub fn open(profile: PathBuf, binding: StoreBinding) -> Result<Arc<Self>, AppError> {
-        Self::open_registered(profile, binding, load_job_store_key)
+        Self::open_registered(
+            profile,
+            binding,
+            Arc::new(RejectProviderPayloads),
+            load_job_store_key,
+        )
+    }
+
+    /// Opens a profile with the owning adapter's typed provider-payload
+    /// validator. Provider-backed state cannot be loaded or committed without
+    /// passing this boundary.
+    pub fn open_with_payload_validator(
+        profile: PathBuf,
+        binding: StoreBinding,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::open_registered(profile, binding, payload_validator, load_job_store_key)
     }
 
     #[cfg(test)]
@@ -92,7 +112,22 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_registered(profile, binding, move |_| Ok(key))
+        Self::open_registered(
+            profile,
+            binding,
+            Arc::new(RejectProviderPayloads),
+            move |_| Ok(key),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_test_key_and_payload_validator(
+        profile: PathBuf,
+        binding: StoreBinding,
+        key: [u8; KEY_LENGTH],
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::open_registered(profile, binding, payload_validator, move |_| Ok(key))
     }
 
     #[cfg(test)]
@@ -101,7 +136,13 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_independent(profile, binding, key, Arc::new(RealStoreIo))
+        Self::open_independent(
+            profile,
+            binding,
+            key,
+            Arc::new(RealStoreIo),
+            Arc::new(RejectProviderPayloads),
+        )
     }
 
     #[cfg(test)]
@@ -114,7 +155,14 @@ impl FoundationStore {
         let profile = prepare_profile(&profile)?;
         let profile_lock = acquire_profile_lock(&profile)?;
         let key = load_key(&profile)?;
-        Self::build(profile, binding, key, Arc::new(RealStoreIo), profile_lock)
+        Self::build(
+            profile,
+            binding,
+            key,
+            Arc::new(RealStoreIo),
+            Arc::new(RejectProviderPayloads),
+            profile_lock,
+        )
     }
 
     #[cfg(test)]
@@ -124,12 +172,24 @@ impl FoundationStore {
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_independent(profile, binding, key, io)
+        Self::open_independent(profile, binding, key, io, Arc::new(RejectProviderPayloads))
+    }
+
+    #[cfg(test)]
+    pub(super) fn open_with_test_key_and_io_and_payload_validator(
+        profile: PathBuf,
+        binding: StoreBinding,
+        key: [u8; KEY_LENGTH],
+        io: Arc<dyn StoreIo>,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::open_independent(profile, binding, key, io, payload_validator)
     }
 
     fn open_registered(
         profile: PathBuf,
         binding: StoreBinding,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
         load_key: impl FnOnce(&Path) -> Result<[u8; KEY_LENGTH], AppError>,
     ) -> Result<Arc<Self>, AppError> {
         binding.validate()?;
@@ -138,9 +198,7 @@ impl FoundationStore {
         let mut registry = registry.lock().map_err(|_| AppError::StateUnavailable)?;
         if let Some(existing) = registry.get(&profile).and_then(Weak::upgrade) {
             if existing.binding != binding {
-                return Err(AppError::SecureStore(
-                    "profile is already open with a different store binding".into(),
-                ));
+                return Err(AppError::ProfileInUse);
             }
             return Ok(existing);
         }
@@ -152,6 +210,7 @@ impl FoundationStore {
             binding,
             key,
             Arc::new(RealStoreIo),
+            payload_validator,
             profile_lock,
         )?;
         registry.insert(profile, Arc::downgrade(&store));
@@ -164,11 +223,12 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
     ) -> Result<Arc<Self>, AppError> {
         binding.validate()?;
         let profile = prepare_profile(&profile)?;
         let profile_lock = acquire_profile_lock(&profile)?;
-        Self::build(profile, binding, key, io, profile_lock)
+        Self::build(profile, binding, key, io, payload_validator, profile_lock)
     }
 
     fn build(
@@ -176,15 +236,24 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
         profile_lock: File,
     ) -> Result<Arc<Self>, AppError> {
         let active_path = profile_dir.join(ACTIVE_FILE);
-        let committed = initialize_state(&profile_dir, &active_path, &binding, &key, io.as_ref())?;
+        let committed = initialize_state(
+            &profile_dir,
+            &active_path,
+            &binding,
+            &key,
+            io.as_ref(),
+            payload_validator.as_ref(),
+        )?;
         Ok(Arc::new(Self {
             key: Zeroizing::new(key),
             profile_dir,
             active_path,
             binding,
+            payload_validator,
             state: Mutex::new(RuntimeState {
                 committed,
                 reload_required: false,
@@ -208,7 +277,15 @@ impl FoundationStore {
         self.reload_if_required(&mut state)?;
         let mut candidate = state.committed.clone();
         let output = change(&mut candidate)?;
-        candidate.validate(&self.binding)?;
+        if candidate.migration != state.committed.migration
+            || candidate.legacy_history != state.committed.legacy_history
+        {
+            return Err(AppError::SecureStore(
+                "migration provenance and legacy history are immutable".into(),
+            ));
+        }
+        candidate
+            .validate_with_provider_payloads(&self.binding, self.payload_validator.as_ref())?;
         if let Err(failure) = durable_save(
             &self.profile_dir,
             &self.active_path,
@@ -216,6 +293,7 @@ impl FoundationStore {
             &self.key,
             &candidate,
             self.io.as_ref(),
+            self.payload_validator.as_ref(),
         ) {
             state.reload_required = failure.replaced;
             return Err(AppError::StatePersistenceFailed);
@@ -229,8 +307,13 @@ impl FoundationStore {
             return Ok(());
         }
         let bytes = fs::read(&self.active_path).map_err(|_| AppError::StatePersistenceFailed)?;
-        let committed = decode_v3(&bytes, &self.key, &self.binding)
-            .map_err(|_| AppError::StatePersistenceFailed)?;
+        let committed = decode_v3(
+            &bytes,
+            &self.key,
+            &self.binding,
+            self.payload_validator.as_ref(),
+        )
+        .map_err(|_| AppError::StatePersistenceFailed)?;
         state.committed = committed;
         state.reload_required = false;
         Ok(())
@@ -269,9 +352,12 @@ fn initialize_state(
     binding: &StoreBinding,
     key: &[u8; KEY_LENGTH],
     io: &dyn StoreIo,
+    payload_validator: &dyn ProviderPayloadValidator,
 ) -> Result<FoundationState, AppError> {
     match fs::read(active_path) {
-        Ok(bytes) if bytes.starts_with(V3_MAGIC) => decode_v3(&bytes, key, binding),
+        Ok(bytes) if bytes.starts_with(V3_MAGIC) => {
+            decode_v3(&bytes, key, binding, payload_validator)
+        }
         Ok(bytes) => {
             let (legacy, format) = decode_legacy_state(&bytes, key, binding.profile.as_bytes())?;
             preserve_backup(profile_dir, &bytes, io)?;
@@ -280,8 +366,16 @@ fn initialize_state(
                 LegacyCipherFormat::Rtrct02 => LegacyStoreFormat::Rtrct02,
             };
             let state = migrate_legacy(legacy, binding.clone(), format, &bytes)?;
-            durable_save(profile_dir, active_path, binding, key, &state, io)
-                .map_err(|failure| failure.error)?;
+            durable_save(
+                profile_dir,
+                active_path,
+                binding,
+                key,
+                &state,
+                io,
+                payload_validator,
+            )
+            .map_err(|failure| failure.error)?;
             Ok(state)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -291,9 +385,17 @@ fn initialize_state(
                 ));
             }
             let state = FoundationState::empty(binding.clone());
-            state.validate(binding)?;
-            durable_save(profile_dir, active_path, binding, key, &state, io)
-                .map_err(|failure| failure.error)?;
+            state.validate_with_provider_payloads(binding, payload_validator)?;
+            durable_save(
+                profile_dir,
+                active_path,
+                binding,
+                key,
+                &state,
+                io,
+                payload_validator,
+            )
+            .map_err(|failure| failure.error)?;
             Ok(state)
         }
         Err(error) => Err(error.into()),
@@ -345,6 +447,7 @@ fn durable_save(
     key: &[u8; KEY_LENGTH],
     candidate: &FoundationState,
     io: &dyn StoreIo,
+    payload_validator: &dyn ProviderPayloadValidator,
 ) -> Result<(), CommitFailure> {
     let result = (|| {
         let plaintext = serde_json::to_vec(candidate)
@@ -353,7 +456,7 @@ fn durable_save(
         let candidate_path = profile_dir.join(CANDIDATE_FILE);
         write_private(&candidate_path, &payload)?;
         let actual_bytes = io.read_candidate(&candidate_path)?;
-        let actual = decode_v3(&actual_bytes, key, binding)?;
+        let actual = decode_v3(&actual_bytes, key, binding, payload_validator)?;
         if &actual != candidate {
             return Err(AppError::SecureStore(
                 "foundation candidate verification failed".into(),
@@ -381,15 +484,16 @@ fn decode_v3(
     bytes: &[u8],
     key: &[u8; KEY_LENGTH],
     binding: &StoreBinding,
+    payload_validator: &dyn ProviderPayloadValidator,
 ) -> Result<FoundationState, AppError> {
     let plaintext = decrypt_authenticated(bytes, V3_MAGIC, key, &store_aad(binding)?)?;
     let state: FoundationState = serde_json::from_slice(&plaintext)
         .map_err(|_| AppError::SecureStore("foundation state is malformed".into()))?;
-    state.validate(binding)?;
+    state.validate_with_provider_payloads(binding, payload_validator)?;
     Ok(state)
 }
 
-fn store_aad(binding: &StoreBinding) -> Result<Vec<u8>, AppError> {
+pub(super) fn store_aad(binding: &StoreBinding) -> Result<Vec<u8>, AppError> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct StoreAad<'a> {

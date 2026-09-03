@@ -4,12 +4,73 @@ use retract_domain::{
     AccountRecord, ProviderResourceRef, RemediationPlan, ScopedJobRecord, SourceRecord,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::error::AppError;
 
 pub const FOUNDATION_SCHEMA_VERSION: u16 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VerifiedNativeAccountIdentity(String);
+
+impl TryFrom<String> for VerifiedNativeAccountIdentity {
+    type Error = AppError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+            return Err(invalid_state("invalid verified native account identity"));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Adapter-owned validation for every opaque provider payload persisted in v3.
+/// Implementations must parse typed payloads, reject unknown schema versions,
+/// and prove canonical locator and recipe/target agreement.
+pub trait ProviderPayloadValidator: Send + Sync {
+    fn validate_account(
+        &self,
+        account: &AccountRecord,
+    ) -> Result<VerifiedNativeAccountIdentity, AppError>;
+
+    fn validate_source(
+        &self,
+        source: &SourceRecord,
+        account: &AccountRecord,
+    ) -> Result<(), AppError>;
+
+    fn validate_resource(&self, resource: &ProviderResourceRef) -> Result<(), AppError>;
+
+    fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError>;
+}
+
+#[derive(Debug)]
+pub(crate) struct RejectProviderPayloads;
+
+impl ProviderPayloadValidator for RejectProviderPayloads {
+    fn validate_account(
+        &self,
+        _account: &AccountRecord,
+    ) -> Result<VerifiedNativeAccountIdentity, AppError> {
+        Err(invalid_state("provider payload validator is required"))
+    }
+
+    fn validate_source(
+        &self,
+        _source: &SourceRecord,
+        _account: &AccountRecord,
+    ) -> Result<(), AppError> {
+        Err(invalid_state("provider payload validator is required"))
+    }
+
+    fn validate_resource(&self, _resource: &ProviderResourceRef) -> Result<(), AppError> {
+        Err(invalid_state("provider payload validator is required"))
+    }
+
+    fn validate_recipe(&self, _plan: &RemediationPlan) -> Result<(), AppError> {
+        Err(invalid_state("provider payload validator is required"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,11 +153,6 @@ impl FoundationState {
                 .map_err(|_| invalid_state("invalid account identity"))?;
             if identity.provider != expected_binding.provider
                 || identities.insert(identity.id, identity).is_some()
-                || !content_free_payload(&identity.native_identity.payload)
-                || identity
-                    .avatar
-                    .as_ref()
-                    .is_some_and(|avatar| !content_free_payload(&avatar.payload))
             {
                 return Err(invalid_state("invalid or duplicate account identity"));
             }
@@ -112,7 +168,6 @@ impl FoundationState {
                 .map_err(|_| invalid_state("invalid source relationship"))?;
             if source.provider != expected_binding.provider
                 || sources.insert(source.id, source).is_some()
-                || !content_free_payload(&source.schema_profile.payload)
             {
                 return Err(invalid_state("invalid or duplicate source"));
             }
@@ -124,8 +179,7 @@ impl FoundationState {
             plan.validate()
                 .map_err(|_| invalid_state("invalid remediation plan"))?;
             validate_scope_owner(&plan.scope, expected_binding, &identities, &sources)?;
-            if plans.insert(plan.id, plan).is_some() || !content_free_payload(&plan.recipe.payload)
-            {
+            if plans.insert(plan.id, plan).is_some() {
                 return Err(invalid_state("invalid or duplicate remediation plan"));
             }
             for target in &plan.targets {
@@ -195,6 +249,49 @@ impl FoundationState {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_with_provider_payloads(
+        &self,
+        expected_binding: &StoreBinding,
+        validator: &dyn ProviderPayloadValidator,
+    ) -> Result<(), AppError> {
+        self.validate(expected_binding)?;
+
+        let identities = self
+            .identities
+            .iter()
+            .map(|account| (account.id, account))
+            .collect::<HashMap<_, _>>();
+        let mut native_identities = HashSet::new();
+        for account in &self.identities {
+            if !native_identities.insert(validator.validate_account(account)?) {
+                return Err(invalid_state("duplicate verified native account identity"));
+            }
+        }
+        for source in &self.sources {
+            validator.validate_source(
+                source,
+                identities
+                    .get(&source.account_id)
+                    .ok_or_else(|| invalid_state("source account is missing"))?,
+            )?;
+        }
+        for plan in &self.plans {
+            for target in &plan.targets {
+                validator.validate_resource(&target.resource)?;
+            }
+            for target in plan.steps.iter().flat_map(|step| &step.targets) {
+                validator.validate_resource(&target.resource)?;
+            }
+            validator.validate_recipe(plan)?;
+        }
+        for job in &self.jobs {
+            for target in &job.dirty_refs {
+                validator.validate_resource(&target.resource)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_scope_owner<'a>(
@@ -234,63 +331,6 @@ fn plan_batch_count(plan: &RemediationPlan) -> Result<u64, AppError> {
             .checked_add(batches)
             .ok_or_else(|| invalid_state("plan batch count overflow"))
     })
-}
-
-fn content_free_payload(payload: &Value) -> bool {
-    fn visit(value: &Value, depth: usize) -> bool {
-        if depth > 32 {
-            return false;
-        }
-        match value {
-            Value::Null | Value::Bool(_) | Value::Number(_) => true,
-            Value::String(value) => value.len() <= 4096 && !value.chars().any(char::is_control),
-            Value::Array(values) => {
-                values.len() <= 100_000 && values.iter().all(|value| visit(value, depth + 1))
-            }
-            Value::Object(values) => {
-                values.len() <= 10_000
-                    && values.iter().all(|(key, value)| {
-                        let normalized = key
-                            .chars()
-                            .filter(|character| character.is_ascii_alphanumeric())
-                            .flat_map(char::to_lowercase)
-                            .collect::<String>();
-                        !matches!(
-                            normalized.as_str(),
-                            "text"
-                                | "body"
-                                | "messagebody"
-                                | "caption"
-                                | "preview"
-                                | "filename"
-                                | "attachmentname"
-                                | "privateattachmentname"
-                                | "filepath"
-                                | "archivepath"
-                                | "password"
-                                | "token"
-                                | "secret"
-                                | "credential"
-                                | "credentials"
-                                | "apihash"
-                                | "apikey"
-                                | "accesskey"
-                                | "authcode"
-                                | "authvalue"
-                                | "authorization"
-                                | "session"
-                                | "nativeerror"
-                                | "rawerror"
-                                | "providererror"
-                                | "errormessage"
-                                | "error"
-                        ) && visit(value, depth + 1)
-                    })
-            }
-        }
-    }
-
-    serde_json::to_vec(payload).is_ok_and(|bytes| bytes.len() <= 1_048_576) && visit(payload, 0)
 }
 
 fn valid_sha256(value: &str) -> bool {
