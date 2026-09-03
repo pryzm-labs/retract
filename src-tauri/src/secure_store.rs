@@ -17,9 +17,15 @@ use crate::{error::AppError, model::PersistedState};
 
 const MAGIC: &[u8; 7] = b"RTRCT02";
 const LEGACY_UNBOUND_MAGIC: &[u8; 7] = b"RTRCT01";
-const KEY_LENGTH: usize = 32;
-const NONCE_LENGTH: usize = 12;
+pub(crate) const KEY_LENGTH: usize = 32;
+pub(crate) const NONCE_LENGTH: usize = 12;
 type AesNonce = aes_gcm::aead::Nonce<Aes256Gcm>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyCipherFormat {
+    Rtrct01,
+    Rtrct02,
+}
 
 #[cfg(any(target_os = "macos", test))]
 const VAULT_MAGIC: &[u8; 7] = b"RTRCTV1";
@@ -64,7 +70,7 @@ pub struct SecureJobStore {
 impl SecureJobStore {
     pub fn open(data_dir: PathBuf) -> Result<Self, AppError> {
         fs::create_dir_all(&data_dir)?;
-        let key = load_or_create_named_key(&data_dir, "encrypted-job-store", "job-store.key")?;
+        let key = load_job_store_key(&data_dir)?;
         let profile_binding = data_dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned().into_bytes())
@@ -118,61 +124,22 @@ impl SecureJobStore {
             }
             Err(error) => return Err(error.into()),
         };
-        if bytes.len() < MAGIC.len() + NONCE_LENGTH {
-            return Err(AppError::SecureStore(
-                "job store has an invalid header".into(),
-            ));
-        }
-        let legacy_unbound = &bytes[..MAGIC.len()] == LEGACY_UNBOUND_MAGIC;
-        if !legacy_unbound && &bytes[..MAGIC.len()] != MAGIC {
-            return Err(AppError::SecureStore(
-                "job store has an invalid header".into(),
-            ));
-        }
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-        let nonce = AesNonce::try_from(&bytes[MAGIC.len()..MAGIC.len() + NONCE_LENGTH])
-            .map_err(|_| AppError::SecureStore("job store has an invalid nonce".into()))?;
-        let aad = if legacy_unbound {
-            &[][..]
-        } else {
-            self.profile_binding.as_slice()
-        };
-        let plaintext = cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: &bytes[MAGIC.len() + NONCE_LENGTH..],
-                    aad,
-                },
-            )
-            .map_err(|_| AppError::SecureStore("job store authentication failed".into()))?;
+        let (state, format) =
+            decode_legacy_state(&bytes, &self.key, self.profile_binding.as_slice())?;
         self.loaded_legacy_unbound
-            .store(legacy_unbound, Ordering::Release);
-        serde_json::from_slice(&plaintext).map_err(|error| AppError::SecureStore(error.to_string()))
+            .store(format == LegacyCipherFormat::Rtrct01, Ordering::Release);
+        Ok(state)
     }
 
     pub fn save(&self, state: &PersistedState) -> Result<(), AppError> {
         let plaintext =
             serde_json::to_vec(state).map_err(|error| AppError::SecureStore(error.to_string()))?;
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
-        let nonce_bytes = random_bytes::<NONCE_LENGTH>()?;
-        let nonce = AesNonce::from(nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext.as_ref(),
-                    aad: self.profile_binding.as_slice(),
-                },
-            )
-            .map_err(|_| AppError::SecureStore("job store encryption failed".into()))?;
-
-        let mut payload = Vec::with_capacity(MAGIC.len() + NONCE_LENGTH + ciphertext.len());
-        payload.extend_from_slice(MAGIC);
-        payload.extend_from_slice(&nonce_bytes);
-        payload.extend_from_slice(&ciphertext);
+        let payload = encrypt_authenticated(
+            MAGIC,
+            &self.key,
+            self.profile_binding.as_slice(),
+            plaintext.as_ref(),
+        )?;
 
         let temporary = self.path.with_extension("enc.tmp");
         write_private(&temporary, &payload)?;
@@ -184,6 +151,87 @@ impl SecureJobStore {
 
 pub fn load_tdlib_database_key(data_dir: &std::path::Path) -> Result<[u8; KEY_LENGTH], AppError> {
     load_or_create_named_key(data_dir, "tdlib-database", "tdlib-database.key")
+}
+
+pub(crate) fn load_job_store_key(data_dir: &std::path::Path) -> Result<[u8; KEY_LENGTH], AppError> {
+    load_or_create_named_key(data_dir, "encrypted-job-store", "job-store.key")
+}
+
+pub(crate) fn decode_legacy_state(
+    bytes: &[u8],
+    key: &[u8; KEY_LENGTH],
+    profile_binding: &[u8],
+) -> Result<(PersistedState, LegacyCipherFormat), AppError> {
+    if bytes.len() < MAGIC.len() + NONCE_LENGTH {
+        return Err(AppError::SecureStore(
+            "job store has an invalid header".into(),
+        ));
+    }
+    let (format, aad) = match &bytes[..MAGIC.len()] {
+        value if value == LEGACY_UNBOUND_MAGIC => (LegacyCipherFormat::Rtrct01, &[][..]),
+        value if value == MAGIC => (LegacyCipherFormat::Rtrct02, profile_binding),
+        _ => {
+            return Err(AppError::SecureStore(
+                "job store has an invalid header".into(),
+            ));
+        }
+    };
+    let plaintext = decrypt_authenticated(bytes, &bytes[..MAGIC.len()], key, aad)?;
+    let state = serde_json::from_slice(&plaintext)
+        .map_err(|error| AppError::SecureStore(error.to_string()))?;
+    Ok((state, format))
+}
+
+pub(crate) fn encrypt_authenticated(
+    magic: &[u8],
+    key: &[u8; KEY_LENGTH],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
+    let nonce_bytes = random_bytes::<NONCE_LENGTH>()?;
+    let nonce = AesNonce::from(nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| AppError::SecureStore("job store encryption failed".into()))?;
+    let mut payload = Vec::with_capacity(magic.len() + NONCE_LENGTH + ciphertext.len());
+    payload.extend_from_slice(magic);
+    payload.extend_from_slice(&nonce_bytes);
+    payload.extend_from_slice(&ciphertext);
+    Ok(payload)
+}
+
+pub(crate) fn decrypt_authenticated(
+    bytes: &[u8],
+    magic: &[u8],
+    key: &[u8; KEY_LENGTH],
+    aad: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    if bytes.len() < magic.len() + NONCE_LENGTH || !bytes.starts_with(magic) {
+        return Err(AppError::SecureStore(
+            "job store has an invalid header".into(),
+        ));
+    }
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| AppError::SecureStore("invalid encryption key".into()))?;
+    let nonce = AesNonce::try_from(&bytes[magic.len()..magic.len() + NONCE_LENGTH])
+        .map_err(|_| AppError::SecureStore("job store has an invalid nonce".into()))?;
+    cipher
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: &bytes[magic.len() + NONCE_LENGTH..],
+                aad,
+            },
+        )
+        .map_err(|_| AppError::SecureStore("job store authentication failed".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -567,7 +615,7 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], AppError> {
         .map_err(|error| AppError::SecureStore(format!("secure random generation failed: {error}")))
 }
 
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
     use std::io::Write;
 
     let mut options = fs::OpenOptions::new();
@@ -578,6 +626,8 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())

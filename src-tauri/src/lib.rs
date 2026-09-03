@@ -8,6 +8,7 @@ mod gateway;
 mod live_gateway;
 mod local_auth;
 mod model;
+pub mod persistence;
 mod secure_store;
 mod service;
 mod setup_gateway;

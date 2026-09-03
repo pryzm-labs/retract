@@ -15,6 +15,10 @@ pub enum AppError {
     JobAlreadyTerminal,
     #[error("secure local storage failed: {0}")]
     SecureStore(String),
+    #[error("This profile is already in use by another application process.")]
+    ProfileInUse,
+    #[error("Progress could not be saved. No further actions were scheduled.")]
+    StatePersistenceFailed,
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("system authentication failed: {0}")]
@@ -38,6 +42,8 @@ impl From<AppError> for CommandError {
             AppError::NotFound => "not_found",
             AppError::JobAlreadyTerminal => "job_terminal",
             AppError::SecureStore(_) => "secure_store_error",
+            AppError::ProfileInUse => "profile_in_use",
+            AppError::StatePersistenceFailed => "state_persistence_failed",
             AppError::SystemAuthentication(_) => "system_authentication_failed",
             AppError::StateUnavailable => "state_unavailable",
         };

@@ -970,6 +970,8 @@ fn error_code(error: &AppError) -> &'static str {
         AppError::JobAlreadyTerminal => "job_terminal",
         AppError::Domain(_) | AppError::InvalidRequest(_) => "invalid_plan",
         AppError::StateUnavailable => "state_unavailable",
+        AppError::ProfileInUse => "profile_in_use",
+        AppError::StatePersistenceFailed => "state_persistence_failed",
     }
 }
 
