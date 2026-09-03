@@ -4,8 +4,72 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { fixtureApi } from "../api.fixture";
 import { fixtureContext, fixtureDescriptor, fixtureRef } from "../demo";
 import { api } from "@retract/api";
+import type { PlanOperation } from "../types";
+import { readFileSync } from "node:fs";
+
+const styles = readFileSync("src/styles.css", "utf8");
 
 describe("reviewed backend confirmation", () => {
+  it.each<PlanOperation>(["clear_history_and_leave", "delete_all_messages_and_leave", "leave_chat"])("does not promise missing cleanup or self-removal for %s", async operation => {
+    await fixtureApi.resetFixtures();
+    const plan = await api.prepareChatAction(fixtureRef("conversation", "-1001"), "clear_history", fixtureContext);
+    const cleanup = operation === "clear_history_and_leave" ? "clear_history" : "selected_messages";
+    for (const actions of [["leave_chat"], [cleanup, "leave_chat"], ["leave_chat", "remove_chat_for_self"], ["remove_chat_for_self", cleanup, "leave_chat"]] as PlanOperation[][]) {
+      const view = render(<ConfirmDialog plan={{ ...plan, operation, summary: { ...plan.summary, deleteForEveryone: 1 },
+        steps: actions.map(action => ({ descriptor: fixtureDescriptor(action), targets: plan.targets }))
+      }} busy={false} onClose={vi.fn()} onConfirm={vi.fn()} />);
+      expect(screen.getByRole("heading", { name: "Review the frozen effects?" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Confirm reviewed effects" })).toBeInTheDocument();
+      if (operation !== "clear_history_and_leave") expect(screen.getByText("protected skipped")).toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("does not describe one-message deletion as whole-history clearing", async () => {
+    await fixtureApi.resetFixtures();
+    const plan = await api.prepareChatAction(fixtureRef("conversation", "-1001"), "clear_history", fixtureContext);
+    render(<ConfirmDialog plan={{ ...plan, steps: [{ descriptor: fixtureDescriptor("selected_messages"), targets: plan.targets }] }} busy={false} onClose={vi.fn()} onConfirm={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Review the frozen effects?" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Every message Telegram permits");
+  });
+
+  it.each<PlanOperation>(["clear_history_and_leave", "delete_all_messages_and_leave", "leave_chat"])("preserves familiar copy only for the complete ordered %s shape", async operation => {
+    await fixtureApi.resetFixtures();
+    const plan = await api.prepareChatAction(fixtureRef("conversation", "-1001"), "clear_history", fixtureContext);
+    const actions: PlanOperation[] = operation === "clear_history_and_leave"
+      ? ["clear_history", "leave_chat", "remove_chat_for_self"]
+      : ["selected_messages", "selected_messages", "leave_chat", "remove_chat_for_self"];
+    const steps = actions.map(action => ({ descriptor: fixtureDescriptor(action), targets: plan.targets }));
+    const props = { plan: { ...plan, operation, steps }, busy: false, onClose: vi.fn(), onConfirm: vi.fn() };
+    const view = render(<ConfirmDialog {...props} />);
+    expect(screen.queryByRole("heading", { name: "Review the frozen effects?" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Ordered plan effects" })).getAllByRole("listitem")).toHaveLength(steps.length);
+    view.rerender(<ConfirmDialog {...props} plan={{ ...props.plan, steps: steps.map((step, index) => index === 0 ? { ...step, descriptor: { ...step.descriptor, effect: "manual_or_unknown" } } : step) }} />);
+    expect(screen.getByRole("heading", { name: "Review the frozen effects?" })).toBeInTheDocument();
+  });
+
+  it("keeps every batch and final controls in a viewport-bounded scrolling dialog", async () => {
+    await fixtureApi.resetFixtures();
+    const plan = await api.prepareChatAction(fixtureRef("conversation", "-1001"), "clear_history", fixtureContext);
+    const onConfirm = vi.fn();
+    render(<><style>{styles}</style><ConfirmDialog plan={{ ...plan, operation: "selected_messages",
+      confirmation: { tier: "high", acknowledgementRequired: true, exactText: "REVIEW", ownerAuthRequired: false },
+      steps: Array.from({ length: 250 }, () => ({ descriptor: fixtureDescriptor("selected_messages"), targets: plan.targets }))
+    }} busy={false} onClose={vi.fn()} onConfirm={onConfirm} /></>);
+    const dialog = screen.getByRole("dialog");
+    // jsdom verifies the applied scrolling contract, not browser geometry.
+    expect(getComputedStyle(dialog).overflow).toBe("auto");
+    expect(getComputedStyle(dialog).maxHeight).toMatch(/calc\(100d?vh - 48px\)/);
+    expect(within(screen.getByRole("list", { name: "Ordered plan effects" })).getAllByRole("listitem")).toHaveLength(250);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "REVIEW" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    const confirm = dialog.querySelector<HTMLButtonElement>(".confirm-button")!;
+    confirm.focus();
+    expect(confirm).toHaveFocus();
+    fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledWith(true, "REVIEW");
+  });
+
   it("does not enable confirmation for a reviewed but unavailable effect", async () => {
     await fixtureApi.resetFixtures();
     const plan = await api.prepareChatAction(fixtureRef("conversation", "-1001"), "clear_history", fixtureContext);

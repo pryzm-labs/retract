@@ -305,18 +305,18 @@ fn leave_intent_catalog_describes_ordered_cleanup_matching_the_reviewed_plan() {
                 )
                 .await
                 .unwrap();
-            let mut kinds = plan
+            let mut effects = plan
                 .steps
                 .iter()
-                .map(|s| s.descriptor.kind)
+                .map(|s| (s.descriptor.kind, s.descriptor.effect))
                 .collect::<Vec<_>>();
-            kinds.dedup();
+            effects.dedup();
             assert_eq!(
-                kinds,
+                effects,
                 intent
                     .descriptors
                     .iter()
-                    .map(|d| d.kind)
+                    .map(|d| (d.kind, d.effect))
                     .collect::<Vec<_>>()
             );
             assert!(plan.steps.iter().all(|s| !s.targets.is_empty()));

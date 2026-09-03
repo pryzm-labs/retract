@@ -11,21 +11,33 @@ interface ConfirmDialogProps {
   onConfirm: (acknowledged: boolean, typedTitle: string | null) => void;
 }
 
+// Presentation only: familiar copy requires the complete reviewed shape. Batch
+// splitting may repeat message deletion; no other missing/reordered effect is
+// inferred from an operation label. Descriptors still govern availability.
+function hasFamiliarShape(plan: PlanView): boolean {
+  const deletion = "delete_remote_item:removed_for_all_participants";
+  const history = "clear_conversation:removed_for_all_participants";
+  const leave = "leave_conversation:membership_removed";
+  const self = "remove_for_current_account:removed_for_current_account_only";
+  const expected: Record<PlanOperation, string[]> = {
+    selected_messages: [deletion], delete_my_messages: [deletion],
+    clear_history: [history], clear_history_and_leave: [history, leave, self],
+    delete_all_messages_and_leave: [deletion, leave, self],
+    leave_chat: [deletion, leave, self], remove_chat_for_self: [self],
+    delete_by_sender: ["delete_by_actor:removed_for_all_participants"],
+    delete_group: ["delete_conversation:container_destroyed"]
+  };
+  const shape = plan.steps.map(({ descriptor }) => `${descriptor.kind}:${descriptor.effect}`)
+    .filter((pair, index, pairs) => pair !== deletion || index === 0 || pairs[index - 1] !== deletion);
+  return shape.length === expected[plan.operation].length && shape.every((pair, index) => pair === expected[plan.operation][index]);
+}
+
 export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogProps) {
   const [acknowledged, setAcknowledged] = useState(false);
   const [typedTitle, setTypedTitle] = useState("");
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
-  // Adapter operation names select familiar copy only when its stated primary
-  // effect is present. They never authorize a target or replace the effect list.
-  const displayEffects: Record<PlanOperation, string> = {
-    selected_messages: "removed_for_all_participants", delete_my_messages: "removed_for_all_participants",
-    clear_history: "removed_for_all_participants", clear_history_and_leave: "membership_removed",
-    delete_all_messages_and_leave: "membership_removed", leave_chat: "membership_removed",
-    remove_chat_for_self: "removed_for_current_account_only", delete_by_sender: "removed_for_all_participants",
-    delete_group: "container_destroyed"
-  };
-  const operation = plan.steps.some(step => step.descriptor.effect === displayEffects[plan.operation]) ? plan.operation : null;
+  const operation = hasFamiliarShape(plan) ? plan.operation : null;
   const titleRequired = plan.confirmation.exactText !== null;
   const titleMatches = !titleRequired || typedTitle === plan.confirmation.exactText;
   const critical = plan.confirmation.tier === "critical";
@@ -95,7 +107,7 @@ export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogP
 
       <ActionEffects descriptors={plan.steps.map(step => step.descriptor)} targetCounts={plan.steps.map(step => step.targets.length)} label="Ordered plan effects" />
 
-      {(operation === "selected_messages" || operation === "delete_my_messages" || operation === "delete_all_messages_and_leave" || operation === "leave_chat") && (
+      {(plan.operation === "selected_messages" || plan.operation === "delete_my_messages" || plan.operation === "delete_all_messages_and_leave" || plan.operation === "leave_chat") && (
         <div className="dialog-summary">
           <div><strong>{plan.summary.selected}</strong><span>reviewed messages</span></div>
           <div><strong>{plan.summary.deleteForEveryone}</strong><span>delete for everyone</span></div>
