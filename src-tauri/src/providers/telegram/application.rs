@@ -329,13 +329,20 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                 let locator: TelegramActorLocator =
                     serde_json::from_value(actor.resource.locator_payload)
                         .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+                let sender_id: i64 = locator
+                    .native_id
+                    .parse()
+                    .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+                // The reviewed legacy recipe encodes positive User and negative
+                // Chat IDs. Reject a valid locator it cannot preserve rather than
+                // silently changing its tagged identity during plan binding.
+                if (sender_id > 0) != (locator.kind == super::locators::TelegramActorKind::User) {
+                    return Err(safe(ErrorCode::UnsupportedSchema));
+                }
                 self.engine
                     .prepare_sender_action(crate::model::PrepareSenderActionRequest {
                         chat_id: id,
-                        sender_id: locator
-                            .native_id
-                            .parse()
-                            .map_err(|_| safe(ErrorCode::UnsupportedSchema))?,
+                        sender_id,
                     })
                     .await
             } else {

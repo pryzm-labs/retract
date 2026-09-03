@@ -482,3 +482,160 @@ fn compatibility_v2_nonnumeric_recovery_resumes_an_actual_durable_retry_checkpoi
         assert_eq!(state.jobs[0], finished);
     });
 }
+
+#[test]
+fn review_round1_sender_actor_tag_cannot_change_the_reviewed_identity() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use crate::providers::telegram::locators::{TelegramActorKind, TelegramActorLocator};
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        let chat = TelegramActorLocator::new(TelegramActorKind::Chat, "714")
+            .unwrap()
+            .resource(active.scope.account_id);
+        let user = TelegramActorLocator::new(TelegramActorKind::User, "714")
+            .unwrap()
+            .resource(active.scope.account_id);
+        let actor = |resource: retract_domain::ProviderResourceRef| json!({"id":resource.resource_id().unwrap(),"scope":active.scope,"resource":resource});
+        let rejected=harness.call("prepare_intent_v2",&active,json!({"actionId":"delete_by_sender","targets":[fixture()["dirtyRefs"][0]],"actor":actor(chat)}));
+        assert!(
+            rejected.is_err(),
+            "a Chat tag must never become a User sender plan: {rejected:?}"
+        );
+        assert!(harness.store.snapshot().unwrap().plans.is_empty());
+        assert!(gateway.operation_log().await.is_empty());
+        assert_eq!(gateway.chat_read_counts(), (0, 0));
+        let plan=harness.call("prepare_intent_v2",&active,json!({"actionId":"delete_by_sender","targets":[fixture()["dirtyRefs"][0]],"actor":actor(user)})).unwrap();
+        assert_eq!(
+            plan["recipe"]["payload"]["actor"],
+            json!({"kind":"user","nativeId":"714"})
+        );
+        assert_eq!(harness.store.snapshot().unwrap().plans.len(), 1);
+        assert!(gateway.operation_log().await.is_empty());
+        let supported_chat = TelegramActorLocator::new(TelegramActorKind::Chat, "-1002")
+            .unwrap()
+            .resource(active.scope.account_id);
+        // The negative Chat encoding is supported, but this gateway fixture has
+        // no message authored by that chat. It must resolve as missing, not be
+        // relabeled as a User or manufacture another executable plan.
+        let missing=harness.call("prepare_intent_v2",&active,json!({"actionId":"delete_by_sender","targets":[fixture()["dirtyRefs"][0]],"actor":actor(supported_chat)})).unwrap_err();
+        assert_eq!(missing["code"], "not_found");
+        assert_eq!(harness.store.snapshot().unwrap().plans.len(), 1);
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn review_round1_intent_catalog_rejects_malformed_provider_output() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use crate::providers::ports::IntentDescriptor;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let harness = synthetic(directory.path(), io.clone());
+        let request =
+            json!({"actionId":"catalog","targets":[fixture()["messages"][2]["ref"]],"actor":null});
+        let valid: Vec<IntentDescriptor> = serde_json::from_value(
+            harness
+                .call("get_intents_v2", &active, request.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut cases = vec![];
+        let mut bad = valid.clone();
+        bad[0].action_id = String::new();
+        cases.push(bad);
+        let mut bad = valid.clone();
+        bad.push(bad[0].clone());
+        cases.push(bad);
+        let mut bad = valid.clone();
+        bad[0].label = "bad\nlabel".into();
+        cases.push(bad);
+        let mut bad = valid.clone();
+        bad[0].descriptors.clear();
+        cases.push(bad);
+        let mut bad = valid.clone();
+        bad[0].descriptors[0].batch.max_targets = 0;
+        cases.push(bad);
+        let mut bad = valid.clone();
+        bad[0].descriptors[0].availability = retract_domain::Availability::Unavailable;
+        cases.push(bad);
+        for (index, bad) in cases.into_iter().enumerate() {
+            *io.intent_override.lock().unwrap() = Some(bad);
+            assert_eq!(
+                harness
+                    .call("get_intents_v2", &active, request.clone())
+                    .unwrap_err()["code"],
+                "unsupported_schema",
+                "case {index}"
+            );
+            assert!(harness.store.snapshot().unwrap().plans.is_empty());
+            assert!(io.calls.lock().unwrap().is_empty());
+        }
+    });
+}
+
+#[test]
+fn review_round1_retry_preserves_the_native_absolute_deadline_through_latency_and_recovery() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use std::sync::atomic::Ordering;
+        for recover in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let active = context("syntheticContext");
+            let io = Arc::new(SyntheticIo::new(active.clone()));
+            let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(1650);
+            *io.rate_deadline.lock().unwrap() = Some(deadline);
+            io.rate_limit_once.store(true, Ordering::Release);
+            io.preflight_delay_ms.store(150, Ordering::Release);
+            let mut harness = synthetic(directory.path(), io.clone());
+            let plan = harness.prepare(&active, vec![fixture()["messages"][2]["ref"].clone()]);
+            harness.authorize(&active, &plan);
+            let job = harness.start(&active, &plan).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if harness.store.snapshot().unwrap().jobs[0].retry_at.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                harness.store.snapshot().unwrap().jobs[0].retry_at,
+                Some(deadline),
+                "the native absolute deadline must not be rounded down or rebased"
+            );
+            if recover {
+                let checkpoint = std::fs::read(directory.path().join("jobs.enc")).unwrap();
+                harness.service.shutdown().await;
+                let old = Arc::downgrade(&harness.store);
+                drop(harness);
+                assert!(old.upgrade().is_none());
+                std::fs::write(directory.path().join("jobs.enc"), checkpoint).unwrap();
+                *io.active.write().unwrap() = Some(active.clone());
+                harness = synthetic(directory.path(), io.clone());
+                invoke(
+                    &harness.webview,
+                    "get_bootstrap_snapshot_v2",
+                    json!({"contractVersion":2,"context":active,"payload":{}}),
+                )
+                .unwrap();
+            }
+            while chrono::Utc::now() + chrono::Duration::milliseconds(30) < deadline {
+                assert_eq!(io.preflights.lock().unwrap().len(), 1);
+                assert!(io.calls.lock().unwrap().is_empty());
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let finished = harness.settled(&active, job.id).await;
+            assert_eq!(finished.counters.deleted, 1);
+            let preflights = io.preflights.lock().unwrap();
+            assert_eq!(preflights.len(), 2);
+            assert!(preflights[1] >= deadline);
+            assert_eq!(io.calls.lock().unwrap().len(), 1);
+        }
+    });
+}

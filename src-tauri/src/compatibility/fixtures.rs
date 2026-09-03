@@ -216,7 +216,6 @@ pub struct Harness {
     pub webview: tauri::WebviewWindow<tauri::test::MockRuntime>,
     pub service: Arc<ProviderService>,
     pub store: Arc<FoundationStore>,
-    pub connection: Arc<Connection>,
 }
 impl Drop for Harness {
     fn drop(&mut self) {
@@ -234,7 +233,7 @@ impl Drop for Harness {
     }
 }
 impl Harness {
-    pub fn new(connection: Arc<Connection>) -> Self {
+    pub fn new(connection: Arc<dyn ApplicationConnection>) -> Self {
         let service = ProviderService::new(connection.clone());
         let app = commands_v2::register(tauri::test::mock_builder())
             .manage(Arc::new(crate::RuntimeState::new(service.clone())))
@@ -246,8 +245,7 @@ impl Harness {
         Self {
             webview,
             service,
-            store: connection.store.clone(),
-            connection,
+            store: connection.store().unwrap(),
         }
     }
     pub fn call(
@@ -301,6 +299,101 @@ impl Harness {
         .await
         .unwrap()
     }
+}
+
+/// Cold-start composition: open the ciphertext without constructing an engine.
+/// Identity is published through the real durable SessionBinding; only then may
+/// ProviderService request the real scoped Telegram adapter/engine factory.
+pub struct PendingTelegram {
+    pub store: Arc<FoundationStore>,
+    pub gateway: Arc<DemoGateway>,
+    native: VerifiedTelegramIdentity,
+    binding: Arc<SessionBinding>,
+    pub registrations: AtomicUsize,
+}
+impl PendingTelegram {
+    pub async fn reopen(path: &Path, expected: &ActiveContext) -> Arc<Self> {
+        let store = open(path, expected, Arc::new(TelegramPayloadValidator));
+        let native = VerifiedTelegramIdentity::new(
+            TelegramEnvironment::Test,
+            42,
+            expected.session_generation,
+        )
+        .unwrap();
+        let gateway = Arc::new(DemoGateway::with_verified_identity(native.clone()));
+        gateway
+            .append_messages(-1001, 9_007_199_254_740_992, 2)
+            .await;
+        let binding = Arc::new(SessionBinding::default());
+        binding
+            .begin_generation(expected.session_generation)
+            .unwrap();
+        Arc::new(Self {
+            store,
+            gateway,
+            native,
+            binding,
+            registrations: AtomicUsize::new(0),
+        })
+    }
+    pub fn verify(&self) -> ActiveContext {
+        self.binding
+            .publish(
+                &self.store,
+                &self.native,
+                &TelegramAccountProfile {
+                    display_name: "Synthetic account".into(),
+                    username: None,
+                },
+            )
+            .unwrap()
+    }
+}
+#[async_trait]
+impl ApplicationConnection for PendingTelegram {
+    fn context(&self) -> Option<ActiveContext> {
+        self.binding.current()
+    }
+    fn store(&self) -> Option<Arc<FoundationStore>> {
+        Some(self.store.clone())
+    }
+    fn bootstrap(&self) -> Result<BootstrapSnapshot, SafeError> {
+        Ok(BootstrapSnapshot {
+            identity: if self.context().is_some() {
+                IdentityStatus::Ready
+            } else {
+                IdentityStatus::Pending
+            },
+            auth: None,
+            catalog: CatalogProgress::default(),
+            chats: vec![],
+            recent_jobs: vec![],
+            legacy_history: vec![],
+        })
+    }
+    async fn registration(&self) -> Result<Arc<dyn ProviderRegistration>, SafeError> {
+        let active = self
+            .context()
+            .ok_or_else(|| safe(ErrorCode::IdentityUnavailable))?;
+        self.registrations.fetch_add(1, Ordering::AcqRel);
+        let context = Arc::new(
+            EngineContext::new(active.clone(), self.native.clone(), self.binding.clone()).unwrap(),
+        );
+        let repository =
+            Arc::new(FoundationTelegramRepository::new(self.store.clone(), active.scope).unwrap());
+        let engine =
+            CleanerService::new_scoped(self.gateway.clone(), context.clone(), repository).unwrap();
+        Ok(Arc::new(
+            TelegramCompatibilityProvider::new(self.gateway.clone(), context, engine).unwrap(),
+        ))
+    }
+    async fn auth(&self, _: AuthRequest) -> Result<(), SafeError> {
+        Err(safe(ErrorCode::UnsupportedSchema))
+    }
+    async fn retry_identity(&self) -> Result<(), SafeError> {
+        Err(safe(ErrorCode::UnsupportedSchema))
+    }
+    async fn shutdown(&self) {}
 }
 
 pub async fn telegram(path: &Path, active: ActiveContext) -> (Harness, Arc<DemoGateway>) {
@@ -364,6 +457,10 @@ pub struct SyntheticIo {
     pub refreshes: Arc<AtomicUsize>,
     pub invalidate_refresh: Arc<std::sync::atomic::AtomicBool>,
     pub rate_limit_once: Arc<std::sync::atomic::AtomicBool>,
+    pub intent_override: Arc<Mutex<Option<Vec<IntentDescriptor>>>>,
+    pub rate_deadline: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
+    pub preflights: Arc<Mutex<Vec<chrono::DateTime<Utc>>>>,
+    pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 impl SyntheticIo {
     pub fn new(active: ActiveContext) -> Self {
@@ -374,6 +471,10 @@ impl SyntheticIo {
             refreshes: Arc::new(AtomicUsize::new(0)),
             invalidate_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rate_limit_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            intent_override: Arc::new(Mutex::new(None)),
+            rate_deadline: Arc::new(Mutex::new(None)),
+            preflights: Arc::new(Mutex::new(vec![])),
+            preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
@@ -446,10 +547,20 @@ impl FrozenProviderIo for SyntheticIo {
         Ok(())
     }
     async fn preflight(&self, target: &ScopedResourceRef) -> Result<bool, SafeError> {
+        self.preflights.lock().unwrap().push(Utc::now());
+        tokio::time::sleep(std::time::Duration::from_millis(
+            self.preflight_delay_ms.load(Ordering::Acquire),
+        ))
+        .await;
         if self.rate_limit_once.swap(false, Ordering::AcqRel) {
             return Err(SafeError {
                 code: ErrorCode::RateLimited,
-                retry_at: Some(Utc::now() + chrono::Duration::seconds(2)),
+                retry_at: Some(
+                    self.rate_deadline
+                        .lock()
+                        .unwrap()
+                        .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(2)),
+                ),
             });
         }
         Ok(target.resource.locator_payload["messageId"] == "message:part/0007")
@@ -467,6 +578,9 @@ impl FrozenProviderIo for SyntheticIo {
         _: &ActiveContext,
         _: Vec<ScopedResourceRef>,
     ) -> Result<Vec<IntentDescriptor>, SafeError> {
+        if let Some(intents) = self.intent_override.lock().unwrap().clone() {
+            return Ok(intents);
+        }
         Ok(vec![IntentDescriptor {
             action_id: "selected_messages".into(),
             label: "Delete selected".into(),

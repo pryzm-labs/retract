@@ -112,8 +112,9 @@ impl ProviderService {
         if context.is_none()
             && let Some(store) = self.connection.store()
         {
-            crate::providers::lifecycle::block_foreign_jobs(&store, None)
-                .map_err(|_| safe(ErrorCode::StatePersistenceFailed))?;
+            // Absence of verified identity at cold start is not evidence that
+            // persisted work belongs to a foreign or interrupted live session.
+            // Keep its cursor/status/deadline untouched until exact-scope recovery.
             snapshot.recent_jobs = store
                 .snapshot()
                 .map_err(|_| safe(ErrorCode::StatePersistenceFailed))?
@@ -288,7 +289,10 @@ impl ProviderService {
                     .reviewed_lifecycle()
                     .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
                 if operation == "intents" {
-                    encode(lifecycle.intents(&context, intent.targets).await?)?
+                    let intents = lifecycle.intents(&context, intent.targets).await?;
+                    self.check(&context)?;
+                    validate_intents(&intents)?;
+                    encode(intents)?
                 } else {
                     let plan = lifecycle.prepare(&context, intent).await?;
                     self.check(&context)?;
@@ -445,6 +449,32 @@ impl ProviderService {
 pub fn validate_version(raw: &Value) -> Result<(), SafeError> {
     if raw.get("contractVersion").and_then(Value::as_u64) != Some(2) {
         return Err(safe(ErrorCode::UnsupportedContractVersion));
+    }
+    Ok(())
+}
+
+fn validate_intents(intents: &[IntentDescriptor]) -> Result<(), SafeError> {
+    let bounded = |text: &str, max: usize| {
+        !text.trim().is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+    };
+    let mut ids = std::collections::HashSet::new();
+    if intents.len() > 1000 {
+        return Err(safe(ErrorCode::UnsupportedSchema));
+    }
+    for intent in intents {
+        if !bounded(&intent.action_id, 128)
+            || !bounded(&intent.label, 256)
+            || !ids.insert(&intent.action_id)
+            || intent.descriptors.is_empty()
+            || intent.descriptors.len() > 100_000
+        {
+            return Err(safe(ErrorCode::UnsupportedSchema));
+        }
+        for descriptor in &intent.descriptors {
+            descriptor
+                .validate()
+                .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+        }
     }
     Ok(())
 }

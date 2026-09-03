@@ -289,43 +289,95 @@ fn foundation_lifecycle_foreign_account_execution_never_mutates_gateway() {
 #[test]
 fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay() {
     tauri::async_runtime::block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let active = context("context");
-        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
-        let plan = harness.prepare(&active, selected(false));
-        let legacy =
-            crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(&plan)
+        for status in [JobStatus::Running, JobStatus::Queued] {
+            let directory = tempfile::tempdir().unwrap();
+            let active = context("context");
+            let (harness, _) = telegram(directory.path(), active.clone()).await;
+            let plan = harness.prepare(&active, selected(false));
+            let legacy =
+                crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(
+                    &plan,
+                )
                 .unwrap();
-        let mut job =
-            crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
-                &active.scope,
-                &legacy,
-                &crate::model::JobRecord::new(&legacy),
-                true,
+            let mut job =
+                crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
+                    &active.scope,
+                    &legacy,
+                    &crate::model::JobRecord::new(&legacy),
+                    true,
+                )
+                .unwrap();
+            job.status = status;
+            if status == JobStatus::Queued {
+                job.retry_at = Some(chrono::Utc::now() + chrono::Duration::milliseconds(1400));
+            }
+            let id = job.id;
+            harness
+                .store
+                .transaction(|s| {
+                    s.jobs.push(job.clone());
+                    Ok(())
+                })
+                .unwrap();
+            let ciphertext = std::fs::read(directory.path().join("jobs.enc")).unwrap();
+            let old = Arc::downgrade(&harness.store);
+            drop(harness);
+            assert!(old.upgrade().is_none());
+            let mut reconnected = active.clone();
+            reconnected.session_generation = uuid::Uuid::new_v4();
+            let pending = PendingTelegram::reopen(directory.path(), &reconnected).await;
+            let reopened = Harness::new(pending.clone());
+            for _ in 0..2 {
+                let snapshot = invoke(
+                    &reopened.webview,
+                    "get_bootstrap_snapshot_v2",
+                    json!({"contractVersion":2,"context":null,"payload":{}}),
+                )
+                .unwrap();
+                assert_eq!(snapshot["context"], Value::Null);
+                assert_eq!(snapshot["payload"]["identity"]["state"], "pending");
+                assert_eq!(pending.registrations.load(Ordering::Acquire), 0);
+                assert!(pending.gateway.operation_log().await.is_empty());
+                assert!(pending.gateway.current_reach_calls().await.is_empty());
+                assert_eq!(pending.gateway.chat_read_counts(), (0, 0));
+            }
+            let state = encrypted_state(directory.path(), &active, KEY).unwrap();
+            assert_eq!(
+                state.jobs[0], job,
+                "pending identity must preserve the entire checkpoint"
+            );
+            assert_eq!(
+                std::fs::read(directory.path().join("jobs.enc")).unwrap(),
+                ciphertext
+            );
+            assert_ne!(
+                state.jobs.iter().find(|j| j.id == id).unwrap().status,
+                JobStatus::Completed
+            );
+            assert_eq!(pending.verify(), reconnected);
+            invoke(
+                &reopened.webview,
+                "get_bootstrap_snapshot_v2",
+                json!({"contractVersion":2,"context":reconnected,"payload":{}}),
             )
             .unwrap();
-        job.status = JobStatus::Running;
-        let id = job.id;
-        harness
-            .store
-            .transaction(|s| {
-                s.jobs.push(job);
-                Ok(())
-            })
-            .unwrap();
-        *harness.connection.active.write().unwrap() = None;
-        invoke(
-            &harness.webview,
-            "get_bootstrap_snapshot_v2",
-            json!({"contractVersion":2,"context":null,"payload":{}}),
-        )
-        .unwrap();
-        let state = encrypted_state(directory.path(), &active, KEY).unwrap();
-        assert!(gateway.operation_log().await.is_empty());
-        assert_ne!(
-            state.jobs.iter().find(|j| j.id == id).unwrap().status,
-            JobStatus::Completed
-        );
+            if let Some(deadline) = job.retry_at {
+                while chrono::Utc::now() + chrono::Duration::milliseconds(40) < deadline {
+                    assert!(pending.gateway.operation_log().await.is_empty());
+                    assert!(pending.gateway.current_reach_calls().await.is_empty());
+                    assert_eq!(reopened.store.snapshot().unwrap().jobs[0].next_batch, 0);
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            let finished = reopened.settled(&reconnected, id).await;
+            assert_eq!(finished.status, JobStatus::Completed);
+            assert_eq!(finished.counters.deleted, 2);
+            assert_eq!(pending.registrations.load(Ordering::Acquire), 1);
+            assert_eq!(
+                pending.gateway.delete_calls().await,
+                vec![(-1001, vec![9_007_199_254_740_992, 9_007_199_254_740_993])]
+            );
+        }
     });
 }
 

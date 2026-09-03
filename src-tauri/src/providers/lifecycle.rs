@@ -55,6 +55,7 @@ pub trait FrozenBatchDriver: Sync {
     type Target: Clone + Send + Sync;
     type Batch: Send + Sync;
     type Error: Send + Sync;
+    type Retry: Send + Sync;
     fn targets<'a>(&self, batch: &'a Self::Batch) -> &'a [Self::Target];
     async fn cancelled(&self) -> Result<bool, Self::Error>;
     async fn reach(&self, batch: &Self::Batch, target: &Self::Target) -> Result<bool, Self::Error>;
@@ -63,10 +64,10 @@ pub trait FrozenBatchDriver: Sync {
         batch: &Self::Batch,
         targets: &[Self::Target],
     ) -> Result<(), Self::Error>;
-    fn retry_seconds(&self, error: &Self::Error) -> Option<u64>;
+    fn retry(&self, error: &Self::Error) -> Option<Self::Retry>;
     fn fatal(&self, error: &Self::Error) -> bool;
     fn uncertain(&self, error: &Self::Error) -> bool;
-    async fn wait(&self, seconds: u64) -> Result<bool, Self::Error>;
+    async fn wait(&self, retry: Self::Retry) -> Result<bool, Self::Error>;
     async fn progress(&self, progress: FrozenProgress<'_, Self::Error>) -> Result<(), Self::Error>;
 }
 
@@ -119,9 +120,9 @@ pub async fn run_frozen_batches<D: FrozenBatchDriver>(
                 driver.mutate(&batch, &allowed).await
             };
             if let Err(error) = &result
-                && let Some(seconds) = driver.retry_seconds(error)
+                && let Some(retry) = driver.retry(error)
             {
-                if driver.wait(seconds).await? {
+                if driver.wait(retry).await? {
                     return Ok(true);
                 }
                 continue;
@@ -165,7 +166,7 @@ impl ScopedRepository {
         if !store.snapshot()?.sources.iter().any(|s| s.scope() == scope) {
             return Err(AppError::InvalidRequest("stale_context".into()));
         }
-        block_foreign_jobs(&store, Some(&scope))?;
+        block_foreign_jobs(&store, &scope)?;
         Ok(Self {
             store,
             scope,
@@ -266,9 +267,9 @@ pub fn resumable(plan: &RemediationPlan, job: &ScopedJobRecord) -> bool {
             )
         })
 }
-pub fn block_foreign_jobs(store: &FoundationStore, scope: Option<&Scope>) -> Result<(), AppError> {
+pub fn block_foreign_jobs(store: &FoundationStore, scope: &Scope) -> Result<(), AppError> {
     if !store.snapshot()?.jobs.iter().any(|j| {
-        scope != Some(&j.scope)
+        scope != &j.scope
             && !j.status.is_terminal()
             && j.status != retract_domain::JobStatus::Blocked
     }) {
@@ -276,7 +277,7 @@ pub fn block_foreign_jobs(store: &FoundationStore, scope: Option<&Scope>) -> Res
     }
     store.transaction(|state| {
         for job in &mut state.jobs {
-            if scope != Some(&job.scope) && !job.status.is_terminal() {
+            if scope != &job.scope && !job.status.is_terminal() {
                 if job.status == retract_domain::JobStatus::Running {
                     job.status = if job.counters.deleted > 0 {
                         retract_domain::JobStatus::Partial
@@ -286,11 +287,7 @@ pub fn block_foreign_jobs(store: &FoundationStore, scope: Option<&Scope>) -> Res
                     job.diagnostics.push(safe(ErrorCode::AmbiguousOutcome));
                 } else {
                     job.status = retract_domain::JobStatus::Blocked;
-                    job.diagnostics.push(safe(if scope.is_some() {
-                        ErrorCode::ScopeMismatch
-                    } else {
-                        ErrorCode::IdentityUnavailable
-                    }));
+                    job.diagnostics.push(safe(ErrorCode::ScopeMismatch));
                 }
                 job.retry_at = None;
             }

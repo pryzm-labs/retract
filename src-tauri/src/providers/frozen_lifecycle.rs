@@ -431,6 +431,7 @@ impl FrozenBatchDriver for Driver<'_> {
     type Target = ScopedResourceRef;
     type Batch = Vec<ScopedResourceRef>;
     type Error = SafeError;
+    type Retry = chrono::DateTime<Utc>;
     fn targets<'a>(&self, batch: &'a Self::Batch) -> &'a [Self::Target] {
         batch
     }
@@ -470,11 +471,9 @@ impl FrozenBatchDriver for Driver<'_> {
         }
         result
     }
-    fn retry_seconds(&self, error: &SafeError) -> Option<u64> {
+    fn retry(&self, error: &SafeError) -> Option<Self::Retry> {
         if error.code == ErrorCode::RateLimited {
-            error
-                .retry_at
-                .map(|d| (d - Utc::now()).num_seconds().max(1) as u64)
+            error.retry_at
         } else {
             None
         }
@@ -491,8 +490,7 @@ impl FrozenBatchDriver for Driver<'_> {
     fn uncertain(&self, error: &SafeError) -> bool {
         error.code == ErrorCode::AmbiguousOutcome
     }
-    async fn wait(&self, seconds: u64) -> Result<bool, SafeError> {
-        let deadline = Utc::now() + chrono::Duration::seconds(seconds.min(86400) as i64);
+    async fn wait(&self, deadline: chrono::DateTime<Utc>) -> Result<bool, SafeError> {
         self.lifecycle
             .transition(|s| {
                 let j = s.1.iter_mut().find(|j| j.id == self.id).unwrap();

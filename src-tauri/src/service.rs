@@ -1088,6 +1088,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
     type Target = i64;
     type Batch = cleaner_domain::DeletionBatch;
     type Error = AppError;
+    type Retry = u64;
     fn targets<'a>(&self, batch: &'a Self::Batch) -> &'a [i64] {
         &batch.message_ids
     }
@@ -1109,7 +1110,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
             .delete_messages_for_everyone(batch.chat_id, ids)
             .await
     }
-    fn retry_seconds(&self, error: &AppError) -> Option<u64> {
+    fn retry(&self, error: &AppError) -> Option<u64> {
         telegram_retry_after(error)
     }
     fn fatal(&self, error: &AppError) -> bool {
