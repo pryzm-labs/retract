@@ -51,11 +51,12 @@ COPY --chown=retract:retract vendor/nanoid/ ./vendor/nanoid/
 RUN --mount=type=cache,id=retract-npm-cache,target=/home/retract/.npm,uid=10001,gid=10001,sharing=locked \
     npm ci --ignore-scripts --no-audit --no-fund
 
-# Cargo fetch is the only Rust dependency step with network access. Both lock
+# Cargo fetch is the only Rust dependency step with network access. All lock
 # files are mandatory, and subsequent compilation is explicitly offline.
 COPY --chown=retract:retract . .
 RUN --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
     cargo fetch --locked --manifest-path crates/cleaner-domain/Cargo.toml \
+    && cargo fetch --locked --manifest-path crates/retract-domain/Cargo.toml \
     && cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
 FROM dependencies AS check-base
@@ -82,9 +83,11 @@ FROM check-base AS checks
 # network. Dependency code may execute here, but it cannot reach credentials,
 # the host filesystem, Docker's socket, or the network through this build.
 RUN --network=none npm test
+RUN --network=none npm run test:release
 RUN --network=none npm run check:public-repo
 RUN --network=none npm run verify:production-bundle
 RUN --network=none cargo fmt --manifest-path crates/cleaner-domain/Cargo.toml -- --check \
+    && cargo fmt --manifest-path crates/retract-domain/Cargo.toml -- --check \
     && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
 # Cargo's registry and compiled targets live in named BuildKit caches instead
@@ -95,6 +98,8 @@ RUN --network=none \
     --mount=type=cache,id=retract-cargo-target-${TARGETARCH},target=/home/retract/.cache/retract-target,uid=10001,gid=10001,sharing=locked \
     cargo test --offline --locked --manifest-path crates/cleaner-domain/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path crates/cleaner-domain/Cargo.toml --all-targets -- -D warnings \
+    && cargo test --offline --locked --manifest-path crates/retract-domain/Cargo.toml \
+    && cargo clippy --offline --locked --manifest-path crates/retract-domain/Cargo.toml --all-targets -- -D warnings \
     && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 

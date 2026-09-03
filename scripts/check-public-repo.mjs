@@ -39,13 +39,15 @@ const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8
 const tauri = JSON.parse(readFileSync(resolve(root, "src-tauri/tauri.conf.json"), "utf8"));
 const applicationCargo = cargoVersion("src-tauri/Cargo.toml");
 const domainCargo = cargoVersion("crates/cleaner-domain/Cargo.toml");
+const neutralDomainCargo = cargoVersion("crates/retract-domain/Cargo.toml");
 const expectedNode = readFileSync(resolve(root, ".nvmrc"), "utf8").trim();
 
 if (packageJson.license !== "MIT") errors.push("package.json license must be exactly MIT");
 if (applicationCargo.license !== "MIT") errors.push("src-tauri Cargo license must be exactly MIT");
 if (domainCargo.license !== "MIT") errors.push("domain Cargo license must be exactly MIT");
+if (neutralDomainCargo.license !== "MIT") errors.push("neutral domain Cargo license must be exactly MIT");
 if (packageJson.engines?.node !== expectedNode) errors.push(`package.json engines.node must equal ${expectedNode}`);
-if (new Set([packageJson.version, tauri.version, applicationCargo.version, domainCargo.version]).size !== 1) {
+if (new Set([packageJson.version, tauri.version, applicationCargo.version, domainCargo.version, neutralDomainCargo.version]).size !== 1) {
   errors.push("package, Tauri, and Cargo versions must match");
 }
 

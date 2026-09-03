@@ -21,6 +21,7 @@ async-trait = "0.1"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 cleaner-domain = { path = "../crates/cleaner-domain" }
+retract-domain = { path = "../crates/retract-domain" }
 futures-util = "0.3"
 libloading = "0.9.0"
 serde = { version = "1", features = ["derive"] }
