@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-03-provider-foundation-design.md`
 
+**Completion tracking (2026-09-04):** Tasks 1–8 are implemented and independently reviewed, including their scoped fixes. Checked historical RED steps record evidence captured before implementation, not intentionally failing tests left in the current suite. Task 9 owns final integration checks and documentation; whole-branch review remains controller-owned. Native macOS packaging/live Telegram and native/browser modal geometry need separate evidence and are not implied by Docker or jsdom results.
+
 ## Global Constraints
 
 - The bridge is transitional; it does not replace TDLib, reimplement Telegram policy, or relocate the entire legacy service.
@@ -67,7 +69,7 @@ Frontend runtime validators and keys live in `src/providers/{contract,identity}.
 - Consumes: current `messageKey`, desktop adapter, `CleanerService`, `SecureJobStore`, and synthetic gateway helpers.
 - Produces: a shared synthetic fixture and named RED tests, without production ID changes; `focused-checks` Docker target accepting `RETRACT_CHECK`.
 
-- [ ] Record the successful baseline `npm run container:check` result before changes. Refactor the Docker check environment into a shared check base and add a sibling focused target using the same non-root user, offline mode, and named Cargo caches:
+- [x] Record the successful baseline `npm run container:check` result before changes. Refactor the Docker check environment into a shared check base and add a sibling focused target using the same non-root user, offline mode, and named Cargo caches:
 
 ```dockerfile
 FROM check-base AS focused-checks
@@ -80,9 +82,9 @@ RUN --network=none \
 
 Keep the existing `checks` and `frontend-artifact` targets intact. Add `.worktrees` and `.superpowers` to `.dockerignore` so scratch reports and other checkouts neither enter builds nor invalidate caches. Run existing focused frontend and Rust tests through this target before adding expected failures.
 
-- [ ] Write complete synthetic fixture records using account UUIDs `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa` and `bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`, source UUIDs `11111111-1111-4111-8111-111111111111` and `22222222-2222-4222-8222-222222222222`, providers `telegram` and `synthetic`, and native strings `9007199254740992`, `9007199254740993`, `message:part/0007`, and `-1001`. Include full legacy-compatible display fields and v2 scope/ref data; no real account data.
+- [x] Write complete synthetic fixture records using account UUIDs `aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa` and `bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`, source UUIDs `11111111-1111-4111-8111-111111111111` and `22222222-2222-4222-8222-222222222222`, providers `telegram` and `synthetic`, and native strings `9007199254740992`, `9007199254740993`, `message:part/0007`, and `-1001`. Include full legacy-compatible display fields and v2 scope/ref data; no real account data.
 
-- [ ] Add real key/selection and desktop IPC boundary tests. Begin with this current-boundary regression (fixture objects retain extra scope fields at runtime):
+- [x] Add real key/selection and desktop IPC boundary tests. Begin with this current-boundary regression (fixture objects retain extra scope fields at runtime):
 
 ```ts
 const first = fixture.messages[0];
@@ -93,7 +95,7 @@ expect(messageKey(first as unknown as MessageSnapshot))
 
 Also test two distinct large-ID targets surviving selection/preparation, a stale old-context refresh not clearing the current selection, and desktop dispatch using v2 context rather than naked numeric refs. Render actual components and mock only IPC/network boundaries. Derive expected target strings literally, not by the tested key helper.
 
-- [ ] Add backend RED assertions through the existing request/service/store paths: new string refs must not lose precision or scope, account changes must change the plan binding, jobs must retain scoped dirty refs after an actual encrypted save/reload, and a request for another account must not mutate the synthetic gateway. Initially drive the legacy parser/engine to expose its missing v2 behavior; do not implement a test-only replacement engine. For example, the existing `MessageRef` parser rejects the required string wire shape:
+- [x] Add backend RED assertions through the existing request/service/store paths: new string refs must not lose precision or scope, account changes must change the plan binding, jobs must retain scoped dirty refs after an actual encrypted save/reload, and a request for another account must not mutate the synthetic gateway. Initially drive the legacy parser/engine to expose its missing v2 behavior; do not implement a test-only replacement engine. For example, the existing `MessageRef` parser rejects the required string wire shape:
 
 ```rust
 let parsed = serde_json::from_value::<crate::model::MessageRef>(
@@ -104,7 +106,7 @@ assert!(parsed.is_ok(), "the application boundary must accept lossless string id
 
 This is a migration RED assertion, not a demand to change the frozen legacy DTO; Task 6 rewires it to the real version-2 parser. Add distinct plan/job/recovery/refresh assertions so this parser test is not the entire lifecycle gate.
 
-- [ ] Run and record the expected failures separately so a frontend failure cannot hide the Rust results:
+- [x] Run and record the expected failures separately so a frontend failure cannot hide the Rust results:
 
 ```bash
 docker buildx build --target focused-checks --build-arg 'RETRACT_CHECK=npm test -- src/provider-lifecycle.test.tsx' --output type=cacheonly --progress plain .
@@ -125,9 +127,9 @@ Failures must name missing identity/scope behavior, not missing modules, syntax 
 - Consumes: the shared contract decisions above, Task 1 fixture and recorded RED evidence.
 - Produces: `Scope`, `ActiveContext`, `ProviderResourceRef`, `ScopedResourceRef`, normalized records, descriptors/errors, `RemediationPlan`, `ScopedJobRecord`; `ProviderResourceRef::resource_id() -> Result<Uuid, DomainError>`, `RemediationPlan::seal() -> Result<(), DomainError>`, `RemediationPlan::validate() -> Result<(), DomainError>`.
 
-- [ ] Write failing contract tests for provider-key validation, UUID string serialization, scope equality, provider/account/source mismatch, canonical UUID stability, and conflicting-reference detection. Use literal fixture values. Assert distinct resources for the two large native strings, not numeric casts.
+- [x] Write failing contract tests for provider-key validation, UUID string serialization, scope equality, provider/account/source mismatch, canonical UUID stability, and conflicting-reference detection. Use literal fixture values. Assert distinct resources for the two large native strings, not numeric casts.
 
-- [ ] Implement typed validated IDs and refs. Provider keys use lowercase ASCII `[a-z][a-z0-9_-]{0,63}`. Validate nonempty bounded schema/canonical fields, exact scope agreement, and derived resource IDs. Use standard UUID v5 and the shared canonical tuple; use existing serde/chrono/uuid/sha2/thiserror versions, enabling uuid's v5 feature. Do not introduce network/filesystem dependencies.
+- [x] Implement typed validated IDs and refs. Provider keys use lowercase ASCII `[a-z][a-z0-9_-]{0,63}`. Validate nonempty bounded schema/canonical fields, exact scope agreement, and derived resource IDs. Use standard UUID v5 and the shared canonical tuple; use existing serde/chrono/uuid/sha2/thiserror versions, enabling uuid's v5 feature. Do not introduce network/filesystem dependencies.
 
 ```rust
 pub fn resource_id(&self) -> Result<Uuid, DomainError> {
@@ -139,9 +141,9 @@ pub fn resource_id(&self) -> Result<Uuid, DomainError> {
 }
 ```
 
-- [ ] Define full normalized records from parent-design sections “Account and source”, “Conversation”, “Content item”, and “Attachments”: IDs, provenance, evidence/timestamps, inert attachments, optional parent/reply, privacy findings and versioned metadata. Neutral records retain an opaque versioned metadata envelope; Tasks 4–5 define the outgoing/pin/grouping/filter metadata type inside the Telegram adapter, not in this neutral crate. Reuse existing privacy-kind semantics; do not duplicate the detector implementation.
+- [x] Define full normalized records from parent-design sections “Account and source”, “Conversation”, “Content item”, and “Attachments”: IDs, provenance, evidence/timestamps, inert attachments, optional parent/reply, privacy findings and versioned metadata. Neutral records retain an opaque versioned metadata envelope; Tasks 4–5 define the outgoing/pin/grouping/filter metadata type inside the Telegram adapter, not in this neutral crate. Reuse existing privacy-kind semantics; do not duplicate the detector implementation.
 
-- [ ] Add tests that alter each fingerprint-bound field, reorder object insertion, reorder unordered targets, and reorder ordered action steps. Implement canonical JSON encoding, target sorting/deduplication with conflicting-identity rejection, scope validation, confirmation requirements, and restart policy. The recipe excludes its own fingerprint to avoid circular hashing. A sealed plan validates by recomputing its fingerprint.
+- [x] Add tests that alter each fingerprint-bound field, reorder object insertion, reorder unordered targets, and reorder ordered action steps. Implement canonical JSON encoding, target sorting/deduplication with conflicting-identity rejection, scope validation, confirmation requirements, and restart policy. The recipe excludes its own fingerprint to avoid circular hashing. A sealed plan validates by recomputing its fingerprint.
 
 ```rust
 let original = fixture_plan();
@@ -153,11 +155,11 @@ reversed_steps.steps.reverse();
 assert!(reversed_steps.validate().is_err());
 ```
 
-- [ ] Add all action/effect/availability and provider/application error variants specified by the design. Map safe messages from codes; no arbitrary error details bag. Define blocked jobs and explicit legacy-history types, not guessed account scope.
+- [x] Add all action/effect/availability and provider/application error variants specified by the design. Map safe messages from codes; no arbitrary error details bag. Define blocked jobs and explicit legacy-history types, not guessed account scope.
 
-- [ ] Generate/update Cargo locks inside the pinned container, preserving unrelated locked versions. Export only generated lockfiles. Add the new crate to strict Docker fetch/test/fmt/Clippy, npm full checks, Dependabot, MIT/version consistency, and release version-update tests. Test release metadata against a temporary fixture repository rather than source-text assertions.
+- [x] Generate/update Cargo locks inside the pinned container, preserving unrelated locked versions. Export only generated lockfiles. Add the new crate to strict Docker fetch/test/fmt/Clippy, npm full checks, Dependabot, MIT/version consistency, and release version-update tests. Test release metadata against a temporary fixture repository rather than source-text assertions.
 
-- [ ] Run focused domain contracts and release metadata tests, format/Clippy all new targets, and unchanged cleaner-domain tests. Commit the domain and its build integration. Task 1 end-to-end tests may remain RED until their production consumers are migrated.
+- [x] Run focused domain contracts and release metadata tests, format/Clippy all new targets, and unchanged cleaner-domain tests. Commit the domain and its build integration. Task 1 end-to-end tests may remain RED until their production consumers are migrated.
 
 ---
 
@@ -172,7 +174,7 @@ assert!(reversed_steps.validate().is_err());
 - Produces: `FoundationState` with identities, sources, plans, jobs, legacy history and migration provenance; `StoreBinding { provider: ProviderKey, profile: String }`; `FoundationStore::open(profile: PathBuf, binding: StoreBinding) -> Result<Arc<Self>, AppError>`, `snapshot() -> Result<FoundationState, AppError>`, `transaction<T>(&self, change: impl FnOnce(&mut FoundationState) -> Result<T, AppError>) -> Result<T, AppError>`. The provider adapter/runtime supplies the expected binding from backend configuration, never frontend display data. Include it explicitly in authenticated associated data and validate row ownership; do not infer the provider from directory-name conventions.
 - Test constructors inject a key/profile and private temporary path without touching the real vault. Production uses the existing job-store key through the existing cache.
 
-- [ ] Write RED migration tests using the frozen `RTRCT01`/`RTRCT02` ciphertext fixtures and real temporary files. Cover exact backup-byte preservation, terminal history, every old nonterminal status becoming failed/partial with `migration_requires_new_review`, no inferred account, unknown/corrupt headers, wrong profile, and missing active file with existing backup/artifacts.
+- [x] Write RED migration tests using the frozen `RTRCT01`/`RTRCT02` ciphertext fixtures and real temporary files. Cover exact backup-byte preservation, terminal history, every old nonterminal status becoming failed/partial with `migration_requires_new_review`, no inferred account, unknown/corrupt headers, wrong profile, and missing active file with existing backup/artifacts.
 
 ```rust
 let before = std::fs::read(&legacy_path).unwrap();
@@ -184,11 +186,11 @@ assert!(store.snapshot().unwrap().legacy_history.iter().all(|row| !row.executabl
 
 `open_fixture_store` is a test utility wrapping the production store constructor with a synthetic key, not an alternate migration implementation.
 
-- [ ] Extract reusable authenticated read/write/key access from `secure_store.rs` without changing the legacy decoder/vault contract. Implement `RTRCT03`, schema/profile/provider AAD, private file permissions, and an interprocess exclusive profile lock. A second independent handle/process must report `profile_in_use`; within-process callers share the same `Arc`.
+- [x] Extract reusable authenticated read/write/key access from `secure_store.rs` without changing the legacy decoder/vault contract. Implement `RTRCT03`, schema/profile/provider AAD, private file permissions, and an interprocess exclusive profile lock. A second independent handle/process must report `profile_in_use`; within-process callers share the same `Arc`.
 
-- [ ] Implement migration exactly in spec section 7: exclusive byte-for-byte backup creation and sync; transform legacy rows without assigning scope; private new file; decrypt/validate the actual candidate; atomic replace/sync; keep backup; no automatic fallback. Fresh profiles initialize v3 only if no migration evidence exists. Setup-only mode never creates verified live state with the setup key.
+- [x] Implement migration exactly in spec section 7: exclusive byte-for-byte backup creation and sync; transform legacy rows without assigning scope; private new file; decrypt/validate the actual candidate; atomic replace/sync; keep backup; no automatic fallback. Fresh profiles initialize v3 only if no migration evidence exists. Setup-only mode never creates verified live state with the setup key.
 
-- [ ] Write RED transactional tests for failed private write, failed verification, and concurrent stale snapshots. Implement a single serialized transaction that clones the last committed state, applies/validates the change, durably saves, then publishes it. If replacement succeeded but final durability confirmation fails, quarantine the writer and reload/validate before another transaction; never keep writing from a known stale in-memory snapshot.
+- [x] Write RED transactional tests for failed private write, failed verification, and concurrent stale snapshots. Implement a single serialized transaction that clones the last committed state, applies/validates the change, durably saves, then publishes it. If replacement succeeded but final durability confirmation fails, quarantine the writer and reload/validate before another transaction; never keep writing from a known stale in-memory snapshot.
 
 ```rust
 let candidate = current.clone();
@@ -199,9 +201,9 @@ let candidate = current.clone();
 
 Use real failure-producing paths/permissions or narrowly injected filesystem operations in test utilities. Production objects do not expose test-only cleanup methods.
 
-- [ ] Validate plans/fingerprints, unique identities, plan/job references, source/account relationships, cursor bounds, and content-free provider recipes on load/commit. Unknown provider recipe versions remain non-executable until validated by the adapter.
+- [x] Validate plans/fingerprints, unique identities, plan/job references, source/account relationships, cursor bounds, and content-free provider recipes on load/commit. Unknown provider recipe versions remain non-executable until validated by the adapter.
 
-- [ ] Run the persistence suite, all existing secure-store tests, and Clippy in Docker. Confirm old binaries' reader rejects the current v3 header while the backup still decodes historically. Commit the store/migration.
+- [x] Run the persistence suite, all existing secure-store tests, and Clippy in Docker. Confirm old binaries' reader rejects the current v3 header while the backup still decodes historically. Commit the store/migration.
 
 ---
 
@@ -216,11 +218,11 @@ Use real failure-producing paths/permissions or narrowly injected filesystem ope
 - Produces: `ProviderRegistry::register(Arc<dyn ProviderRegistration>) -> Result<(), ProviderError>`, `get(&ProviderKey) -> Result<Arc<dyn ProviderRegistration>, ProviderError>`; focused ports matching the parent design; `SessionBinding` that validates/invalidates `ActiveContext`; typed Telegram locator encode/decode/normalize helpers.
 - Add `TelegramGateway::verified_identity() -> Option<VerifiedTelegramIdentity>`; the type contains backend-verified environment/user ID and session generation. Setup returns `None`; synthetic gateways return only explicit test identities.
 
-- [ ] Add RED registry tests for duplicate keys, unknown providers, missing ports, and a nonnumeric synthetic query provider. Implement explicit dispatch, descriptor capability data, query pagination/resolve contracts, remediation preflight/batch/verification contracts, typed connection state, and import inspection/sink contracts without a production archive implementation. Define their request/result structs in `ports.rs`; do not use success-returning stubs for unsupported ports.
+- [x] Add RED registry tests for duplicate keys, unknown providers, missing ports, and a nonnumeric synthetic query provider. Implement explicit dispatch, descriptor capability data, query pagination/resolve contracts, remediation preflight/batch/verification contracts, typed connection state, and import inspection/sink contracts without a production archive implementation. Define their request/result structs in `ports.rs`; do not use success-returning stubs for unsupported ports.
 
-- [ ] Add RED locator tests for large/signed IDs, user-vs-chat actors, same message ID in different chats, wrong canonical keys, unknown schemas/fields, out-of-range values, and noncanonical decimal forms. Implement serde typed payloads with `deny_unknown_fields`, canonical tuple keys, and account-namespace UUID derivation. Native parsing is confined to this module.
+- [x] Add RED locator tests for large/signed IDs, user-vs-chat actors, same message ID in different chats, wrong canonical keys, unknown schemas/fields, out-of-range values, and noncanonical decimal forms. Implement serde typed payloads with `deny_unknown_fields`, canonical tuple keys, and account-namespace UUID derivation. Native parsing is confined to this module.
 
-- [ ] Add RED production TDJSON tests for ready-before-`getMe`, failed/malformed `getMe`, sign-out, reconnect, and an account changing during an asynchronous request. Implement identity only after valid authenticated `getMe`; clear it on nonready transitions; use a new generation per authenticated session. Do not change the existing auth input flow or initiate global catalog refresh for identity lookup.
+- [x] Add RED production TDJSON tests for ready-before-`getMe`, failed/malformed `getMe`, sign-out, reconnect, and an account changing during an asynchronous request. Implement identity only after valid authenticated `getMe`; clear it on nonready transitions; use a new generation per authenticated session. Do not change the existing auth input flow or initiate global catalog refresh for identity lookup.
 
 ```rust
 assert!(gateway.verified_identity().is_none());
@@ -229,9 +231,9 @@ assert!(gateway.verified_identity().is_none());
 // Resolve getMe with a valid synthetic user, then verify its identity is visible.
 ```
 
-- [ ] Persist verified identity/source mappings transactionally before returning active context. Reuse IDs across rename/restart; separate production/test environments and different accounts. Reject failed persistence without publishing a transient context. Invalidated contexts cannot be reactivated through display data.
+- [x] Persist verified identity/source mappings transactionally before returning active context. Reuse IDs across rename/restart; separate production/test environments and different accounts. Reject failed persistence without publishing a transient context. Invalidated contexts cannot be reactivated through display data.
 
-- [ ] Run provider/locator/TDJSON identity tests plus the existing live-gateway characterization suite. Commit registry and identity foundations.
+- [x] Run provider/locator/TDJSON identity tests plus the existing live-gateway characterization suite. Commit registry and identity foundations.
 
 ---
 
@@ -246,17 +248,17 @@ assert!(gateway.verified_identity().is_none());
 - Produces: a `TelegramCompatibilityProvider` implementing query/remediation wrappers and a scoped legacy-engine context. `CleanerService::new_scoped(gateway: Arc<dyn TelegramGateway>, context: Arc<EngineContext>, repository: Arc<dyn TelegramStateRepository>) -> Result<Arc<Self>, AppError>` constructs a service for one verified account/source; production no longer uses an unscoped constructor. `EngineContext` owns the immutable verified context, the revocable session binding, and the plan-binding hook; the repository never invents account identity.
 - Introduce an internal `TelegramStateRepository` port with `load() -> Result<PersistedState, AppError>` and `save(&PersistedState) -> Result<(), AppError>`. The production implementation projects/updates only its validated scope within v3; the legacy store implementation exists only for historical test coverage.
 
-- [ ] Write RED tests for same targets under different accounts/sources producing different fingerprints, recipe-vs-target disagreement, stale identity before mutation, and a changed context while the owner-authentication prompt is pending. Use actual plan builders/executor and mock only the native authentication prompt and gateway I/O.
+- [x] Write RED tests for same targets under different accounts/sources producing different fingerprints, recipe-vs-target disagreement, stale identity before mutation, and a changed context while the owner-authentication prompt is pending. Use actual plan builders/executor and mock only the native authentication prompt and gateway I/O.
 
-- [ ] Normalize query results and translate all current operations into backend action descriptors and ordered effects. Keep the existing Telegram capability/policy implementation as source of truth. Broad operations retain explicit broad semantics; permanent destruction remains independent. Store a typed version-1 Telegram execution recipe excluding its fingerprint field.
+- [x] Normalize query results and translate all current operations into backend action descriptors and ordered effects. Keep the existing Telegram capability/policy implementation as source of truth. Broad operations retain explicit broad semantics; permanent destruction remains independent. Store a typed version-1 Telegram execution recipe excluding its fingerprint field.
 
-- [ ] Add one plan-binding hook before persistence/review. It creates/seals the neutral envelope, then assigns its fingerprint to the legacy plan before any `PlanView` or grant exists. The v3 repository verifies envelope/recipe/legacy-plan agreement when loading and saving. Never authorize an inner native fingerprint separately.
+- [x] Add one plan-binding hook before persistence/review. It creates/seals the neutral envelope, then assigns its fingerprint to the legacy plan before any `PlanView` or grant exists. The v3 repository verifies envelope/recipe/legacy-plan agreement when loading and saving. Never authorize an inner native fingerprint separately.
 
-- [ ] Extend grants with scope/session generation and recheck after the native prompt and before consumption. Use a guarded gateway/session handle to check identity before every provider call and after waits. A live handle cannot silently become a different account. Preserve existing batch/preflight/cleanup ordering and duplicate-start rejection.
+- [x] Extend grants with scope/session generation and recheck after the native prompt and before consumption. Use a guarded gateway/session handle to check identity before every provider call and after waits. A live handle cannot silently become a different account. Preserve existing batch/preflight/cleanup ordering and duplicate-start rejection.
 
-- [ ] Replace ignored recovery persistence results with fail-closed outcomes. Ensure failed saves do not leave executable plans/jobs published in memory, and prevent out-of-order per-scope snapshots overwriting advanced progress. Serialize state transitions through the repository; introduce focused helpers instead of copying the execution loop.
+- [x] Replace ignored recovery persistence results with fail-closed outcomes. Ensure failed saves do not leave executable plans/jobs published in memory, and prevent out-of-order per-scope snapshots overwriting advanced progress. Serialize state transitions through the repository; introduce focused helpers instead of copying the execution loop.
 
-- [ ] Write and pass recovery tests: legacy rows never enter the scoped executor; matching authorized frozen v3 jobs resume at a valid cursor; other accounts become `blocked`; blocked jobs permit changing settings; broad/ambiguous/unknown-schema work requires review; failed progress save prevents the next call. Keep all historical legacy service tests runnable against their explicit test repository.
+- [x] Write and pass recovery tests: legacy rows never enter the scoped executor; matching authorized frozen v3 jobs resume at a valid cursor; other accounts become `blocked`; blocked jobs permit changing settings; broad/ambiguous/unknown-schema work requires review; failed progress save prevents the next call. Keep all historical legacy service tests runnable against their explicit test repository.
 
 ```rust
 assert!(wrong_context_start.is_err());
@@ -267,7 +269,7 @@ assert_eq!(persisted_job.next_batch, 1);
 
 Use the gateway's existing test mutation ledger (or a test utility wrapper) rather than adding production inspection APIs.
 
-- [ ] Run all service/engine/persistence/provider tests and Clippy in Docker; commit the scoped compatibility engine.
+- [x] Run all service/engine/persistence/provider tests and Clippy in Docker; commit the scoped compatibility engine.
 
 ---
 
@@ -281,7 +283,7 @@ Use the gateway's existing test mutation ledger (or a test utility wrapper) rath
 - Consumes: registry, scoped compatibility provider, v3 state, active context, common envelope decisions.
 - Produces: `ProviderService` implementing snapshot/bootstrap/search/refresh/prepare/authorize/execute/jobs/cancel using neutral refs. Register commands with `_v2` suffix for all identity-bearing operations. Auth/settings remain typed, but settings replacement returns a v2 bootstrap/snapshot.
 
-- [ ] Add RED command tests for contract version mismatch, stale generation, wrong account/source/provider, missing identity, invalid application ID/canonical reference, and no fallback to old commands. Exercise exported command handlers through a test runtime state rather than source-text scans.
+- [x] Add RED command tests for contract version mismatch, stale generation, wrong account/source/provider, missing identity, invalid application ID/canonical reference, and no fallback to old commands. Exercise exported command handlers through a test runtime state rather than source-text scans.
 
 ```rust
 let response = api.prepare_selection_v2(wrong_account_request).await;
@@ -289,15 +291,15 @@ assert_eq!(response.unwrap_err().code, "scope_mismatch");
 assert!(gateway.mutations().is_empty());
 ```
 
-- [ ] Build bootstrap separately from active-context operations. Bootstrap can show setup/auth/identity progress and legacy historical rows without fabricating an account. Identity failure exposes safe retry. Production startup migrates the store and verifies identity before creating/resuming a scoped executor.
+- [x] Build bootstrap separately from active-context operations. Bootstrap can show setup/auth/identity progress and legacy historical rows without fabricating an account. Identity failure exposes safe retry. Production startup migrates the store and verifies identity before creating/resuming a scoped executor.
 
-- [ ] Validate common envelopes centrally and dispatch through the registry. Search/refresh resolve only explicit scoped refs; a dirty refresh never calls the catalog listing path. Validate provider results before exposing them. Safe command errors contain codes/messages, not arbitrary native strings.
+- [x] Validate common envelopes centrally and dispatch through the registry. Search/refresh resolve only explicit scoped refs; a dirty refresh never calls the catalog listing path. Validate provider results before exposing them. Safe command errors contain codes/messages, not arbitrary native strings.
 
-- [ ] Replace the production Tauri registration list and runtime state. Remove v1 destructive entry points from production registration; do not keep an unscoped fallback. Coordinate settings shutdown, worker completion, shared store lock ownership, new binding, and runtime replacement without enabling jobs on an unverified identity.
+- [x] Replace the production Tauri registration list and runtime state. Remove v1 destructive entry points from production registration; do not keep an unscoped fallback. Coordinate settings shutdown, worker completion, shared store lock ownership, new binding, and runtime replacement without enabling jobs on an unverified identity.
 
-- [ ] Rewire Task 1 backend tests to the real v2 entry points, preserving the expected values/behavior. Extend the lifecycle test to resolve a nonnumeric synthetic provider through registry, prepare a scoped plan, round-trip a job through v3, reload/recover safely, and produce scoped dirty refs. Unknown native numeric assumptions must fail this test.
+- [x] Rewire Task 1 backend tests to the real v2 entry points, preserving the expected values/behavior. Extend the lifecycle test to resolve a nonnumeric synthetic provider through registry, prepare a scoped plan, round-trip a job through v3, reload/recover safely, and produce scoped dirty refs. Unknown native numeric assumptions must fail this test.
 
-- [ ] Run complete backend, neutral-domain, and legacy-domain suites plus Clippy. Verify no v2 response leaks auth secrets or message content into durable state. Commit the active backend boundary.
+- [x] Run complete backend, neutral-domain, and legacy-domain suites plus Clippy. Verify no v2 response leaks auth secrets or message content into durable state. Commit the active backend boundary.
 
 ---
 
@@ -311,9 +313,9 @@ assert!(gateway.mutations().is_empty());
 - Consumes: the v2 envelopes/records from Task 6 and shared fixture.
 - Produces: branded string application IDs and validated scope/ref DTOs; `scopeKey(scope)`, `resourceKey(ref)`, and `sameContext(left,right)` using tuple encodings; `RetractApi` migrated to v2 without numeric fallback.
 
-- [ ] Add RED runtime decoder tests for version mismatch, malformed/missing context, numbers in ID fields, conflicting locator/application identity, and optional/null field handling. Add TS type assertions for exact Rust/TypeScript request/response shapes. Keep the frozen v1 JSON/types as historical tests in their own namespace.
+- [x] Add RED runtime decoder tests for version mismatch, malformed/missing context, numbers in ID fields, conflicting locator/application identity, and optional/null field handling. Add TS type assertions for exact Rust/TypeScript request/response shapes. Keep the frozen v1 JSON/types as historical tests in their own namespace.
 
-- [ ] Implement small validators without adding a schema library. Decode before publishing snapshot/search/job data. Resource identities are opaque branded strings, not parsed Telegram values. Avatar rendering uses an explicit numeric seed or stable string hash, never `senderId % 19`.
+- [x] Implement small validators without adding a schema library. Decode before publishing snapshot/search/job data. Resource identities are opaque branded strings, not parsed Telegram values. Avatar rendering uses an explicit numeric seed or stable string hash, never `senderId % 19`.
 
 ```ts
 export const scopeKey = (scope: Scope): string =>
@@ -323,15 +325,15 @@ export const resourceKey = (ref: ScopedResourceRef): string =>
     ref.resource.resourceKind, ref.id]);
 ```
 
-- [ ] Update desktop dispatch to the real `_v2` commands and include expected context in every active operation. Bootstrap/settings keep context optional until verified. Copy needed normalized refs from backend results; do not synthesize native IDs from UUIDs or inspect locator payloads.
+- [x] Update desktop dispatch to the real `_v2` commands and include expected context in every active operation. Bootstrap/settings keep context optional until verified. Copy needed normalized refs from backend results; do not synthesize native IDs from UUIDs or inspect locator payloads.
 
-- [ ] Migrate fixture records to explicit deterministic UUIDs/scopes and serialized descriptor data. Fixture-only code may simulate operations for existing tests, but must obey the same v2 contract and remain excluded from production. Do not add an end-user demo mode or a second production policy engine.
+- [x] Migrate fixture records to explicit deterministic UUIDs/scopes and serialized descriptor data. Fixture-only code may simulate operations for existing tests, but must obey the same v2 contract and remain excluded from production. Do not add an end-user demo mode or a second production policy engine.
 
-- [ ] Update selection, album grouping, chat lookup/filtering, prepare requests, polling, and pending-removal sets to scoped keys. Context changes clear incompatible review/selection state and increment all response generations. Keep loading blocked until identity and catalog are ready, with progress/error/retry feedback.
+- [x] Update selection, album grouping, chat lookup/filtering, prepare requests, polling, and pending-removal sets to scoped keys. Context changes clear incompatible review/selection state and increment all response generations. Keep loading blocked until identity and catalog are ready, with progress/error/retry feedback.
 
-- [ ] Complete Task 1 frontend tests against actual v2 UI/adapter paths. Add stale search, dirty-refresh, job-poll, and settings-response tests for cross-account/source changes. Assert only affected matching-scope conversations refresh, no global snapshot/counter reset for individual cleanup, and no hidden selection widening.
+- [x] Complete Task 1 frontend tests against actual v2 UI/adapter paths. Add stale search, dirty-refresh, job-poll, and settings-response tests for cross-account/source changes. Assert only affected matching-scope conversations refresh, no global snapshot/counter reset for individual cleanup, and no hidden selection widening.
 
-- [ ] Run all Vitest tests, TypeScript/build, and production-bundle checks in Docker. Both Task 1 RED suites must now be GREEN; do not delete or skip the regression tests. Commit the frontend cutover.
+- [x] Run all Vitest tests, TypeScript/build, and production-bundle checks in Docker. Both Task 1 RED suites must now be GREEN; do not delete or skip the regression tests. Commit the frontend cutover.
 
 ---
 
@@ -345,11 +347,11 @@ export const resourceKey = (ref: ScopedResourceRef): string =>
 - Consumes: backend action descriptors, ordered plan steps, scoped jobs and safe diagnostics from Tasks 5–7.
 - Produces: descriptor-driven visibility/disabled state/confirmation/effect copy; on-demand accessible job detail rendering.
 
-- [ ] Write RED UI tests where the displayed admin label and executable descriptors disagree. The descriptor controls the action, not the label/provider name. Test compound cleanup/leave effects, unavailable reasons, protected messages, and standalone critical group destruction.
+- [x] Write RED UI tests where the displayed admin label and executable descriptors disagree. The descriptor controls the action, not the label/provider name. Test compound cleanup/leave effects, unavailable reasons, protected messages, and standalone critical group destruction.
 
-- [ ] Render the existing authority/impact interface from descriptors while preserving familiar Telegram presentation. Map descriptor kinds/effects to icons and layouts only; do not infer permission. ConfirmDialog summarizes every ordered effect and uses backend confirmation requirements.
+- [x] Render the existing authority/impact interface from descriptors while preserving familiar Telegram presentation. Map descriptor kinds/effects to icons and layouts only; do not infer permission. ConfirmDialog summarizes every ordered effect and uses backend confirmation requirements.
 
-- [ ] Write RED job-detail tests with deleted `2`, skipped `3`, failed `4`, a retry countdown, a blocked-account reason, and `migration_requires_new_review`. Assert distinct accessible labels and that unsafe raw provider text is never rendered. Preserve the compact current recent-job row and add a disclosure/button for details.
+- [x] Write RED job-detail tests with deleted `2`, skipped `3`, failed `4`, a retry countdown, a blocked-account reason, and `migration_requires_new_review`. Assert distinct accessible labels and that unsafe raw provider text is never rendered. Preserve the compact current recent-job row and add a disclosure/button for details.
 
 ```tsx
 fireEvent.click(screen.getByRole("button", {name: /Job details/}));
@@ -359,9 +361,9 @@ expect(screen.getByText(/Review this cleanup again/)).toBeVisible();
 expect(screen.queryByText("SYNTHETIC_RAW_PROVIDER_SECRET")).not.toBeInTheDocument();
 ```
 
-- [ ] Implement the disclosure/dialog with correct focus/labels, existing visual tokens, and safe code-to-message mapping. Blocked jobs offer truthful account/review guidance without preventing connection configuration or promising that in-flight work was undone.
+- [x] Implement the disclosure/dialog with correct focus/labels, existing visual tokens, and safe code-to-message mapping. Blocked jobs offer truthful account/review guidance without preventing connection configuration or promising that in-flight work was undone.
 
-- [ ] Run all component/App tests, TypeScript/build, and bundle checks in Docker. Commit descriptor-driven presentation and outcome details.
+- [x] Run all component/App tests, TypeScript/build, and bundle checks in Docker. Commit descriptor-driven presentation and outcome details.
 
 ---
 
@@ -375,9 +377,9 @@ expect(screen.queryByText("SYNTHETIC_RAW_PROVIDER_SECRET")).not.toBeInTheDocumen
 - Consumes: completed scoped production path and RED/GREEN evidence from Tasks 1–8.
 - Produces: a fully verified branch, documented upgrade behavior/limits, and review evidence. No tag/release/remote merge.
 
-- [ ] Add any missing regression test exposed by integration before its fix. Check startup with no profile, both legacy fixture versions, malformed state, interrupted migration, identity verification failure, renamed account, same-account restart, wrong account, cancellation/rate waits, and save failure between batches.
+- [x] Add any missing regression test exposed by integration before its fix. Check startup with no profile, both legacy fixture versions, malformed state, interrupted migration, identity verification failure, renamed account, same-account restart, wrong account, cancellation/rate waits, and save failure between batches. Task 9 additionally covers actual child-process lock contention and invalid v3 with valid legacy backups; both already passed before any production change. Existing persistence fixtures exposed canonical-tag/order drift and were corrected without weakening production or historical checks.
 
-- [ ] Run all gates:
+- [x] Run all required Docker gates:
 
 ```bash
 npm run container:check
@@ -387,8 +389,10 @@ docker buildx build --platform linux/arm64 --target checks --output type=cacheon
 
 Use the native macOS packaging workflow for the macOS-only artifact gate when available; never claim a container made a macOS application. Do not start real Telegram cleanup or read real keychain/session data to satisfy a test. Report any unavailable native/live gate precisely.
 
-- [ ] Update migration docs: preserved `jobs.pre-provider.enc`, no automatic restoration, old binaries reject v3, unfinished old jobs require fresh review, blocked wrong-account work does not retarget, credentials/session paths unchanged, and messages are not indexed/persisted by this stage. Update the Telegram contract to distinguish frozen v1 reader coverage from current v2 UI behavior.
+Task 9 evidence (2026-09-04): default/native-architecture Docker plus explicit amd64 and arm64 checks pass with 150 frontend, 168 backend, 19 neutral-domain, 17 legacy-domain and 7 release tests, along with TypeScript/build/bundle exclusion/public metadata/fmt/Clippy. Native macOS packaging and live Telegram were unavailable/not run; rendered browser/native short-viewport and accessibility checks remain manual.
 
-- [ ] Verify new crate lock/version/license updates and unsigned release tooling. Run `node scripts/check-public-repo.mjs`, release metadata tests in Docker, `git diff --check`, and production bundle checks. Ensure all SDD scratch/test providers stay out of production artifacts.
+- [x] Update migration docs: preserved `jobs.pre-provider.enc`, no automatic restoration, old binaries reject v3, unfinished old jobs require fresh review, blocked wrong-account work does not retarget, credentials/session paths unchanged, and messages are not indexed/persisted by this stage. Update the Telegram contract to distinguish frozen v1 reader coverage from current v2 UI behavior.
+
+- [x] Verify new crate lock/version/license updates and unsigned release tooling. Run `node scripts/check-public-repo.mjs`, release metadata tests in Docker, `git diff --check`, and production bundle checks. Ensure all SDD scratch/test providers stay out of production artifacts. Linux metadata/bundle checks pass; native package inspection is separately unrun.
 
 - [ ] Commit completion docs, request whole-branch code review, address findings through reviewed fixes, and report actual test results/remaining gates. Keep the branch available for the user's integration decision; do not merge or publish automatically.

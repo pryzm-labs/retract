@@ -410,6 +410,12 @@ pub async fn telegram(path: &Path, active: ActiveContext) -> (Harness, Arc<DemoG
     )
 }
 
+#[derive(Default)]
+pub struct PreflightBarrier {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 #[derive(Clone)]
 pub struct SyntheticIo {
     pub active: Arc<RwLock<Option<ActiveContext>>>,
@@ -422,6 +428,7 @@ pub struct SyntheticIo {
     pub rate_deadline: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
     pub preflights: Arc<Mutex<Vec<chrono::DateTime<Utc>>>>,
     pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    pub preflight_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
 }
 impl SyntheticIo {
     pub fn new(active: ActiveContext) -> Self {
@@ -436,6 +443,7 @@ impl SyntheticIo {
             rate_deadline: Arc::new(Mutex::new(None)),
             preflights: Arc::new(Mutex::new(vec![])),
             preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            preflight_barrier: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -508,6 +516,11 @@ impl FrozenProviderIo for SyntheticIo {
         Ok(())
     }
     async fn preflight(&self, target: &ScopedResourceRef) -> Result<bool, SafeError> {
+        let barrier = self.preflight_barrier.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            barrier.entered.notify_one();
+            barrier.release.notified().await;
+        }
         self.preflights.lock().unwrap().push(Utc::now());
         tokio::time::sleep(std::time::Duration::from_millis(
             self.preflight_delay_ms.load(Ordering::Acquire),

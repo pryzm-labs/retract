@@ -1,10 +1,12 @@
 use std::{
     fs, io,
     path::Path,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -28,7 +30,7 @@ use super::{
 use crate::{
     error::AppError,
     model::{JobStatus as LegacyJobStatus, PersistedState},
-    secure_store::{SecureJobStore, decrypt_authenticated},
+    secure_store::{SecureJobStore, decrypt_authenticated, encrypt_authenticated},
 };
 
 const LEGACY_KEY: [u8; 32] = [0x61; 32];
@@ -117,7 +119,12 @@ impl ProviderPayloadValidator for StrictTestPayloadValidator {
         if !canonical_nonzero_i64(&locator.chat_id)
             || !canonical_positive_i64(&locator.message_id)
             || resource.canonical_key
-                != serde_json::to_string(&(locator.chat_id, locator.message_id)).unwrap()
+                != serde_json::to_string(&(
+                    "telegram-message-v1",
+                    locator.chat_id,
+                    locator.message_id,
+                ))
+                .unwrap()
         {
             return Err(invalid_test_payload());
         }
@@ -253,7 +260,9 @@ fn source() -> SourceRecord {
 }
 
 fn plan() -> RemediationPlan {
-    let targets = vec![target(0), target(1)];
+    let mut targets = vec![target(0), target(1)];
+    // The recipe freezes the same canonical order as the sealed envelope.
+    targets.sort_by_key(|target| target.id);
     let target_keys = targets
         .iter()
         .map(|target| target.resource.canonical_key.clone())
@@ -660,6 +669,57 @@ fn a_conflicting_backup_is_never_overwritten_or_used_as_fallback() {
 }
 
 #[test]
+fn invalid_v3_never_restores_a_valid_legacy_backup() {
+    // A fallback on authentication or schema failure would reopen old work.
+    for (fixture_name, key) in [("rtrct01", LEGACY_KEY), ("rtrct02", CURRENT_KEY)] {
+        for corrupt_ciphertext in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let original = write_fixture(directory.path(), fixture_name);
+            let store =
+                FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), key)
+                    .unwrap();
+            let active = directory.path().join("jobs.enc");
+            let backup = directory.path().join("jobs.pre-provider.enc");
+            let mut invalid = fs::read(&active).unwrap();
+            assert!(invalid.starts_with(b"RTRCT03"));
+            if corrupt_ciphertext {
+                let last = invalid.len() - 1;
+                invalid[last] ^= 1;
+            } else {
+                // Authenticated bytes can still contain an invalid state.
+                invalid =
+                    encrypt_authenticated(b"RTRCT03", &key, &store_aad(&binding()).unwrap(), b"{}")
+                        .unwrap();
+            }
+            let weak = Arc::downgrade(&store);
+            drop(store);
+            assert!(weak.upgrade().is_none(), "reopen must read the actual file");
+            fs::write(&active, &invalid).unwrap();
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            assert!(
+                SecureJobStore::with_test_key_and_profile(backup.clone(), key, PROFILE.as_bytes())
+                    .load()
+                    .is_ok(),
+                "the preserved backup must genuinely authenticate"
+            );
+
+            let error =
+                FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), key)
+                    .unwrap_err();
+            let expected = if corrupt_ciphertext {
+                "job store authentication failed"
+            } else {
+                "foundation state is malformed"
+            };
+            assert!(matches!(error, AppError::SecureStore(message) if message == expected));
+            assert_eq!(fs::read(&active).unwrap(), invalid);
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            assert!(!directory.path().join("jobs.enc.tmp").exists());
+        }
+    }
+}
+
+#[test]
 fn fresh_v3_files_are_private_and_authenticated_to_provider_and_profile() {
     let directory = tempfile::tempdir().unwrap();
     let store =
@@ -759,6 +819,80 @@ fn callers_share_one_arc_but_an_independent_writer_gets_profile_in_use() {
     )
     .unwrap_err();
     assert!(matches!(error, AppError::ProfileInUse));
+}
+
+#[test]
+fn profile_lock_blocks_a_child_process_until_the_last_owner_drops() {
+    const CHILD_PROFILE: &str = "RETRACT_LOCK_TEST_PROFILE";
+    const CHILD_EXPECTATION: &str = "RETRACT_LOCK_TEST_EXPECTATION";
+    if let Some(profile) = std::env::var_os(CHILD_PROFILE) {
+        let key_reads = AtomicUsize::new(0);
+        let result = FoundationStore::open_with_test_key_loader(profile.into(), binding(), |_| {
+            key_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(CURRENT_KEY)
+        });
+        match std::env::var(CHILD_EXPECTATION).unwrap().as_str() {
+            "locked" => {
+                assert!(matches!(result.unwrap_err(), AppError::ProfileInUse));
+                assert_eq!(key_reads.load(Ordering::SeqCst), 0);
+            }
+            "released" => {
+                assert_eq!(
+                    result.unwrap().snapshot().unwrap(),
+                    FoundationState::empty(binding())
+                );
+                assert_eq!(key_reads.load(Ordering::SeqCst), 1);
+            }
+            other => panic!("unexpected child lock expectation: {other}"),
+        }
+        return;
+    }
+
+    // Removing the OS lock must fail even when the in-process registry works.
+    let directory = tempfile::tempdir().unwrap();
+    let first =
+        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
+            .unwrap();
+    let shared = first.clone();
+    let original = fs::read(directory.path().join("jobs.enc")).unwrap();
+    let run_child = |expectation: &str| {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "persistence::tests::profile_lock_blocks_a_child_process_until_the_last_owner_drops",
+                "--nocapture",
+            ])
+            .env(CHILD_PROFILE, directory.path())
+            .env(CHILD_EXPECTATION, expectation)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("child store open did not finish: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "child store check failed: {output:?}"
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        assert_eq!(
+            fs::read(directory.path().join("jobs.enc")).unwrap(),
+            original
+        );
+    };
+    run_child("locked");
+    drop(first);
+    run_child("locked");
+    drop(shared);
+    run_child("released");
 }
 
 #[test]

@@ -300,15 +300,15 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
             .iter()
             .map(|(id, label, actor)| {
                 use retract_domain::{ActionKind, ConfirmationTier, ExpectedEffect};
-                if *id == "leave_chat" {
-                    if let Some((label, descriptors)) = &leave_description {
-                        return IntentDescriptor {
-                            action_id: (*id).into(),
-                            label: (*label).into(),
-                            requires_actor: false,
-                            descriptors: descriptors.clone(),
-                        };
-                    }
+                if *id == "leave_chat"
+                    && let Some((label, descriptors)) = &leave_description
+                {
+                    return IntentDescriptor {
+                        action_id: (*id).into(),
+                        label: (*label).into(),
+                        requires_actor: false,
+                        descriptors: descriptors.clone(),
+                    };
                 }
                 let kind = match *id {
                     "selected_messages" | "delete_my_messages" => ActionKind::DeleteRemoteItem,

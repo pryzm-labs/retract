@@ -610,14 +610,26 @@ fn review_round1_retry_preserves_the_native_absolute_deadline_through_latency_an
             let directory = tempfile::tempdir().unwrap();
             let active = context("syntheticContext");
             let io = Arc::new(SyntheticIo::new(active.clone()));
-            let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(1650);
-            *io.rate_deadline.lock().unwrap() = Some(deadline);
+            let barrier = Arc::new(PreflightBarrier::default());
+            *io.preflight_barrier.lock().unwrap() = Some(barrier.clone());
             io.rate_limit_once.store(true, Ordering::Release);
             io.preflight_delay_ms.store(150, Ordering::Release);
             let mut harness = synthetic(directory.path(), io.clone());
             let plan = harness.prepare(&active, vec![fixture()["messages"][2]["ref"].clone()]);
             harness.authorize(&active, &plan);
             let job = harness.start(&active, &plan).unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                barrier.entered.notified(),
+            )
+            .await
+            .unwrap();
+            // Start the native deadline at the controlled preflight boundary, not
+            // before potentially slow harness/authorization setup. The original
+            // 150ms response latency and absolute-deadline assertions stay intact.
+            let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(1650);
+            *io.rate_deadline.lock().unwrap() = Some(deadline);
+            barrier.release.notify_one();
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 loop {
                     if harness.store.snapshot().unwrap().jobs[0].retry_at.is_some() {

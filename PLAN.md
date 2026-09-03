@@ -1,6 +1,6 @@
 # Chat History Cleaner — Product and Engineering Plan
 
-Status: open-source preview candidate on 2026-08-20. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`.
+Status: provider foundation implemented on 2026-09-04, with final whole-branch review and native/manual gates tracked separately. The real Telegram UI uses scoped v2 IPC and v3 encrypted state through the existing execution engine. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is available.
 
 ## 1. Product direction
 
@@ -52,7 +52,7 @@ Deletion is irreversible. There is no app-level trash or undo once Telegram acce
 - A dry-run summary before every deletion.
 - Selected-message deletion, whole-history clearing, delete-by-sender, and true group deletion where allowed.
 - Rate-limit-aware, resumable deletion jobs with cancellation between batches.
-- A local, privacy-minimized job report showing deleted, skipped, failed, and still-visible counts. This is a tracked future requirement; the current Phase 0 recent-job row shows status/retry/deleted only.
+- A local, privacy-minimized job report showing confirmed deleted, skipped, failed and uncertain counts with safe diagnostics. The provider foundation now exposes these on demand; it does not claim a full still-visible inventory.
 - Light/dark mode, VoiceOver labels, keyboard navigation, and native-feeling macOS shortcuts.
 
 ### Exclude from the first release
@@ -293,11 +293,11 @@ Avoid features that create hidden or automatic behavior: silent background delet
 
 ### Tracked provider-foundation prerequisite
 
-- [ ] Before any provider-foundation change migrates Telegram production ID types, land a RED lifecycle harness for opaque strings and provider-native values greater than JavaScript's safe-integer range across selection, planning, jobs, encrypted persistence, IPC, and targeted refresh. The current Phase 0 numeric-safe fixture does not satisfy this item.
+- [x] Land the opaque/large-ID RED lifecycle harness before migrating production IDs, then make it pass through the real v2 selection, IPC, plan, job, encrypted store/recovery and targeted-refresh paths. Reviewed foundation Tasks 1 and 6–7 supply this evidence; the unchanged Phase 0 numeric-safe fixture remains historical only.
 
 ### Tracked provider UI prerequisite
 
-- [ ] Before provider UI generalization, add an accessible full-result presentation for skipped and failed counters and safe structured diagnostics. The current Phase 0 status/retry/deleted row does not satisfy this item.
+- [x] Add accessible on-demand complete job outcomes and safe structured diagnostics while retaining the compact recent-job row. Reviewed foundation Task 8 covers skipped/failed/uncertain results, retry/blocked/migration guidance and backend-described effects. Component/CSS tests are not native/browser viewport or VoiceOver evidence; those checks remain manual.
 
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 

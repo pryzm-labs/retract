@@ -168,11 +168,12 @@ fn reference_and_payload_envelopes_reject_invalid_bounds() {
 fn sealed_plan_binds_every_immutable_field() {
     let original = plan();
     assert!(original.fingerprint.starts_with("sha256-v1:"));
-    // Independent Node crypto SHA-256 over hand-built canonical JSON; no Rust
-    // serializer or fingerprint helper generated this expected value.
+    // Independent Node crypto SHA-256 over hand-built canonical JSON using the
+    // tagged Telegram locators and literal UUIDs in the migrated fixture; no
+    // Rust serializer or fingerprint helper generated this expected value.
     assert_eq!(
         original.fingerprint,
-        "sha256-v1:515df8e9f662a144fa0861b98910151d5dd1c2ed346485b92be3249ba299d48d"
+        "sha256-v1:243e954d6a27315d6b9479635720bd488bcde2fa76eeafad1df291fd1a7ed9bd"
     );
     original.validate().unwrap();
     for (path, value) in [

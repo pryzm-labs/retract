@@ -4,6 +4,14 @@ All notable changes to Retract are documented here. The project follows [Semanti
 
 ## [Unreleased]
 
+### Added
+
+- Scoped opaque identities and version-2 IPC on the Telegram UI, backed by a provider registry and the existing Telegram execution engine.
+- Authenticated account verification, stable account/source mappings, session-bound plan authorization, and fail-closed cross-account recovery.
+- A single-writer version-3 encrypted job store with exact legacy ciphertext preservation in `jobs.pre-provider.enc`; unfinished legacy work requires new review and the backup is never restored automatically.
+- Backend-described ordered cleanup effects and accessible complete job outcomes, including skipped, failed, uncertain, retry and blocked states.
+- Synthetic lifecycle, migration, interprocess-lock and stale-response regression coverage. No additional production provider, content index or archive importer is included.
+
 ## [0.1.0] - 2026-08-20
 
 ### Added

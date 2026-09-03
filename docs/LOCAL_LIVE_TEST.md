@@ -2,7 +2,9 @@
 
 This guide verifies Retract without exposing valuable history. Run the automated synthetic checks first, then use Telegram’s test environment where practical. Telegram recommends validating authorization in test DCs before production.
 
-## 1. Verify the local toolchain
+## 1. Prepare for optional native testing
+
+Run the Docker gate in step 2 before starting the app. The following host toolchain checks are only for a separately authorized native build/live test; they are not required to execute the synthetic Docker gate.
 
 From Terminal:
 
@@ -24,13 +26,12 @@ The project already includes the Apple-silicon TDLib library. CMake, gperf, and 
 ## 2. Run the synthetic automated checks
 
 ```sh
-npm ci --ignore-scripts
-npm test
-npm run verify:production-bundle
 npm run container:check
 ```
 
-These checks exercise keyword search, filters, albums, hidden selections, admin badges, review dialogs, deletion planning, the **No reply sent** and **Empty** shortlists, and privacy findings using synthetic fixtures. They also verify that the production bundle cannot import those fixtures. Nothing in this step reaches a Telegram account.
+This pinned, non-root/offline project check exercises keyword search, filters, albums, hidden selections, review dialogs, scoped v2 IPC, verified account mapping, deletion planning, encrypted v3 migration/recovery, interprocess locks, the **No reply sent** and **Empty** shortlists, privacy findings and complete safe job outcomes using synthetic fixtures. It also verifies production-bundle isolation and release metadata. Nothing in this step reaches a Telegram account or the real Keychain. Use [TEST_PLAN.md](TEST_PLAN.md) for both Linux architecture gates and the separate native macOS package job.
+
+When checking an upgrade, `jobs.pre-provider.enc` must retain the exact legacy ciphertext. Active `jobs.enc` becomes v3 and is unreadable by older Retract versions; no automatic backup restoration is attempted. Unfinished legacy work needs a new reviewed plan, and foreign-account jobs stay blocked without retargeting. Credentials, Keychain entries and TDLib session/profile paths do not change. The foundation adds no message-body or private-filename index/persistence.
 
 The fixture UI exists only in the automated tests and the dedicated `npm run screenshot:dev` documentation mode. The normal Tauri app always requires a real Telegram connection.
 
@@ -63,7 +64,7 @@ If Retract does not begin Telegram authorization, setup failed; stop instead of 
 
 ## 5B. Controlled production smoke test
 
-Only do this after the automated and preferably the test-DC checks. Open **Connection Settings**, turn off **Use Telegram's test server**, and choose **Save settings**. Leave the API-hash field blank to keep the value already stored in Keychain.
+Only do this with explicit consent after all applicable automated and disposable test-DC checks in [TEST_PLAN.md](TEST_PLAN.md) pass. Open **Connection Settings**, turn off **Use Telegram's test server**, and choose **Save settings**. Leave the API-hash field blank to keep the value already stored in Keychain.
 
 Retract keeps test-DC and production databases and job stores in separate app-data profiles.
 
@@ -86,16 +87,16 @@ A fresh private group is safer than an existing DM.
 
 ## 7. Delete only those fixtures
 
-1. Open Retract and confirm the intended Telegram account is shown in the sidebar.
-2. Select the new verification group in the left pane. Confirm it shows **Owner** and the expected capabilities.
+1. Open Retract, wait for account verification/catalog preparation to finish, and confirm the intended Telegram account is shown. Auth-ready alone is insufficient; stop on a verification error.
+2. Select the new verification group in the left pane. Confirm the expected capabilities; the **Owner** badge alone does not authorize an action.
 3. Search for the unique `RETRACT-VERIFY-<random>` token.
 4. Set the direction filter to **Mine**.
 5. Confirm the result list contains only the three disposable fixtures.
 6. Select each result. The right pane must report all three as **Delete for everyone**. Stop if any item says **Only removable for you** or **Cannot delete**.
-7. Choose **Review deletion**. Confirm the frozen count, media types, and plan fingerprint.
+7. Choose **Review deletion**. Confirm the frozen count, media types, ordered effects and plan fingerprint.
 8. Check the irreversible acknowledgement and choose **Delete for everyone**. Approve macOS authentication only after its native reason identifies the expected chat ID, message count, and plan token.
 9. Ask the partner to confirm the text, screenshot message/caption, and file message disappear. Also refresh/reopen the chat on their side.
-10. Record Retract’s completed job counters. Do not interpret a previously downloaded external copy as a failed message deletion.
+10. Open the job details and record confirmed deleted, skipped, failed and uncertain counts separately, plus any safe retry/blocked explanation. Do not interpret a previously downloaded external copy as a failed message deletion, or an uncertain request as confirmed success.
 
 Start with selected messages only. Do not test **Revoke history & remove chat** or **Delete group permanently** until this path succeeds and the partner confirms the result. Every destructive action requires macOS device-owner authentication; high-impact actions also require the exact group title.
 
@@ -105,4 +106,4 @@ Before testing the chat-wide action, verify that both people understand its scop
 
 After both people confirm the expected result, use the official client to remove the disposable group or test Retract’s permanent group deletion as a separate critical-action case. Never reuse the group for real conversation.
 
-For broader role, failure, cancellation, flood-wait, and restart coverage, continue with [TEST_PLAN.md](TEST_PLAN.md).
+For broader role, failure, cancellation, flood-wait, account-switch/restart, native modal focus and short-viewport coverage, continue with [TEST_PLAN.md](TEST_PLAN.md). Synthetic component/CSS tests do not prove browser geometry, VoiceOver, native authentication or live deletion parity. Record each unavailable or unrun gate explicitly.

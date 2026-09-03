@@ -369,8 +369,8 @@ describe("late v2 responses across account and source changes", () => {
     render(<App />);
     fireEvent.click(await screen.findByText("First lossless target"));
     fireEvent.click(screen.getByRole("button", { name: /Review deletion/ }));
-    await screen.findByText("Delete 2 messages for everyone?");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const review = await screen.findByRole("dialog", { name: "Delete 2 messages for everyone?" });
+    fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
     fireEvent.change(screen.getByPlaceholderText("Names, phrases, captions, or sensitive details"), { target: { value: "late" } });
     await waitFor(() => expect(transport.mock.calls.filter(([c]) => c === "search_messages_v2").length).toBeGreaterThan(1));
     fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));

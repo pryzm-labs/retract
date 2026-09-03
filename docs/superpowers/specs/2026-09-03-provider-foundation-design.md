@@ -318,6 +318,6 @@ The new crate requires its own lockfile while the repository has no root workspa
 - [x] Include the accessible job-result prerequisite when migrating action/result descriptors.
 - [x] Preserve keychain/session behavior and container cache discipline.
 - [x] User review of this written specification.
-- [ ] Write the detailed implementation plan after specification approval.
+- [x] Write the detailed implementation plan after specification approval: [Provider foundation implementation plan](../plans/2026-09-03-provider-foundation.md).
 
 No production implementation is included in this document change.
