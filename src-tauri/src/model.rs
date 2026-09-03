@@ -238,6 +238,8 @@ pub struct JobRecord {
     pub deleted: usize,
     pub skipped: usize,
     pub failed: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub uncertain: usize,
     #[serde(default)]
     pub next_batch: usize,
     #[serde(default)]
@@ -260,6 +262,7 @@ impl JobRecord {
             deleted: 0,
             skipped: plan.summary.self_only + plan.summary.cannot_delete,
             failed: 0,
+            uncertain: 0,
             next_batch: 0,
             retry_after_seconds: None,
             error_codes: Vec::new(),
@@ -289,6 +292,10 @@ fn affected_chat_ids(plan: &DeletionPlan) -> Vec<i64> {
     chat_ids.sort_unstable();
     chat_ids.dedup();
     chat_ids
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -448,6 +455,7 @@ mod wire_contract_tests {
             deleted: 1,
             skipped: 0,
             failed: 0,
+            uncertain: 0,
             next_batch: 1,
             retry_after_seconds: None,
             error_codes: Vec::new(),

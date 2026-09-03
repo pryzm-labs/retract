@@ -319,8 +319,7 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
         // whenever any accepted schema, range, canonical key, or recipe
         // agreement rule in this validator changes.
         ProviderValidationPolicyKey::try_from(
-            "telegram-payload-policy-3:account-source-conversation-message-actor-grouping-recipe-v1"
-                .to_owned(),
+            "telegram-payload-policy-5:typed-compatibility-execution-progress-v1".to_owned(),
         )
         .expect("static Telegram validation policy key is valid")
     }
@@ -409,6 +408,9 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
     }
 
     fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError> {
+        if plan.recipe.schema == super::compat::EXECUTION_SCHEMA {
+            return super::compat::TelegramExecutionRecipe::validate_envelope(plan).map(|_| ());
+        }
         if plan.recipe.schema != TELEGRAM_RECIPE_SCHEMA
             || plan.recipe.version != TELEGRAM_SCHEMA_VERSION
         {
@@ -431,6 +433,61 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
                     .map_err(|_| invalid_payload())?;
                 self.validate_resource(&target.resource)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_job(
+        &self,
+        plan: &RemediationPlan,
+        job: &retract_domain::ScopedJobRecord,
+    ) -> Result<(), AppError> {
+        let legacy = super::compat::TelegramExecutionRecipe::validate_envelope(plan)?;
+        let initial = crate::model::JobRecord::new(&legacy);
+        let expected = super::compat::TelegramCompatibilityProvider::normalize_job(
+            &plan.scope,
+            &legacy,
+            &initial,
+            job.started_authorized,
+        )?;
+        let mut actual_dirty = job.dirty_refs.clone();
+        actual_dirty.sort_by_key(|r| r.id);
+        let mut expected_dirty = expected.dirty_refs;
+        expected_dirty.sort_by_key(|r| r.id);
+        if actual_dirty != expected_dirty
+            || job.counters.selected != legacy.summary.selected as u64
+            || job.counters.eligible != legacy.summary.delete_for_everyone as u64
+        {
+            return Err(invalid_payload());
+        }
+        let batches = legacy.everyone_batches(100)?;
+        let max_cursor = if legacy.operation == cleaner_domain::PlanOperation::ClearHistoryAndLeave
+        {
+            1
+        } else {
+            batches.len()
+        };
+        if job.next_batch > max_cursor as u64 {
+            return Err(invalid_payload());
+        }
+        let processed = batches
+            .iter()
+            .take(job.next_batch as usize)
+            .map(|b| b.message_ids.len() as u64)
+            .sum::<u64>();
+        let initial_skipped = (legacy.summary.self_only + legacy.summary.cannot_delete) as u64;
+        if job.counters.skipped < initial_skipped {
+            return Err(invalid_payload());
+        }
+        let accounted = job
+            .counters
+            .deleted
+            .checked_add(job.counters.failed)
+            .and_then(|n| n.checked_add(job.counters.uncertain))
+            .and_then(|n| n.checked_add(job.counters.skipped - initial_skipped))
+            .ok_or_else(invalid_payload)?;
+        if processed != accounted {
+            return Err(invalid_payload());
         }
         Ok(())
     }

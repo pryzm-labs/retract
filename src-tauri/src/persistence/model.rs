@@ -62,6 +62,16 @@ pub trait ProviderPayloadValidator: Send + Sync {
     fn validate_resource(&self, resource: &ProviderResourceRef) -> Result<(), AppError>;
 
     fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError>;
+
+    /// Provider-owned cursor/progress agreement is checked on every load and
+    /// transaction, not only when a worker decides whether to resume.
+    fn validate_job(
+        &self,
+        _plan: &RemediationPlan,
+        _job: &ScopedJobRecord,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -310,6 +320,12 @@ impl FoundationState {
             validator.validate_recipe(plan)?;
         }
         for job in &self.jobs {
+            let plan = self
+                .plans
+                .iter()
+                .find(|plan| plan.id == job.plan_id)
+                .ok_or_else(|| invalid_state("job plan is missing"))?;
+            validator.validate_job(plan, job)?;
             for target in &job.dirty_refs {
                 validator.validate_resource(&target.resource)?;
             }

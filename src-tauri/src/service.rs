@@ -24,6 +24,9 @@ use crate::{
         JobRecord, JobStatus, MessageRef, PersistedState, PlanView, PrepareChatActionRequest,
         PrepareSelectionRequest, PrepareSenderActionRequest, SearchRequest, SearchResponse,
     },
+    providers::telegram::engine_context::{
+        EngineContext, LegacyTelegramRepository, SessionGateway, TelegramStateRepository,
+    },
     secure_store::SecureJobStore,
 };
 
@@ -33,12 +36,16 @@ pub struct CleanerService {
     jobs: RwLock<HashMap<Uuid, JobRecord>>,
     cancellation: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
     system_grants: Mutex<HashMap<Uuid, SystemGrant>>,
-    store: SecureJobStore,
+    store: Arc<dyn TelegramStateRepository>,
+    context: Option<Arc<EngineContext>>,
+    transition_lock: Mutex<()>,
+    persistence_failed: AtomicBool,
 }
 
 struct SystemGrant {
     fingerprint: String,
     expires_at: Instant,
+    context: Option<retract_domain::ActiveContext>,
 }
 
 impl CleanerService {
@@ -98,8 +105,101 @@ impl CleanerService {
             jobs: RwLock::new(jobs),
             cancellation: Mutex::new(HashMap::new()),
             system_grants: Mutex::new(HashMap::new()),
-            store,
+            store: Arc::new(LegacyTelegramRepository(store)),
+            context: None,
+            transition_lock: Mutex::new(()),
+            persistence_failed: AtomicBool::new(false),
         }))
+    }
+
+    pub fn new_scoped(
+        gateway: Arc<dyn TelegramGateway>,
+        context: Arc<EngineContext>,
+        store: Arc<dyn TelegramStateRepository>,
+    ) -> Result<Arc<Self>, AppError> {
+        context.check(gateway.as_ref())?;
+        if store.scope() != Some(&context.active().scope) {
+            return Err(crate::providers::telegram::engine_context::stale_context());
+        }
+        let persisted = store.load()?;
+        // Recovery decisions are durable before any state or worker is published.
+        store.save(&persisted)?;
+        Ok(Arc::new(Self {
+            gateway: Arc::new(SessionGateway {
+                inner: gateway,
+                context: context.clone(),
+            }),
+            plans: RwLock::new(persisted.plans.into_iter().map(|p| (p.id, p)).collect()),
+            jobs: RwLock::new(persisted.jobs.into_iter().map(|j| (j.id, j)).collect()),
+            cancellation: Mutex::new(HashMap::new()),
+            system_grants: Mutex::new(HashMap::new()),
+            store,
+            context: Some(context),
+            transition_lock: Mutex::new(()),
+            persistence_failed: AtomicBool::new(false),
+        }))
+    }
+
+    fn check_context(&self) -> Result<(), AppError> {
+        if self.persistence_failed.load(Ordering::Acquire) {
+            return Err(AppError::StatePersistenceFailed);
+        }
+        if let Some(context) = &self.context {
+            context.check(self.gateway.as_ref())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_bound_to(&self, context: &Arc<EngineContext>) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|bound| Arc::ptr_eq(bound, context))
+    }
+
+    async fn publish_plan(&self, mut plan: DeletionPlan) -> Result<PlanView, AppError> {
+        self.check_context()?;
+        if let Some(context) = &self.context {
+            context.bind_plan(&mut plan)?;
+        }
+        let view = PlanView::from(&plan);
+        self.transition(|plans, _| {
+            plans.insert(plan.id, plan);
+            Ok(())
+        })
+        .await?;
+        Ok(view)
+    }
+
+    /// R3: serialize snapshot, mutation, durable save and publication together.
+    /// Failed candidates never become executable or advance recoverable state.
+    async fn transition<T>(
+        &self,
+        change: impl FnOnce(
+            &mut HashMap<Uuid, DeletionPlan>,
+            &mut HashMap<Uuid, JobRecord>,
+        ) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let _serial = self.transition_lock.lock().await;
+        if self.persistence_failed.load(Ordering::Acquire) {
+            return Err(AppError::StatePersistenceFailed);
+        }
+        let mut plans = self.plans.read().await.clone();
+        let mut jobs = self.jobs.read().await.clone();
+        let result = change(&mut plans, &mut jobs)?;
+        let state = PersistedState {
+            plans: plans.values().cloned().collect(),
+            jobs: jobs.values().cloned().collect(),
+        };
+        if self.store.save(&state).is_err() {
+            self.persistence_failed.store(true, Ordering::Release);
+            if let Some(context) = &self.context {
+                context.quarantine();
+            }
+            return Err(AppError::StatePersistenceFailed);
+        }
+        *self.plans.write().await = plans;
+        *self.jobs.write().await = jobs;
+        Ok(result)
     }
 
     pub async fn snapshot(&self) -> Result<AppSnapshot, AppError> {
@@ -221,10 +321,7 @@ impl CleanerService {
             ));
         }
         let plan = DeletionPlan::selected_messages(snapshots)?;
-        let view = PlanView::from(&plan);
-        self.plans.write().await.insert(plan.id, plan);
-        self.persist().await?;
-        Ok(view)
+        self.publish_plan(plan).await
     }
 
     pub async fn prepare_chat_action(
@@ -260,10 +357,7 @@ impl CleanerService {
         } else {
             DeletionPlan::chat_wide(request.operation, &chat)?
         };
-        let view = PlanView::from(&plan);
-        self.plans.write().await.insert(plan.id, plan);
-        self.persist().await?;
-        Ok(view)
+        self.publish_plan(plan).await
     }
 
     pub async fn prepare_own_messages(&self, chat_id: i64) -> Result<PlanView, AppError> {
@@ -289,10 +383,7 @@ impl CleanerService {
             ));
         }
         let plan = DeletionPlan::own_messages(&chat, messages)?;
-        let view = PlanView::from(&plan);
-        self.plans.write().await.insert(plan.id, plan);
-        self.persist().await?;
-        Ok(view)
+        self.publish_plan(plan).await
     }
 
     pub async fn prepare_sender_action(
@@ -305,16 +396,14 @@ impl CleanerService {
             .ok_or(AppError::NotFound)?;
         let sender_name = self.gateway.sender_name(request.sender_id).await?;
         let plan = DeletionPlan::by_sender(&chat, request.sender_id, sender_name)?;
-        let view = PlanView::from(&plan);
-        self.plans.write().await.insert(plan.id, plan);
-        self.persist().await?;
-        Ok(view)
+        self.publish_plan(plan).await
     }
 
     pub async fn start_execution(
         self: &Arc<Self>,
         request: ExecuteRequest,
     ) -> Result<JobRecord, AppError> {
+        self.check_context()?;
         let plan = self
             .plans
             .read()
@@ -328,34 +417,39 @@ impl CleanerService {
             typed_chat_title: request.typed_chat_title,
         })?;
 
-        let grant = self
-            .system_grants
-            .lock()
-            .await
-            .remove(&plan.id)
-            .ok_or_else(|| {
-                AppError::SystemAuthentication(
-                    "confirm this frozen plan with macOS immediately before execution".into(),
-                )
-            })?;
-        if grant.fingerprint != plan.fingerprint || grant.expires_at < Instant::now() {
+        let mut grants = self.system_grants.lock().await;
+        self.check_context()?;
+        let grant = grants.remove(&plan.id).ok_or_else(|| {
+            AppError::SystemAuthentication(
+                "confirm this frozen plan with macOS immediately before execution".into(),
+            )
+        })?;
+        if grant.fingerprint != plan.fingerprint
+            || grant.expires_at < Instant::now()
+            || grant.context != self.context.as_ref().map(|c| c.active().clone())
+        {
             return Err(AppError::SystemAuthentication(
                 "the plan-bound authentication grant is invalid or expired".into(),
             ));
         }
+        drop(grants);
 
         let job = JobRecord::new(&plan);
         let cancellation = Arc::new(AtomicBool::new(false));
-        let mut jobs = self.jobs.write().await;
-        if jobs.values().any(|existing| existing.plan_id == plan.id) {
-            return Err(AppError::InvalidRequest(
-                "this frozen plan has already been started".into(),
-            ));
-        }
-        jobs.insert(job.id, job.clone());
-        drop(jobs);
-        self.cancellation.lock().await.insert(job.id, cancellation);
-        self.persist().await?;
+        let mut running = self.cancellation.lock().await;
+        self.transition(|_, jobs| {
+            self.check_context()?;
+            if jobs.values().any(|existing| existing.plan_id == plan.id) {
+                return Err(AppError::InvalidRequest(
+                    "this frozen plan has already been started".into(),
+                ));
+            }
+            jobs.insert(job.id, job.clone());
+            Ok(())
+        })
+        .await?;
+        running.insert(job.id, cancellation);
+        drop(running);
 
         let service = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
@@ -365,6 +459,7 @@ impl CleanerService {
     }
 
     pub async fn authorize_plan(&self, request: AuthorizePlanRequest) -> Result<(), AppError> {
+        self.check_context()?;
         let plan = self
             .plans
             .read()
@@ -377,15 +472,22 @@ impl CleanerService {
                 "the authorization request does not match the frozen plan".into(),
             ));
         }
-        if self.gateway.info().mode == "live" {
-            let reason = authorization_reason(&plan);
+        let reason = authorization_reason(&plan);
+        if let Some(context) = &self.context {
+            context
+                .authenticate(&reason, self.gateway.info().mode == "live")
+                .await?;
+        } else if self.gateway.info().mode == "live" {
             crate::local_auth::authenticate(&reason).await?;
         }
-        self.system_grants.lock().await.insert(
+        let mut grants = self.system_grants.lock().await;
+        self.check_context()?;
+        grants.insert(
             plan.id,
             SystemGrant {
                 fingerprint: plan.fingerprint,
                 expires_at: Instant::now() + Duration::from_secs(60),
+                context: self.context.as_ref().map(|c| c.active().clone()),
             },
         );
         Ok(())
@@ -394,7 +496,9 @@ impl CleanerService {
     pub async fn resume_incomplete(self: &Arc<Self>) {
         // Constructor-time restart policy may have stopped non-idempotent
         // broad jobs. Seal that decision before any safe frozen-ID job resumes.
-        let _ = self.persist().await;
+        if self.check_context().is_err() || self.persist().await.is_err() {
+            return;
+        }
         let ids: Vec<_> = self
             .jobs
             .read()
@@ -404,10 +508,12 @@ impl CleanerService {
             .map(|job| job.id)
             .collect();
         for id in ids {
-            self.cancellation
-                .lock()
-                .await
-                .insert(id, Arc::new(AtomicBool::new(false)));
+            let mut running = self.cancellation.lock().await;
+            if running.contains_key(&id) {
+                continue;
+            }
+            running.insert(id, Arc::new(AtomicBool::new(false)));
+            drop(running);
             let service = Arc::clone(self);
             tauri::async_runtime::spawn(async move {
                 service.run_job(id).await;
@@ -417,24 +523,34 @@ impl CleanerService {
 
     async fn run_job(&self, job_id: Uuid) {
         if let Err(error) = self.run_job_inner(job_id).await {
-            let mut jobs = self.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = if job.deleted > 0 {
-                    JobStatus::Partial
-                } else {
-                    JobStatus::Failed
-                };
-                job.retry_after_seconds = None;
-                job.updated_at = Utc::now();
-                push_error_once(job, error_code(&error));
+            // A persistence failure has already quarantined this executor; the
+            // committed snapshot remains authoritative and no second save is attempted.
+            if !self.persistence_failed.load(Ordering::Acquire)
+                && self
+                    .transition(|_, jobs| {
+                        if let Some(job) = jobs.get_mut(&job_id) {
+                            job.status = if job.deleted > 0 {
+                                JobStatus::Partial
+                            } else {
+                                JobStatus::Failed
+                            };
+                            job.retry_after_seconds = None;
+                            job.updated_at = Utc::now();
+                            push_error_once(job, error_code(&error));
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .is_err()
+            {
+                self.persistence_failed.store(true, Ordering::Release);
             }
-            drop(jobs);
-            let _ = self.persist().await;
         }
         self.cancellation.lock().await.remove(&job_id);
     }
 
     async fn run_job_inner(&self, job_id: Uuid) -> Result<(), AppError> {
+        self.check_context()?;
         let cancellation = self
             .cancellation
             .lock()
@@ -442,17 +558,17 @@ impl CleanerService {
             .get(&job_id)
             .cloned()
             .ok_or(AppError::StateUnavailable)?;
-        let plan_id = {
-            let mut jobs = self.jobs.write().await;
-            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-            if job.status.is_terminal() {
-                return Err(AppError::JobAlreadyTerminal);
-            }
-            job.status = JobStatus::Running;
-            job.updated_at = Utc::now();
-            job.plan_id
-        };
-        self.persist().await?;
+        let plan_id = self
+            .transition(|_, jobs| {
+                let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+                if job.status.is_terminal() {
+                    return Err(AppError::JobAlreadyTerminal);
+                }
+                job.status = JobStatus::Running;
+                job.updated_at = Utc::now();
+                Ok(job.plan_id)
+            })
+            .await?;
 
         let plan = self
             .plans
@@ -561,17 +677,18 @@ impl CleanerService {
             }
         }
 
-        let mut jobs = self.jobs.write().await;
-        let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-        job.status = if job.failed > 0 {
-            JobStatus::Partial
-        } else {
-            JobStatus::Completed
-        };
-        job.retry_after_seconds = None;
-        job.updated_at = Utc::now();
-        drop(jobs);
-        self.persist().await?;
+        self.transition(|_, jobs| {
+            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+            job.status = if job.failed > 0 {
+                JobStatus::Partial
+            } else {
+                JobStatus::Completed
+            };
+            job.retry_after_seconds = None;
+            job.updated_at = Utc::now();
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 
@@ -643,21 +760,39 @@ impl CleanerService {
                     continue;
                 }
 
-                let mut jobs = self.jobs.write().await;
-                let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-                job.skipped += skipped;
-                job.next_batch = index + 1;
-                job.retry_after_seconds = None;
-                match result {
-                    Ok(()) => job.deleted += allowed.len(),
-                    Err(error) => {
-                        job.failed += failed_count;
-                        push_error_once(job, error_code(&error));
+                let fatal = result.as_ref().err().is_some_and(|error| {
+                    matches!(error_code(error), "ambiguous_outcome" | "stale_context")
+                });
+                self.transition(|_, jobs| {
+                    let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+                    job.skipped += skipped;
+                    job.next_batch = index + 1;
+                    job.retry_after_seconds = None;
+                    match result {
+                        Ok(()) => job.deleted += allowed.len(),
+                        Err(error) => {
+                            if error_code(&error) == "ambiguous_outcome" {
+                                job.uncertain += failed_count;
+                            } else {
+                                job.failed += failed_count;
+                            }
+                            push_error_once(job, error_code(&error));
+                        }
                     }
+                    if fatal {
+                        job.status = if job.deleted > 0 {
+                            JobStatus::Partial
+                        } else {
+                            JobStatus::Failed
+                        };
+                    }
+                    job.updated_at = Utc::now();
+                    Ok(())
+                })
+                .await?;
+                if fatal {
+                    return Ok(true);
                 }
-                job.updated_at = Utc::now();
-                drop(jobs);
-                self.persist().await?;
                 break;
             }
         }
@@ -693,12 +828,13 @@ impl CleanerService {
                     .await
                 {
                     Ok(()) => {
-                        let mut jobs = self.jobs.write().await;
-                        let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-                        job.next_batch = 1;
-                        job.updated_at = Utc::now();
-                        drop(jobs);
-                        self.persist().await?;
+                        self.transition(|_, jobs| {
+                            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+                            job.next_batch = 1;
+                            job.updated_at = Utc::now();
+                            Ok(())
+                        })
+                        .await?;
                         break;
                     }
                     Err(error) => {
@@ -759,6 +895,13 @@ impl CleanerService {
 
         let refreshed = if current.capabilities.can_leave_chat {
             self.gateway.leave_chat(chat_id).await?;
+            // Membership removal is an acknowledged compound step. A failed
+            // required save here must prevent the following self-removal call.
+            self.transition(|_, jobs| {
+                jobs.get_mut(&job_id).ok_or(AppError::NotFound)?.updated_at = Utc::now();
+                Ok(())
+            })
+            .await?;
             if self.stop_if_cancelled(job_id, cancellation).await? {
                 return Ok(true);
             }
@@ -837,13 +980,14 @@ impl CleanerService {
     }
 
     async fn finish_cancelled(&self, job_id: Uuid) -> Result<(), AppError> {
-        let mut jobs = self.jobs.write().await;
-        let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-        job.status = JobStatus::Cancelled;
-        job.retry_after_seconds = None;
-        job.updated_at = Utc::now();
-        drop(jobs);
-        self.persist().await
+        self.transition(|_, jobs| {
+            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+            job.status = JobStatus::Cancelled;
+            job.retry_after_seconds = None;
+            job.updated_at = Utc::now();
+            Ok(())
+        })
+        .await
     }
 
     async fn stop_if_cancelled(
@@ -864,15 +1008,15 @@ impl CleanerService {
         cancellation: &AtomicBool,
         seconds: u64,
     ) -> Result<bool, AppError> {
-        {
-            let mut jobs = self.jobs.write().await;
+        self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
             job.status = JobStatus::Queued;
             job.retry_after_seconds = Some(seconds);
             job.updated_at = Utc::now();
             push_error_once(job, "telegram_rate_limited");
-        }
-        self.persist().await?;
+            Ok(())
+        })
+        .await?;
 
         for _ in 0..seconds {
             if cancellation.load(Ordering::Acquire) {
@@ -880,20 +1024,22 @@ impl CleanerService {
                 return Ok(true);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
+            self.check_context()?;
         }
         if cancellation.load(Ordering::Acquire) {
             self.finish_cancelled(job_id).await?;
             return Ok(true);
         }
 
-        {
-            let mut jobs = self.jobs.write().await;
+        self.check_context()?;
+        self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
             job.status = JobStatus::Running;
             job.retry_after_seconds = None;
             job.updated_at = Utc::now();
-        }
-        self.persist().await?;
+            Ok(())
+        })
+        .await?;
         Ok(false)
     }
 
@@ -917,6 +1063,19 @@ impl CleanerService {
 
     pub async fn jobs(&self) -> Vec<JobRecord> {
         let mut jobs: Vec<_> = self.jobs.read().await.values().cloned().collect();
+        if self.persistence_failed.load(Ordering::Acquire) {
+            for job in &mut jobs {
+                if !job.status.is_terminal() {
+                    job.status = if job.deleted > 0 {
+                        JobStatus::Partial
+                    } else {
+                        JobStatus::Failed
+                    };
+                    job.retry_after_seconds = None;
+                    push_error_once(job, "state_persistence_failed");
+                }
+            }
+        }
         jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
         jobs.truncate(50);
         jobs
@@ -952,16 +1111,14 @@ impl CleanerService {
     }
 
     async fn persist(&self) -> Result<(), AppError> {
-        let mut plans: Vec<_> = self.plans.read().await.values().cloned().collect();
-        plans.sort_by_key(|plan| std::cmp::Reverse(plan.created_at));
-        plans.truncate(50);
-        let jobs = self.jobs().await;
-        self.store.save(&PersistedState { plans, jobs })
+        self.transition(|_, _| Ok(())).await
     }
 }
 
 fn error_code(error: &AppError) -> &'static str {
     match error {
+        AppError::Gateway(message) if message == "RETRACT_AMBIGUOUS_OUTCOME" => "ambiguous_outcome",
+        AppError::InvalidRequest(message) if message == "stale_context" => "stale_context",
         AppError::Gateway(_) => "telegram_rejected",
         AppError::Timeout(_) => "telegram_timeout",
         AppError::SecureStore(_) => "secure_store",
