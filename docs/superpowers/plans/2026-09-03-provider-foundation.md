@@ -139,7 +139,7 @@ pub fn resource_id(&self) -> Result<Uuid, DomainError> {
 }
 ```
 
-- [ ] Define full normalized records from parent-design sections “Account and source”, “Conversation”, “Content item”, and “Attachments”: IDs, provenance, evidence/timestamps, inert attachments, optional parent/reply, privacy findings and versioned metadata. Preserve outgoing/pin/grouping/filter information in typed Telegram metadata. Reuse existing privacy-kind semantics; do not duplicate the detector implementation.
+- [ ] Define full normalized records from parent-design sections “Account and source”, “Conversation”, “Content item”, and “Attachments”: IDs, provenance, evidence/timestamps, inert attachments, optional parent/reply, privacy findings and versioned metadata. Neutral records retain an opaque versioned metadata envelope; Tasks 4–5 define the outgoing/pin/grouping/filter metadata type inside the Telegram adapter, not in this neutral crate. Reuse existing privacy-kind semantics; do not duplicate the detector implementation.
 
 - [ ] Add tests that alter each fingerprint-bound field, reorder object insertion, reorder unordered targets, and reorder ordered action steps. Implement canonical JSON encoding, target sorting/deduplication with conflicting-identity rejection, scope validation, confirmation requirements, and restart policy. The recipe excludes its own fingerprint to avoid circular hashing. A sealed plan validates by recomputing its fingerprint.
 
