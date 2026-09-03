@@ -712,6 +712,49 @@ fn invalid_v3_never_restores_a_valid_legacy_backup() {
                 "foundation state is malformed"
             };
             assert!(matches!(error, AppError::SecureStore(message) if message == expected));
+            // The registered retry's runtime seam must keep a corrupt profile
+            // failed across repeated explicit recreation attempts, never restore
+            // its authentic legacy backup or invent an executable identity.
+            tauri::async_runtime::block_on(async {
+                let runtime =
+                    crate::RuntimeState::new(crate::provider_service::ProviderService::failed(
+                        crate::provider_service::safe(
+                            retract_domain::ErrorCode::StatePersistenceFailed,
+                        ),
+                    ));
+                for _ in 0..2 {
+                    let error = runtime
+                        .retry_identity(
+                            json!({"contractVersion":2,"context":null,"payload":{}}),
+                            || {
+                                let _store = FoundationStore::open_with_test_key(
+                                    directory.path().to_path_buf(),
+                                    binding(),
+                                    key,
+                                )?;
+                                Ok(crate::provider_service::ProviderService::setup())
+                            },
+                        )
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        error.code,
+                        retract_domain::ErrorCode::StatePersistenceFailed
+                    );
+                    let failed = runtime
+                        .service
+                        .read()
+                        .await
+                        .bootstrap(json!({"contractVersion":2,"context":null,"payload":{}}))
+                        .await
+                        .unwrap();
+                    assert_eq!(failed["context"], Value::Null);
+                    assert_eq!(
+                        failed["payload"]["identity"]["diagnostic"]["code"],
+                        "state_persistence_failed"
+                    );
+                }
+            });
             assert_eq!(fs::read(&active).unwrap(), invalid);
             assert_eq!(fs::read(&backup).unwrap(), original);
             assert!(!directory.path().join("jobs.enc.tmp").exists());

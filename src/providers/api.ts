@@ -1,14 +1,30 @@
 import type { RetractApi } from "../api-contract";
-import type { PlanOperation } from "../types";
+import type { AppSnapshot, PlanOperation } from "../types";
 import { array, decodeBootstrap, decodeContext, decodeContent, decodeConversation, decodeEnvelope, decodeError, decodeIntents, decodeJob, decodePlan, decodeRefs, invalid, object, nullable, recordRef, text, type IntentDescriptor } from "./contract";
 import { contentView, conversationView, decodeSettings, jobView, planView, searchFilters, snapshotView } from "./telegram";
 import { refKey, sameScope, type ActiveContext, type ScopedResourceRef } from "./identity";
 export type Transport = (command: string, request: unknown) => Promise<unknown>;
+export class ProviderApiError extends Error {
+  readonly code: ReturnType<typeof decodeError>["code"];
+  readonly retryAt: string | null;
+  constructor(error: ReturnType<typeof decodeError>) {
+    super(error.message);
+    this.code = error.code;
+    this.retryAt = error.retryAt;
+  }
+}
+export class CommittedSettingsError extends Error {
+  readonly snapshot: AppSnapshot;
+  constructor(snapshot: AppSnapshot, cause: unknown) {
+    super("Settings were applied, but their current view could not be loaded.", { cause });
+    this.snapshot = snapshot;
+  }
+}
 export function createApi(transport: Transport, isDesktop: () => boolean): RetractApi {
   async function call(command: string, payload: unknown, context: ActiveContext | null) {
     if (context) decodeContext(context);
     try { return await transport(command, { contractVersion: 2, context, payload }); }
-    catch (error) { if (error instanceof Error) throw error; throw new Error(decodeError(error).message); }
+    catch (error) { if (error instanceof Error) throw error; throw new ProviderApiError(decodeError(error)); }
   }
   async function active(command: string, payload: unknown, context: ActiveContext) { decodeContext(context); return decodeEnvelope(await call(command, payload, context), context).payload; }
   async function intents(targets: ScopedResourceRef[], context: ActiveContext): Promise<IntentDescriptor[]> { decodeRefs(targets, context.scope); return decodeIntents(await active("get_intents_v2", { actionId: "", targets, actor: null }, context)); }
@@ -26,8 +42,10 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     connectionSettings: async context => decodeSettings(decodeEnvelope(await call("get_connection_settings_v2", {}, context), context, true).payload),
     saveConnectionSettings: async (request, context) => {
       const snapshot = snapshotView(decodeBootstrap(await call("save_connection_settings_v2", request, context)));
-      const connectionSettings = await api.connectionSettings(snapshot.context);
-      return { snapshot, connectionSettings };
+      try {
+        const connectionSettings = await api.connectionSettings(snapshot.context);
+        return { snapshot, connectionSettings };
+      } catch (cause) { throw new CommittedSettingsError(snapshot, cause); }
     },
     search: async (request, context) => {
       decodeRefs(request.conversations, context.scope, "conversation");

@@ -87,6 +87,8 @@ The API hash, TDLib database key, and encrypted job-store key live in one versio
 
 When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. Credentials, Keychain entries and TDLib session/profile paths are unchanged. See the [migration contract](docs/TELEGRAM_CHARACTERIZATION.md#current-encrypted-store-and-migration-contract).
 
+Connection failures show a safe diagnostic with verification retry and connection settings. If a profile is in use, close the other Retract process before retrying. Invalid state remains blocked: preserve the profile and backup rather than deleting or restoring files. A failed settings replacement can be corrected in the app; recovery rediscovers the current connection without automatically repeating a save or cleanup.
+
 ## Make the first deletion safely
 
 Do not begin with an old or valuable chat. Follow the complete [local live-test guide](docs/LOCAL_LIVE_TEST.md); the short version is:

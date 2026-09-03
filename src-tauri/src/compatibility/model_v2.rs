@@ -55,9 +55,19 @@ pub enum IdentityStatus {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogPhase {
+    #[default]
+    Idle,
+    Discovering,
+    Loading,
+    Ready,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogProgress {
-    pub phase: String,
+    pub phase: CatalogPhase,
     pub total: usize,
     pub processed: usize,
 }

@@ -3460,6 +3460,10 @@ mod tests {
                 None,
                 true,
             );
+            // Let the spawned initial authorization query reach its delayed
+            // identity lookup before injecting duplicate/transition updates.
+            // Otherwise this test can finish before that query is scheduled.
+            wait_for_request_count(&script, "getMe", 1).await;
             script.emit_update(json!({
                 "@type": "updateAuthorizationState",
                 "authorization_state": { "@type": "authorizationStateReady" }

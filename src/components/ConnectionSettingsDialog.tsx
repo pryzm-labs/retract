@@ -10,9 +10,10 @@ interface ConnectionSettingsDialogProps {
   required: boolean;
   onClose: () => void;
   onSaved: (result: SaveConnectionSettingsResult) => void;
+  onSaveFailed?: (cause: unknown) => Promise<void>;
 }
 
-export function ConnectionSettingsDialog({ context = null, settings, required, onClose, onSaved }: ConnectionSettingsDialogProps) {
+export function ConnectionSettingsDialog({ context = null, settings, required, onClose, onSaved, onSaveFailed }: ConnectionSettingsDialogProps) {
   const [tdlibPath, setTdlibPath] = useState(settings.tdlibPath || settings.detectedTdlibPath || "");
   const [apiId, setApiId] = useState(settings.apiId?.toString() || "");
   const [apiHash, setApiHash] = useState("");
@@ -47,8 +48,10 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
       setSaved(true);
       onSaved(result);
     } catch (cause) {
+      if (!alive.current) return;
       setError(cause instanceof Error ? cause.message : "Retract could not save these settings.");
-      setBusy(false);
+      await onSaveFailed?.(cause);
+      if (alive.current) setBusy(false);
     }
   };
 

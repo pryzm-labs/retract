@@ -26,21 +26,32 @@ pub struct ProviderService {
     connection: Arc<dyn ApplicationConnection>,
     registered: Mutex<Option<(ActiveContext, Arc<ProviderRegistry>)>>,
     stopped: AtomicBool,
+    recreation_required: bool,
 }
 
 impl ProviderService {
     pub fn new(connection: Arc<dyn ApplicationConnection>) -> Arc<Self> {
+        Self::from_connection(connection, false)
+    }
+    fn from_connection(
+        connection: Arc<dyn ApplicationConnection>,
+        recreation_required: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             connection,
             registered: Mutex::new(None),
             stopped: AtomicBool::new(false),
+            recreation_required,
         })
     }
     pub fn setup() -> Arc<Self> {
         Self::new(Arc::new(SetupConnection(None)))
     }
     pub fn failed(diagnostic: SafeError) -> Arc<Self> {
-        Self::new(Arc::new(SetupConnection(Some(diagnostic))))
+        Self::from_connection(Arc::new(SetupConnection(Some(diagnostic))), true)
+    }
+    pub(crate) fn requires_recreation(&self) -> bool {
+        self.recreation_required
     }
     pub fn context(&self) -> Option<ActiveContext> {
         if self.stopped.load(Ordering::Acquire) {

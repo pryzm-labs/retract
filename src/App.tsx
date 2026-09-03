@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@retract/api";
+import { CommittedSettingsError } from "./providers/api";
 import { sameContext, sameScope, scopeKey, resourceKey, refKey, type ActiveContext, type ScopedResourceRef, type Uuid } from "./providers/identity";
 import { AuthGate } from "./components/AuthGate";
 import { BrandLogo } from "./components/BrandLogo";
@@ -84,6 +85,7 @@ export default function App() {
       setResults({ messages: [], returned: 0, truncated: false });
       setSettlingRemovalChatIds(new Set());
       setRefreshingCatalog(false);
+      setSyncingCatalog(false);
       setSearching(false);
       catalogSyncStarted.current = false;
     }
@@ -113,10 +115,10 @@ export default function App() {
     }
   }, [publish]);
 
-  const refreshAuth = useCallback(async () => {
+  const refreshAuth = useCallback(async (discover = false) => {
     let capturedEpoch = epoch.current;
     try {
-      const next = await api.bootstrapSnapshot(currentContext.current);
+      const next = await api.bootstrapSnapshot(discover ? null : currentContext.current);
       if (capturedEpoch !== epoch.current) return;
       const same = sameContext(currentContext.current, next.context);
       if (same && catalogSyncStarted.current) {
@@ -165,7 +167,7 @@ export default function App() {
   }, [publish, loadSnapshot]);
 
   useEffect(() => {
-    if (!snapshot || (snapshot.context && !syncingCatalog && snapshot.catalog.phase === "ready")) return;
+    if (!snapshot || snapshot.identity.state === "failed" || (snapshot.context && !syncingCatalog && snapshot.catalog.phase === "ready")) return;
     let pending = false;
     const interval = window.setInterval(() => {
       if (pending) return;
@@ -375,6 +377,37 @@ export default function App() {
   };
 
   const renderedEpoch = epoch.current;
+  const recoverConnection = async (cause?: unknown) => {
+    if (renderedEpoch !== epoch.current) return;
+    try {
+      // A rejected settings operation may already have retired the connection.
+      // Discover read-only; never retry the mutation or rebind a previous plan.
+      const next = await api.bootstrapSnapshot().catch(error => {
+        if (cause instanceof CommittedSettingsError) return cause.snapshot;
+        throw error;
+      });
+      if (renderedEpoch !== epoch.current) return;
+      publish(next);
+      if (cause) showError(cause, setToast);
+      if (cause instanceof CommittedSettingsError) setSettingsOpen(false);
+      if (next.context && next.identity.state === "ready") {
+        catalogSyncStarted.current = true;
+        void loadSnapshot(next.context);
+      }
+    } catch (error) {
+      if (renderedEpoch === epoch.current) setStartupError(error instanceof Error ? error.message : "The connection could not be verified.");
+    }
+  };
+  const retryIdentity = async () => {
+    const generation = beginAction("Retrying connection…");
+    if (generation === null) return;
+    try {
+      await api.retryIdentity(currentContext.current);
+      if (generation === actionGeneration.current) await recoverConnection();
+    } catch (cause) {
+      if (generation === actionGeneration.current) await recoverConnection(cause);
+    } finally { endAction(generation); }
+  };
   const applyConnectionSettings = (result: SaveConnectionSettingsResult) => {
     if (renderedEpoch !== epoch.current) return;
     publish(result.snapshot);
@@ -518,7 +551,7 @@ export default function App() {
   };
 
   if (startupError) {
-    return <div className="app-loading"><section className="loading-card"><h1>Workspace not ready</h1><p role="alert">{startupError}</p><button onClick={() => { setStartupError(null); void refreshAuth(); }}>Retry</button></section></div>;
+    return <div className="app-loading"><section className="loading-card"><h1>Workspace not ready</h1><p role="alert">{startupError}</p><button onClick={() => { setStartupError(null); void refreshAuth(true); }}>Retry</button></section></div>;
   }
 
   if (loading || !snapshot) {
@@ -527,8 +560,8 @@ export default function App() {
     );
   }
 
-  if (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready")) {
-    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><button onClick={() => void api.retryIdentity(snapshot.context).then(refreshAuth).catch(error => showError(error, setToast))}>Retry verification</button></> : <LoaderCircle className="spin" />}<button onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />}</section></div>;
+  if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section></div>;
   }
 
   if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
@@ -540,7 +573,7 @@ export default function App() {
       <>
         <AuthGate context={snapshot.context} auth={snapshot.auth} onRefresh={refreshAuth} onOpenSettings={() => setSettingsOpen(true)} />
         {connectionSettings && settingsOpen && (
-          <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
+          <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
         )}
       </>
     );
@@ -613,7 +646,7 @@ export default function App() {
       )}
 
       {connectionSettings && settingsOpen && (
-        <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
+        <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
       )}
 
       {toast && (

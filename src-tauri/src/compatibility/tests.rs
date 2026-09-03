@@ -33,6 +33,32 @@ fn setup() -> tauri::WebviewWindow<MockRuntime> {
     with_service(ProviderService::setup())
 }
 
+#[test]
+fn final_review_bootstrap_serialization_matches_the_frontend_fixture() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../src/test/fixtures/connection-bootstrap.json"
+    ))
+    .unwrap();
+    for (name, service) in [
+        ("setup", ProviderService::setup()),
+        (
+            "failed",
+            ProviderService::failed(crate::provider_service::safe(
+                retract_domain::ErrorCode::ProfileInUse,
+            )),
+        ),
+    ] {
+        let actual = invoke(
+            &with_service(service),
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":null,"payload":{}}),
+        )
+        .unwrap();
+        assert_eq!(actual, fixture[name], "shared frontend fixture: {name}");
+        assert_eq!(actual["payload"]["catalog"]["phase"], "idle", "{name}");
+    }
+}
+
 fn with_service(service: Arc<ProviderService>) -> tauri::WebviewWindow<MockRuntime> {
     let app = commands_v2::register(mock_builder())
         .manage(Arc::new(crate::RuntimeState::new(service)))
@@ -63,6 +89,157 @@ fn compatibility_v2_failed_setup_exposes_safe_retryable_status_without_an_identi
     assert!(!bootstrap.to_string().contains("secret"));
     let error=invoke(&webview,"save_connection_settings_v2",json!({"contractVersion":2,"context":null,"payload":{"tdlibPath":"","apiId":0,"apiHash":"synthetic-invalid","useTestDc":false}})).unwrap_err();
     assert_eq!(error["code"], "scope_mismatch");
+}
+
+#[test]
+fn final_review_failed_connection_retry_recreates_the_runtime() {
+    // Empty synthetic app settings take create_service's setup branch, before
+    // any vault, store or native connection. Retry must replace the failed service.
+    let webview = with_service(ProviderService::failed(crate::provider_service::safe(
+        retract_domain::ErrorCode::ProfileInUse,
+    )));
+    let recovered = invoke(
+        &webview,
+        "retry_identity_v2",
+        json!({"contractVersion":2,"context":null,"payload":{}}),
+    )
+    .unwrap();
+    assert_eq!(recovered["payload"]["identity"]["state"], "unavailable");
+    assert_eq!(recovered["context"], Value::Null);
+    assert_eq!(
+        invoke(
+            &webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":null,"payload":{}})
+        )
+        .unwrap(),
+        recovered
+    );
+}
+
+#[test]
+fn final_review_failed_replacement_requires_discovery_before_an_explicit_corrected_save() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use tauri::Manager;
+        let directory_a = tempfile::tempdir().unwrap();
+        let directory_b = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let mut next_context = active.clone();
+        next_context.session_generation = uuid::Uuid::new_v4();
+        let (a, gateway) = telegram(directory_a.path(), active.clone()).await;
+        let (b, _) = telegram(directory_b.path(), next_context.clone()).await;
+        let plan = a.prepare(&active, vec![fixture()["messages"][0]["ref"].clone()]);
+        a.authorize(&active, &plan);
+        let runtime = a.webview.app_handle().state::<Arc<crate::RuntimeState>>();
+        let saves = std::cell::Cell::new(0);
+        let request = |context: Value| json!({"contractVersion":2,"context":context,"payload":{"tdlibPath":"synthetic-library","apiId":1,"apiHash":null,"useTestDc":true}});
+        let error = runtime
+            .save_settings(
+                request(json!(active)),
+                |_| {
+                    saves.set(saves.get() + 1);
+                    Ok(())
+                },
+                || Err(crate::error::AppError::ProfileInUse),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, retract_domain::ErrorCode::ProfileInUse);
+        assert!(a.service.context().is_none());
+        assert!(
+            a.start(&active, &plan).is_err(),
+            "retired grant cannot execute"
+        );
+        assert!(
+            runtime
+                .save_settings(
+                    request(json!(active)),
+                    |_| panic!("stale save must not write"),
+                    || panic!("stale save must not recreate")
+                )
+                .await
+                .is_err()
+        );
+        let discovered = invoke(
+            &a.webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":null,"payload":{}}),
+        )
+        .unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../src/test/fixtures/connection-bootstrap.json"
+        ))
+        .unwrap();
+        assert_eq!(discovered, fixture["failed"]);
+        let corrected = runtime
+            .save_settings(
+                request(discovered["context"].clone()),
+                |_| {
+                    saves.set(saves.get() + 1);
+                    Ok(())
+                },
+                || Ok(b.service.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(corrected["context"], json!(next_context));
+        assert_eq!(
+            saves.get(),
+            2,
+            "only the two user-requested saves reach storage"
+        );
+        assert!(a.start(&active, &plan).is_err());
+        assert!(
+            a.start(&next_context, &plan).is_err(),
+            "old plan is not retargeted"
+        );
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn final_review_runtime_retry_recovers_after_profile_lock_release() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use crate::persistence::FoundationStore;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let owner = FoundationStore::open_with_test_key(
+            directory.path().to_path_buf(),
+            binding(&active),
+            KEY,
+        )
+        .unwrap();
+        let original = std::fs::read(directory.path().join("jobs.enc")).unwrap();
+        let runtime = crate::RuntimeState::new(ProviderService::failed(
+            crate::provider_service::safe(retract_domain::ErrorCode::ProfileInUse),
+        ));
+        let request = json!({"contractVersion":2,"context":null,"payload":{}});
+        let create = || {
+            let _store = FoundationStore::open_independent_with_test_key(
+                directory.path().to_path_buf(),
+                binding(&active),
+                KEY,
+            )?;
+            Ok(ProviderService::setup())
+        };
+        assert_eq!(
+            runtime
+                .retry_identity(request.clone(), create)
+                .await
+                .unwrap_err()
+                .code,
+            retract_domain::ErrorCode::ProfileInUse
+        );
+        drop(owner);
+        let recovered = runtime.retry_identity(request, create).await.unwrap();
+        assert_eq!(recovered["payload"]["identity"]["state"], "unavailable");
+        assert_eq!(
+            std::fs::read(directory.path().join("jobs.enc")).unwrap(),
+            original
+        );
+    });
 }
 
 pub(crate) fn invoke(
@@ -306,6 +483,63 @@ fn compatibility_v2_owned_group_cleanup_and_all_filtered_search_fields_remain_av
             assert_eq!(record["providerMetadata"]["payload"]["pinned"], false);
         }
         assert_eq!(gateway.chat_read_counts().0, before.0);
+        assert!(gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn final_review_own_message_intents_respect_known_kind_and_membership() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+        use crate::gateway::TelegramGateway;
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("context");
+        let (harness, gateway) = telegram(directory.path(), active.clone()).await;
+        gateway
+            .set_chat_membership(-1003, cleaner_domain::ChatRole::Member, false)
+            .await;
+        for (chat_id, availability) in [
+            (101, "unavailable"),
+            (202, "unavailable"),
+            (-1004, "unavailable"),
+            (-1003, "unavailable"),
+            (-1001, "live_preflight_required"),
+        ] {
+            let chat = gateway.chat_by_id(chat_id).await.unwrap().unwrap();
+            let record =
+                crate::providers::telegram::compat::normalize_conversation(&active.scope, &chat)
+                    .unwrap();
+            let reference = retract_domain::ScopedResourceRef {
+                scope: active.scope.clone(),
+                id: *record.id.as_uuid(),
+                resource: record.resource,
+            };
+            let intents = harness
+                .call(
+                    "get_intents_v2",
+                    &active,
+                    json!({"actionId":"catalog","targets":[reference],"actor":null}),
+                )
+                .unwrap();
+            let own = intents
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|intent| intent["actionId"] == "delete_my_messages")
+                .unwrap();
+            assert_eq!(
+                own["descriptors"][0]["availability"], availability,
+                "chat {chat_id}"
+            );
+            if availability == "unavailable" {
+                assert_eq!(
+                    own["descriptors"][0]["unavailableReason"]["code"],
+                    "permission_changed"
+                );
+            } else {
+                assert_eq!(own["descriptors"][0]["requiresLivePreflight"], true);
+            }
+        }
         assert!(gateway.operation_log().await.is_empty());
     });
 }

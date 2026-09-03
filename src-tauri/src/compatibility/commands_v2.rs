@@ -51,11 +51,14 @@ pub(crate) async fn submit_auth_v2(
     runtime.service.read().await.auth(request, false).await
 }
 #[tauri::command]
-pub(crate) async fn retry_identity_v2(
+pub(crate) async fn retry_identity_v2<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     runtime: State<'_, Arc<RuntimeState>>,
     request: Value,
 ) -> Result<Value, SafeError> {
-    runtime.service.read().await.auth(request, true).await
+    runtime
+        .retry_identity(request, || crate::create_service(&app))
+        .await
 }
 
 #[tauri::command]
@@ -87,31 +90,83 @@ pub(crate) async fn save_connection_settings_v2<R: tauri::Runtime>(
     runtime: State<'_, Arc<RuntimeState>>,
     request: Value,
 ) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<crate::connection_settings::SaveConnectionSettingsRequest> =
-        decode(request)?;
-    let mut current = runtime.service.write().await;
-    current.check_optional(request.context.as_ref())?;
-    if current.has_workers().await {
-        return Err(safe(ErrorCode::PermissionChanged));
-    }
-    current.check_optional(request.context.as_ref())?;
-    crate::connection_settings::save(&app, request.payload).map_err(boundary_error)?;
-    current.shutdown().await;
-    let next = match crate::create_service(&app) {
-        Ok(next) => next,
-        Err(error) => {
-            let diagnostic = boundary_error(error);
-            *current = crate::provider_service::ProviderService::failed(diagnostic.clone());
-            return Err(diagnostic);
-        }
-    };
-    *current = next;
-    current
-        .bootstrap(
-            serde_json::json!({"contractVersion":2,"context":current.context(),"payload":{}}),
+    runtime
+        .save_settings(
+            request,
+            |settings| crate::connection_settings::save(&app, settings),
+            || crate::create_service(&app),
         )
         .await
+}
+
+impl RuntimeState {
+    /// The registered command owns the real settings/vault and connection
+    /// factories; this lifecycle seam also admits synthetic I/O in tests.
+    pub(crate) async fn save_settings(
+        &self,
+        request: Value,
+        save: impl FnOnce(
+            crate::connection_settings::SaveConnectionSettingsRequest,
+        ) -> Result<(), crate::error::AppError>,
+        create: impl FnOnce() -> Result<
+            Arc<crate::provider_service::ProviderService>,
+            crate::error::AppError,
+        >,
+    ) -> Result<Value, SafeError> {
+        validate_version(&request)?;
+        let request: BootstrapRequest<crate::connection_settings::SaveConnectionSettingsRequest> =
+            decode(request)?;
+        let mut current = self.service.write().await;
+        current.check_optional(request.context.as_ref())?;
+        if current.has_workers().await {
+            return Err(safe(ErrorCode::PermissionChanged));
+        }
+        current.check_optional(request.context.as_ref())?;
+        save(request.payload).map_err(boundary_error)?;
+        Self::recreate(&mut current, create).await
+    }
+
+    pub(crate) async fn retry_identity(
+        &self,
+        raw: Value,
+        create: impl FnOnce() -> Result<
+            Arc<crate::provider_service::ProviderService>,
+            crate::error::AppError,
+        >,
+    ) -> Result<Value, SafeError> {
+        validate_version(&raw)?;
+        let request: BootstrapRequest<Empty> = decode(raw.clone())?;
+        let mut current = self.service.write().await;
+        current.check_optional(request.context.as_ref())?;
+        if !current.requires_recreation() {
+            return current.auth(raw, true).await;
+        }
+        Self::recreate(&mut current, create).await
+    }
+
+    async fn recreate(
+        current: &mut Arc<crate::provider_service::ProviderService>,
+        create: impl FnOnce() -> Result<
+            Arc<crate::provider_service::ProviderService>,
+            crate::error::AppError,
+        >,
+    ) -> Result<Value, SafeError> {
+        current.shutdown().await;
+        let next = match create() {
+            Ok(next) => next,
+            Err(error) => {
+                let diagnostic = boundary_error(error);
+                *current = crate::provider_service::ProviderService::failed(diagnostic.clone());
+                return Err(diagnostic);
+            }
+        };
+        *current = next;
+        current
+            .bootstrap(
+                serde_json::json!({"contractVersion":2,"context":current.context(),"payload":{}}),
+            )
+            .await
+    }
 }
 
 /// Production and tests use this same registration, not a parallel test router.

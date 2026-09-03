@@ -239,6 +239,17 @@ impl DemoGateway {
         chat.capabilities.can_clear_for_everyone = allowed;
     }
 
+    pub(crate) async fn set_chat_membership(&self, chat_id: i64, role: ChatRole, can_leave: bool) {
+        let mut data = self.data.write().await;
+        let chat = data
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == chat_id)
+            .unwrap();
+        chat.capabilities.role = role;
+        chat.capabilities.can_leave_chat = can_leave;
+    }
+
     #[cfg(test)]
     pub(crate) async fn append_messages(&self, chat_id: i64, first_message_id: i64, count: usize) {
         let mut data = self.data.write().await;

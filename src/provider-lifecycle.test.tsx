@@ -20,8 +20,9 @@ type FixtureContext = typeof fixture.context;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((finish) => { resolve = finish; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((finish, fail) => { resolve = finish; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function installTransport(options: {
@@ -385,9 +386,11 @@ describe("late v2 responses across account and source changes", () => {
   });
 
   it.each([
-    ["account", fixture.syntheticContext, fixture.messages[2]],
-    ["source", otherSource, sourceMessage]
-  ] as const)("does not publish stale settings after %s verification advances", async (_field, nextContext, message) => {
+    ["account", fixture.syntheticContext, fixture.messages[2], false],
+    ["source", otherSource, sourceMessage, false],
+    ["account with failed save", fixture.syntheticContext, fixture.messages[2], true],
+    ["source with failed save", otherSource, sourceMessage, true]
+  ] as const)("does not publish stale settings after %s verification advances", async (_field, nextContext, message, failed) => {
     const saved = deferred<unknown>();
     let verified = false;
     vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -415,7 +418,9 @@ describe("late v2 responses across account and source changes", () => {
     await waitFor(() => expect(vi.mocked(invoke).mock.calls.some(([c]) => c === "save_connection_settings_v2")).toBe(true));
     verified = true;
     fireEvent.click(await screen.findByText(message.preview, {}, { timeout: 2000 }));
-    await act(async () => saved.resolve(wireSnapshot(fixture.context)));
+    const discoveries = vi.mocked(invoke).mock.calls.filter(([c]) => c === "get_bootstrap_snapshot_v2").length;
+    await act(async () => failed ? saved.reject({ code: "profile_in_use", retryAt: null }) : saved.resolve(wireSnapshot(fixture.context)));
+    expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === "get_bootstrap_snapshot_v2")).toHaveLength(discoveries);
     expect(screen.getByText(message.preview).closest("article")).toHaveClass("is-selected");
     expect(screen.queryByText("Connection settings applied.")).not.toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.find(([c]) => c === "save_connection_settings_v2")?.[1]).toMatchObject({ request: { context: null } });

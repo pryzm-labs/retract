@@ -1,0 +1,33 @@
+{
+  "setup": {
+    "contractVersion": 2,
+    "context": null,
+    "payload": {
+      "identity": { "state": "unavailable" },
+      "auth": null,
+      "catalog": { "phase": "idle", "total": 0, "processed": 0 },
+      "chats": [],
+      "recentJobs": [],
+      "legacyHistory": []
+    }
+  },
+  "failed": {
+    "contractVersion": 2,
+    "context": null,
+    "payload": {
+      "identity": {
+        "state": "failed",
+        "diagnostic": {
+          "code": "profile_in_use",
+          "message": "This profile is already in use by another application process.",
+          "retryAt": null
+        }
+      },
+      "auth": null,
+      "catalog": { "phase": "idle", "total": 0, "processed": 0 },
+      "chats": [],
+      "recentJobs": [],
+      "legacyHistory": []
+    }
+  }
+}

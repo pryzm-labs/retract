@@ -222,6 +222,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
         // Discovery describes the existing leave preparation policy without
         // enumerating history or freezing targets. The final plan remains the
         // authority for whether any eligible message-cleanup steps exist.
+        let mut own_messages_supported = false;
         let leave_description = if targets.len() == 1
             && targets[0].resource.resource_kind == ResourceKind::Conversation
         {
@@ -234,6 +235,11 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                 .ok_or_else(|| safe(ErrorCode::NotFound))?;
             self.check_active(context)?;
             let c = &chat.capabilities;
+            own_messages_supported = matches!(
+                chat.kind,
+                cleaner_domain::ChatKind::BasicGroup | cleaner_domain::ChatKind::Supergroup
+            ) && (c.role != cleaner_domain::ChatRole::Member
+                || c.can_leave_chat);
             let (cleanup_kind, label) = if c.can_clear_for_everyone {
                 (ActionKind::ClearConversation, "Clear all history & leave")
             } else if c.can_delete_others {
@@ -320,11 +326,16 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                     _ => unreachable!("closed intent catalog"),
                 };
                 let descriptors = if *id == "delete_my_messages" {
-                    vec![super::compat::descriptor(
+                    let mut descriptor = super::compat::descriptor(
                         kind,
                         ExpectedEffect::RemovedForAllParticipants,
                         ConfirmationTier::High,
-                    )]
+                    );
+                    if !own_messages_supported {
+                        descriptor.availability = retract_domain::Availability::Unavailable;
+                        descriptor.unavailable_reason = Some(safe(ErrorCode::PermissionChanged));
+                    }
+                    vec![descriptor]
                 } else {
                     descriptors
                         .iter()
@@ -542,7 +553,13 @@ impl ApplicationConnection for TelegramConnection {
                     .map_err(|_| safe(ErrorCode::UnsupportedSchema))?,
             }),
             catalog: wire::CatalogProgress {
-                phase: progress.phase.into(),
+                phase: match progress.phase {
+                    "idle" => wire::CatalogPhase::Idle,
+                    "discovering" => wire::CatalogPhase::Discovering,
+                    "loading" => wire::CatalogPhase::Loading,
+                    "ready" => wire::CatalogPhase::Ready,
+                    _ => return Err(safe(ErrorCode::UnsupportedSchema)),
+                },
                 total: progress.total,
                 processed: progress.processed,
             },
