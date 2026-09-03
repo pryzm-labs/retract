@@ -23,6 +23,8 @@ struct ObservedGateway {
     inner: Arc<DemoGateway>,
     binding: Arc<SessionBinding>,
     invalidate_after_delete: bool,
+    mutation_error: Option<&'static str>,
+    preflight_error: Option<&'static str>,
     left: Arc<std::sync::atomic::AtomicBool>,
 }
 #[async_trait::async_trait]
@@ -80,6 +82,9 @@ impl TelegramGateway for ObservedGateway {
         chat_id: i64,
         message_id: i64,
     ) -> Result<Option<DeletionReach>, crate::error::AppError> {
+        if let Some(error) = self.preflight_error {
+            return Err(crate::error::AppError::Gateway(error.into()));
+        }
         self.inner.current_reach(chat_id, message_id).await
     }
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), crate::error::AppError> {
@@ -91,7 +96,11 @@ impl TelegramGateway for ObservedGateway {
     ) -> Result<(), crate::error::AppError> {
         self.inner
             .clear_history_for_everyone_keep_chat(chat_id)
-            .await
+            .await?;
+        if let Some(error) = self.mutation_error {
+            return Err(crate::error::AppError::Gateway(error.into()));
+        }
+        Ok(())
     }
     async fn remove_chat_for_self(&self, chat_id: i64) -> Result<(), crate::error::AppError> {
         self.inner.remove_chat_for_self(chat_id).await
@@ -134,11 +143,22 @@ impl TelegramGateway for ObservedGateway {
         chat_id: i64,
         message_ids: &[i64],
     ) -> Result<(), crate::error::AppError> {
+        if let Some(error) = self.mutation_error
+            && !matches!(
+                error,
+                "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"
+            )
+        {
+            return Err(crate::error::AppError::Gateway(error.into()));
+        }
         self.inner
             .delete_messages_for_everyone(chat_id, message_ids)
             .await?;
         if self.invalidate_after_delete {
             self.binding.invalidate();
+        }
+        if let Some(error) = self.mutation_error {
+            return Err(crate::error::AppError::Gateway(error.into()));
         }
         Ok(())
     }
@@ -658,6 +678,8 @@ fn failed_membership_progress_save_prevents_following_local_removal() {
             inner: f.gateway.clone(),
             binding: f.binding.clone(),
             invalidate_after_delete: false,
+            mutation_error: None,
+            preflight_error: None,
             left: left.clone(),
         });
         let service = CleanerService::new_scoped(
@@ -703,6 +725,8 @@ fn identity_change_during_a_mutation_records_uncertainty_and_stops() {
             inner: f.gateway.clone(),
             binding: f.binding.clone(),
             invalidate_after_delete: true,
+            mutation_error: None,
+            preflight_error: None,
             left: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         let service =
@@ -943,6 +967,306 @@ fn uncertain_results_do_not_reclassify_earlier_confirmed_failures() {
         .unwrap();
         assert_eq!(normalized.counters.failed, 2);
         assert_eq!(normalized.counters.uncertain, 1);
+    });
+}
+
+// A post-send transport failure must not be counted as a confirmed rejection
+// or allow a second batch/compound membership mutation. The synthetic gateway
+// deliberately applies the first native mutation, then loses its response.
+#[test]
+fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain() {
+    tauri::async_runtime::block_on(async {
+        for error in ["TDLIB_REQUEST_TIMEOUT", "TDLIB_RESPONSE_CHANNEL_CLOSED"] {
+            for operation in [
+                PlanOperation::SelectedMessages,
+                PlanOperation::DeleteAllMessagesAndLeave,
+                PlanOperation::ClearHistoryAndLeave,
+            ] {
+                let f = fixture();
+                let chat_id = match operation {
+                    PlanOperation::SelectedMessages => -1001,
+                    PlanOperation::DeleteAllMessagesAndLeave => -1003,
+                    _ => -1002,
+                };
+                f.gateway.append_messages(chat_id, 2000, 101).await;
+                let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let observed = Arc::new(ObservedGateway {
+                    inner: f.gateway.clone(),
+                    binding: f.binding.clone(),
+                    invalidate_after_delete: false,
+                    mutation_error: Some(error),
+                    preflight_error: None,
+                    left: left.clone(),
+                });
+                let service =
+                    CleanerService::new_scoped(observed, f.context.clone(), f.repository.clone())
+                        .unwrap();
+                let plan = if operation == PlanOperation::SelectedMessages {
+                    service
+                        .prepare_selection(PrepareSelectionRequest {
+                            message_refs: (2000..2101)
+                                .map(|id| MessageRef {
+                                    chat_id: -1001,
+                                    message_id: id,
+                                })
+                                .collect(),
+                        })
+                        .await
+                        .unwrap()
+                } else {
+                    service
+                        .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                            chat_id,
+                            operation: PlanOperation::LeaveChat,
+                        })
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(plan.operation, operation);
+                let job = start(&service, &plan).await;
+                let stopped = terminal(&service, job.id).await;
+                assert!(
+                    stopped.error_codes.iter().any(|c| c == "ambiguous_outcome"),
+                    "{error}: {operation:?}: {stopped:?}"
+                );
+                assert_eq!(stopped.failed, 0);
+                assert_eq!(stopped.deleted, 0);
+                if operation != PlanOperation::ClearHistoryAndLeave {
+                    assert_eq!(stopped.uncertain, 100);
+                    assert_eq!(f.gateway.delete_batch_sizes().await, vec![100]);
+                }
+                assert!(!left.load(std::sync::atomic::Ordering::Acquire));
+                let persisted = f.store.snapshot().unwrap().jobs.remove(0);
+                assert!(
+                    persisted
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.code == retract_domain::ErrorCode::AmbiguousOutcome)
+                );
+                assert!(persisted.retry_at.is_none());
+                let repository = Arc::new(
+                    FoundationTelegramRepository::new(
+                        f.store.clone(),
+                        f.context.active().scope.clone(),
+                    )
+                    .unwrap(),
+                );
+                let recovered =
+                    CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository)
+                        .unwrap();
+                let calls = f.gateway.delete_calls().await;
+                recovered.resume_incomplete().await;
+                assert_eq!(f.gateway.delete_calls().await, calls);
+            }
+        }
+    });
+}
+
+#[test]
+fn preflight_transport_timeout_and_confirmed_rejection_are_not_ambiguous() {
+    tauri::async_runtime::block_on(async {
+        for (preflight, error) in [
+            (true, "TDLIB_REQUEST_TIMEOUT"),
+            (true, "TDLIB_RESPONSE_CHANNEL_CLOSED"),
+            (false, "400 MESSAGE_DELETE_FORBIDDEN"),
+        ] {
+            let f = fixture();
+            let observed = Arc::new(ObservedGateway {
+                inner: f.gateway.clone(),
+                binding: f.binding.clone(),
+                invalidate_after_delete: false,
+                mutation_error: (!preflight).then_some(error),
+                preflight_error: preflight.then_some(error),
+                left: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+            let service =
+                CleanerService::new_scoped(observed, f.context.clone(), f.repository.clone())
+                    .unwrap();
+            let plan = service
+                .prepare_selection(PrepareSelectionRequest {
+                    message_refs: vec![MessageRef {
+                        chat_id: -1001,
+                        message_id: 14,
+                    }],
+                })
+                .await
+                .unwrap();
+            let job = start(&service, &plan).await;
+            let stopped = terminal(&service, job.id).await;
+            assert_eq!(stopped.uncertain, 0);
+            assert_eq!(stopped.failed, 1);
+            assert!(!stopped.error_codes.iter().any(|c| c == "ambiguous_outcome"));
+            if preflight {
+                assert!(f.gateway.delete_calls().await.is_empty());
+                assert_eq!(stopped.error_codes, vec!["telegram_timeout"]);
+            } else {
+                assert_eq!(stopped.error_codes, vec!["telegram_rejected"]);
+            }
+        }
+    });
+}
+
+#[test]
+fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
+    tauri::async_runtime::block_on(async {
+        for outcome in ["resume", "cancel", "switch"] {
+            let f = fixture();
+            selection(&f).await;
+            let legacy = f.repository.load().unwrap().plans.remove(0);
+            let mut queued = TelegramCompatibilityProvider::normalize_job(
+                &f.context.active().scope,
+                &legacy,
+                &crate::model::JobRecord::new(&legacy),
+                true,
+            )
+            .unwrap();
+            let deadline = chrono::Utc::now() + chrono::Duration::seconds(2);
+            queued.retry_at = Some(deadline);
+            queued.diagnostics.push(retract_domain::SafeError {
+                code: retract_domain::ErrorCode::RateLimited,
+                retry_at: Some(deadline),
+            });
+            f.store
+                .transaction(|s| {
+                    s.jobs.push(queued.clone());
+                    Ok(())
+                })
+                .unwrap();
+            let repository = Arc::new(
+                FoundationTelegramRepository::new(
+                    f.store.clone(),
+                    f.context.active().scope.clone(),
+                )
+                .unwrap(),
+            );
+            let service =
+                CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository)
+                    .unwrap();
+            assert_eq!(
+                f.store.snapshot().unwrap().jobs[0].retry_at,
+                Some(deadline),
+                "constructor must not erase/rebase the deadline"
+            );
+            service.resume_incomplete().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(chrono::Utc::now() < deadline);
+            assert!(f.gateway.current_reach_calls().await.is_empty());
+            assert!(f.gateway.delete_calls().await.is_empty());
+            assert_eq!(f.store.snapshot().unwrap().jobs[0].retry_at, Some(deadline));
+            match outcome {
+                "cancel" => {
+                    service.cancel_job(queued.id).await.unwrap();
+                }
+                "switch" => f.binding.invalidate(),
+                _ => {}
+            }
+            let stopped = terminal(&service, queued.id).await;
+            if outcome == "resume" {
+                assert!(chrono::Utc::now() >= deadline);
+                assert_eq!(stopped.deleted, 1);
+                assert_eq!(f.gateway.delete_calls().await, vec![(-1001, vec![14])]);
+            } else {
+                assert!(f.gateway.delete_calls().await.is_empty());
+                assert!(f.gateway.current_reach_calls().await.is_empty());
+                assert_eq!(
+                    stopped.status,
+                    if outcome == "cancel" {
+                        crate::model::JobStatus::Cancelled
+                    } else {
+                        crate::model::JobStatus::Failed
+                    }
+                );
+            }
+            assert!(f.store.snapshot().unwrap().jobs[0].retry_at.is_none());
+        }
+    });
+}
+
+#[test]
+fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
+    use retract_domain::ErrorCode::*;
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        selection(&f).await;
+        let legacy = f.repository.load().unwrap().plans.remove(0);
+        let mut job = TelegramCompatibilityProvider::normalize_job(
+            &f.context.active().scope,
+            &legacy,
+            &crate::model::JobRecord::new(&legacy),
+            true,
+        )
+        .unwrap();
+        job.status = retract_domain::JobStatus::Failed;
+        let deadline = chrono::Utc::now();
+        job.diagnostics = [
+            AuthenticationRequired,
+            PermissionChanged,
+            NotFound,
+            AlreadyRemoved,
+            RateLimited,
+            CostLimitReached,
+            Transient,
+            Permanent,
+            AmbiguousOutcome,
+            UnsupportedSchema,
+            InvalidArchive,
+            UnsupportedContractVersion,
+            ScopeMismatch,
+            StaleContext,
+            IdentityUnavailable,
+            ProfileInUse,
+            StatePersistenceFailed,
+            MigrationRequiresNewReview,
+            RestartRequiresNewReview,
+        ]
+        .into_iter()
+        .map(|code| retract_domain::SafeError {
+            code,
+            retry_at: (code == RateLimited).then_some(deadline),
+        })
+        .collect();
+        f.store
+            .transaction(|s| {
+                s.jobs.push(job.clone());
+                Ok(())
+            })
+            .unwrap();
+        let repository = Arc::new(
+            FoundationTelegramRepository::new(f.store.clone(), f.context.active().scope.clone())
+                .unwrap(),
+        );
+        CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository).unwrap();
+        assert_eq!(
+            f.store.snapshot().unwrap().jobs[0].diagnostics,
+            job.diagnostics
+        );
+        let mut legacy_job = crate::model::JobRecord::new(&legacy);
+        legacy_job.error_codes = vec![
+            "telegram_rate_limited".into(),
+            "telegram_timeout".into(),
+            "not_found".into(),
+            "private provider text".into(),
+        ];
+        let normalized = TelegramCompatibilityProvider::normalize_job(
+            &f.context.active().scope,
+            &legacy,
+            &legacy_job,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            normalized
+                .diagnostics
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>(),
+            vec![RateLimited, Transient, NotFound, PermissionChanged]
+        );
+        assert!(
+            !serde_json::to_string(&normalized)
+                .unwrap()
+                .contains("private provider text")
+        );
     });
 }
 

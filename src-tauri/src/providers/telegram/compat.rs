@@ -506,13 +506,27 @@ impl TelegramCompatibilityProvider {
                 uncertain: job.uncertain as u64,
             },
             next_batch: job.next_batch as u64,
-            retry_at: job
-                .retry_after_seconds
-                .map(|s| job.updated_at + chrono::Duration::seconds(s.min(86400) as i64)),
+            retry_at: job.retry_at.or_else(|| {
+                job.retry_after_seconds
+                    .map(|s| job.updated_at + chrono::Duration::seconds(s.min(86400) as i64))
+            }),
             diagnostics: job
                 .error_codes
                 .iter()
-                .map(|code| safe_diagnostic(code))
+                .enumerate()
+                .map(|(index, code)| {
+                    job.scoped_diagnostics
+                        .get(index)
+                        .filter(|d| legacy_diagnostic_code(d.code) == code)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let mut diagnostic = safe_diagnostic(code);
+                            if diagnostic.code == ErrorCode::RateLimited {
+                                diagnostic.retry_at = job.retry_at;
+                            }
+                            diagnostic
+                        })
+                })
                 .collect(),
             started_authorized,
             created_at: job.created_at,
@@ -610,9 +624,48 @@ pub(crate) fn safe_diagnostic(code: &str) -> SafeError {
             "restart_requires_new_review" => ErrorCode::RestartRequiresNewReview,
             "not_found" => ErrorCode::NotFound,
             "telegram_timeout" => ErrorCode::Transient,
+            "telegram_rate_limited" => ErrorCode::RateLimited,
+            "authentication_required" | "system_authentication" => {
+                ErrorCode::AuthenticationRequired
+            }
+            "already_removed" => ErrorCode::AlreadyRemoved,
+            "cost_limit_reached" => ErrorCode::CostLimitReached,
+            "permanent" | "invalid_plan" => ErrorCode::Permanent,
+            "unsupported_schema" => ErrorCode::UnsupportedSchema,
+            "invalid_archive" => ErrorCode::InvalidArchive,
+            "unsupported_contract_version" => ErrorCode::UnsupportedContractVersion,
+            "identity_unavailable" => ErrorCode::IdentityUnavailable,
+            "profile_in_use" => ErrorCode::ProfileInUse,
+            "migration_requires_new_review" | "legacy_store_requires_new_review" => {
+                ErrorCode::MigrationRequiresNewReview
+            }
             _ => ErrorCode::PermissionChanged,
         },
         retry_at: None,
+    }
+}
+
+pub(crate) fn legacy_diagnostic_code(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::AuthenticationRequired => "authentication_required",
+        ErrorCode::PermissionChanged => "telegram_rejected",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::AlreadyRemoved => "already_removed",
+        ErrorCode::RateLimited => "telegram_rate_limited",
+        ErrorCode::CostLimitReached => "cost_limit_reached",
+        ErrorCode::Transient => "telegram_timeout",
+        ErrorCode::Permanent => "permanent",
+        ErrorCode::AmbiguousOutcome => "ambiguous_outcome",
+        ErrorCode::UnsupportedSchema => "unsupported_schema",
+        ErrorCode::InvalidArchive => "invalid_archive",
+        ErrorCode::UnsupportedContractVersion => "unsupported_contract_version",
+        ErrorCode::ScopeMismatch => "scope_mismatch",
+        ErrorCode::StaleContext => "stale_context",
+        ErrorCode::IdentityUnavailable => "identity_unavailable",
+        ErrorCode::ProfileInUse => "profile_in_use",
+        ErrorCode::StatePersistenceFailed => "state_persistence_failed",
+        ErrorCode::MigrationRequiresNewReview => "migration_requires_new_review",
+        ErrorCode::RestartRequiresNewReview => "restart_requires_new_review",
     }
 }
 

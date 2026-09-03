@@ -319,7 +319,8 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
         // whenever any accepted schema, range, canonical key, or recipe
         // agreement rule in this validator changes.
         ProviderValidationPolicyKey::try_from(
-            "telegram-payload-policy-5:typed-compatibility-execution-progress-v1".to_owned(),
+            "telegram-payload-policy-6:typed-compatibility-transport-retry-diagnostics-v1"
+                .to_owned(),
         )
         .expect("static Telegram validation policy key is valid")
     }

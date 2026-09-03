@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     compat::{
-        TelegramCompatibilityProvider, TelegramExecutionRecipe, invalid_recipe, safe_diagnostic,
+        TelegramCompatibilityProvider, TelegramExecutionRecipe, invalid_recipe,
+        legacy_diagnostic_code, safe_diagnostic,
     },
     identity::{SessionBinding, VerifiedTelegramIdentity},
 };
@@ -233,21 +234,18 @@ impl TelegramStateRepository for FoundationTelegramRepository {
             legacy.uncertain =
                 usize::try_from(job.counters.uncertain).map_err(|_| invalid_recipe())?;
             legacy.next_batch = job.next_batch as usize;
+            legacy.retry_at = job.retry_at;
+            legacy.retry_after_seconds = job
+                .retry_at
+                .map(|deadline| (deadline - chrono::Utc::now()).num_seconds().max(0) as u64);
             legacy.created_at = job.created_at;
             legacy.updated_at = job.updated_at;
             legacy.error_codes = job
                 .diagnostics
                 .iter()
-                .map(|d| {
-                    match d.code {
-                        ErrorCode::AmbiguousOutcome => "ambiguous_outcome",
-                        ErrorCode::StatePersistenceFailed => "state_persistence_failed",
-                        ErrorCode::RestartRequiresNewReview => "restart_requires_new_review",
-                        _ => "telegram_rejected",
-                    }
-                    .into()
-                })
+                .map(|d| legacy_diagnostic_code(d.code).into())
                 .collect();
+            legacy.scoped_diagnostics = job.diagnostics.clone();
             let can_resume = job.started_authorized
                 && envelope.restart_policy == retract_domain::RestartPolicy::ResumeFrozenTargets
                 && job.counters.uncertain == 0
@@ -260,6 +258,8 @@ impl TelegramStateRepository for FoundationTelegramRepository {
                     )
                 });
             if !legacy.status.is_terminal() && !can_resume {
+                legacy.retry_at = None;
+                legacy.retry_after_seconds = None;
                 legacy.status = if legacy.deleted > 0 && job.started_authorized {
                     JobStatus::Partial
                 } else {
@@ -354,6 +354,20 @@ pub(crate) struct SessionGateway {
     pub context: Arc<EngineContext>,
 }
 
+impl SessionGateway {
+    fn mutation_result(&self, result: Result<(), AppError>) -> Result<(), AppError> {
+        // tdjson::request emits these exact errors only after the native send.
+        // This classification belongs only to mutation calls: a read/preflight
+        // timeout has no destructive outcome, and a TDLib rejection is known.
+        let response_lost = matches!(&result, Err(AppError::Gateway(code))
+            if matches!(code.as_str(), "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"));
+        if response_lost || self.context.check(self.inner.as_ref()).is_err() {
+            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
+        }
+        result
+    }
+}
+
 #[async_trait]
 impl TelegramGateway for SessionGateway {
     fn info(&self) -> crate::gateway::GatewayInfo {
@@ -445,18 +459,12 @@ impl TelegramGateway for SessionGateway {
             .inner
             .delete_messages_for_everyone(chat_id, message_ids)
             .await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.clear_history_for_everyone(chat_id).await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn clear_history_for_everyone_keep_chat(&self, chat_id: i64) -> Result<(), AppError> {
         self.context.check(self.inner.as_ref())?;
@@ -464,34 +472,22 @@ impl TelegramGateway for SessionGateway {
             .inner
             .clear_history_for_everyone_keep_chat(chat_id)
             .await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn remove_chat_for_self(&self, chat_id: i64) -> Result<(), AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.remove_chat_for_self(chat_id).await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn delete_group(&self, chat_id: i64) -> Result<(), AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.delete_group(chat_id).await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.leave_chat(chat_id).await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn delete_messages_by_sender(
         &self,
@@ -503,10 +499,7 @@ impl TelegramGateway for SessionGateway {
             .inner
             .delete_messages_by_sender(chat_id, sender_id)
             .await;
-        if self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
+        self.mutation_result(result)
     }
     async fn request_qr_auth(&self) -> Result<(), AppError> {
         self.inner.request_qr_auth().await

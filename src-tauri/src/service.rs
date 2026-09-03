@@ -73,7 +73,7 @@ impl CleanerService {
                     } else {
                         JobStatus::Failed
                     };
-                    job.retry_after_seconds = None;
+                    job.clear_retry();
                     push_error_once(&mut job, "legacy_store_requires_new_review");
                 } else if matches!(job.status, JobStatus::Queued | JobStatus::Running)
                     && matches!(
@@ -90,7 +90,7 @@ impl CleanerService {
                     } else {
                         JobStatus::Failed
                     };
-                    job.retry_after_seconds = None;
+                    job.clear_retry();
                     push_error_once(&mut job, "restart_requires_new_review");
                 } else if matches!(job.status, JobStatus::Running) {
                     job.status = JobStatus::Queued;
@@ -534,7 +534,7 @@ impl CleanerService {
                             } else {
                                 JobStatus::Failed
                             };
-                            job.retry_after_seconds = None;
+                            job.clear_retry();
                             job.updated_at = Utc::now();
                             push_error_once(job, error_code(&error));
                         }
@@ -558,6 +558,19 @@ impl CleanerService {
             .get(&job_id)
             .cloned()
             .ok_or(AppError::StateUnavailable)?;
+        let retry_at = self
+            .jobs
+            .read()
+            .await
+            .get(&job_id)
+            .and_then(|job| job.retry_at);
+        if let Some(deadline) = retry_at
+            && self
+                .wait_until_retry(job_id, &cancellation, deadline)
+                .await?
+        {
+            return Ok(());
+        }
         let plan_id = self
             .transition(|_, jobs| {
                 let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
@@ -684,7 +697,7 @@ impl CleanerService {
             } else {
                 JobStatus::Completed
             };
-            job.retry_after_seconds = None;
+            job.clear_retry();
             job.updated_at = Utc::now();
             Ok(())
         })
@@ -767,7 +780,7 @@ impl CleanerService {
                     let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
                     job.skipped += skipped;
                     job.next_batch = index + 1;
-                    job.retry_after_seconds = None;
+                    job.clear_retry();
                     match result {
                         Ok(()) => job.deleted += allowed.len(),
                         Err(error) => {
@@ -983,7 +996,7 @@ impl CleanerService {
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
             job.status = JobStatus::Cancelled;
-            job.retry_after_seconds = None;
+            job.clear_retry();
             job.updated_at = Utc::now();
             Ok(())
         })
@@ -1008,22 +1021,39 @@ impl CleanerService {
         cancellation: &AtomicBool,
         seconds: u64,
     ) -> Result<bool, AppError> {
+        let deadline = Utc::now() + chrono::Duration::seconds(seconds.min(86400) as i64);
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
             job.status = JobStatus::Queued;
             job.retry_after_seconds = Some(seconds);
+            job.retry_at = Some(deadline);
             job.updated_at = Utc::now();
             push_error_once(job, "telegram_rate_limited");
             Ok(())
         })
         .await?;
+        self.wait_until_retry(job_id, cancellation, deadline).await
+    }
 
-        for _ in 0..seconds {
+    async fn wait_until_retry(
+        &self,
+        job_id: Uuid,
+        cancellation: &AtomicBool,
+        deadline: chrono::DateTime<Utc>,
+    ) -> Result<bool, AppError> {
+        loop {
             if cancellation.load(Ordering::Acquire) {
                 self.finish_cancelled(job_id).await?;
                 return Ok(true);
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            self.check_context()?;
+            let Ok(remaining) = (deadline - Utc::now()).to_std() else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
             self.check_context()?;
         }
         if cancellation.load(Ordering::Acquire) {
@@ -1035,7 +1065,7 @@ impl CleanerService {
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
             job.status = JobStatus::Running;
-            job.retry_after_seconds = None;
+            job.clear_retry();
             job.updated_at = Utc::now();
             Ok(())
         })
@@ -1071,7 +1101,7 @@ impl CleanerService {
                     } else {
                         JobStatus::Failed
                     };
-                    job.retry_after_seconds = None;
+                    job.clear_retry();
                     push_error_once(job, "state_persistence_failed");
                 }
             }
@@ -1118,6 +1148,14 @@ impl CleanerService {
 fn error_code(error: &AppError) -> &'static str {
     match error {
         AppError::Gateway(message) if message == "RETRACT_AMBIGUOUS_OUTCOME" => "ambiguous_outcome",
+        AppError::Gateway(message)
+            if matches!(
+                message.as_str(),
+                "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"
+            ) =>
+        {
+            "telegram_timeout"
+        }
         AppError::InvalidRequest(message) if message == "stale_context" => "stale_context",
         AppError::Gateway(_) => "telegram_rejected",
         AppError::Timeout(_) => "telegram_timeout",
