@@ -169,7 +169,7 @@ assert!(reversed_steps.validate().is_err());
 
 **Interfaces:**
 - Consumes: neutral identity/plan/job types and the current authenticated legacy `PersistedState` reader.
-- Produces: `FoundationState` with identities, sources, plans, jobs, legacy history and migration provenance; `FoundationStore::open(profile: PathBuf) -> Result<Arc<Self>, AppError>`, `snapshot() -> Result<FoundationState, AppError>`, `transaction<T>(&self, change: impl FnOnce(&mut FoundationState) -> Result<T, AppError>) -> Result<T, AppError>`.
+- Produces: `FoundationState` with identities, sources, plans, jobs, legacy history and migration provenance; `StoreBinding { provider: ProviderKey, profile: String }`; `FoundationStore::open(profile: PathBuf, binding: StoreBinding) -> Result<Arc<Self>, AppError>`, `snapshot() -> Result<FoundationState, AppError>`, `transaction<T>(&self, change: impl FnOnce(&mut FoundationState) -> Result<T, AppError>) -> Result<T, AppError>`. The provider adapter/runtime supplies the expected binding from backend configuration, never frontend display data. Include it explicitly in authenticated associated data and validate row ownership; do not infer the provider from directory-name conventions.
 - Test constructors inject a key/profile and private temporary path without touching the real vault. Production uses the existing job-store key through the existing cache.
 
 - [ ] Write RED migration tests using the frozen `RTRCT01`/`RTRCT02` ciphertext fixtures and real temporary files. Cover exact backup-byte preservation, terminal history, every old nonterminal status becoming failed/partial with `migration_requires_new_review`, no inferred account, unknown/corrupt headers, wrong profile, and missing active file with existing backup/artifacts.
