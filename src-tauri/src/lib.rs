@@ -2,6 +2,8 @@ mod connection_settings;
 #[cfg(test)]
 mod demo_gateway;
 mod error;
+#[cfg(test)]
+mod foundation_lifecycle_tests;
 mod gateway;
 mod live_gateway;
 mod local_auth;

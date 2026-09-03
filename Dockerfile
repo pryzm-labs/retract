@@ -58,7 +58,7 @@ RUN --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=100
     cargo fetch --locked --manifest-path crates/cleaner-domain/Cargo.toml \
     && cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
-FROM dependencies AS checks
+FROM dependencies AS check-base
 
 ARG TARGETARCH
 
@@ -68,6 +68,15 @@ ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_TEST_DEBUG=0 \
     CARGO_TARGET_DIR=/home/retract/.cache/retract-target \
     CI=true
+
+FROM check-base AS focused-checks
+ARG RETRACT_CHECK="npm test"
+RUN --network=none \
+    --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
+    --mount=type=cache,id=retract-cargo-target-${TARGETARCH},target=/home/retract/.cache/retract-target,uid=10001,gid=10001,sharing=locked \
+    sh -eu -c "$RETRACT_CHECK"
+
+FROM check-base AS checks
 
 # Every project-controlled build/test command runs non-root and without a
 # network. Dependency code may execute here, but it cannot reach credentials,
