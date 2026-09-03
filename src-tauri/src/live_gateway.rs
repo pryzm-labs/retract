@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc, RwLock as SyncRwLock,
+        Arc, Mutex as SyncMutex, RwLock as SyncRwLock,
         atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -17,12 +17,18 @@ use cleaner_domain::{
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{
     error::AppError,
     gateway::{GatewayInfo, TelegramGateway},
     model::{AuthSnapshot, AuthStage, CatalogProgress, MessageDirection, SearchRequest},
+    persistence::FoundationStore,
+    providers::telegram::{
+        identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
+        locators::TelegramEnvironment,
+    },
     tdjson::TdJsonClient,
 };
 
@@ -70,6 +76,9 @@ pub struct LiveGateway {
     auth: SyncRwLock<AuthSnapshot>,
     account_label: SyncRwLock<String>,
     own_user_id: AtomicI64,
+    identity: SyncMutex<IdentityState>,
+    session_binding: Arc<SessionBinding>,
+    identity_store: Option<Arc<FoundationStore>>,
     sender_names: RwLock<HashMap<(bool, i64), String>>,
     chat_kinds: RwLock<HashMap<i64, ChatKind>>,
     catalog_loaded: AtomicBool,
@@ -85,8 +94,29 @@ pub struct LiveGateway {
     catalog_processed: AtomicUsize,
 }
 
+#[derive(Debug, Default)]
+struct IdentityState {
+    authorization_ready: bool,
+    generation: Option<Uuid>,
+    verified: Option<VerifiedTelegramIdentity>,
+}
+
 impl LiveGateway {
     pub fn connect(config: LiveGatewayConfig) -> Result<Arc<Self>, AppError> {
+        Self::connect_with_optional_identity_store(config, None)
+    }
+
+    pub fn connect_with_identity_store(
+        config: LiveGatewayConfig,
+        store: Arc<FoundationStore>,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::connect_with_optional_identity_store(config, Some(store))
+    }
+
+    fn connect_with_optional_identity_store(
+        config: LiveGatewayConfig,
+        identity_store: Option<Arc<FoundationStore>>,
+    ) -> Result<Arc<Self>, AppError> {
         std::fs::create_dir_all(config.data_directory.join("database"))?;
         std::fs::create_dir_all(config.data_directory.join("files"))?;
         let client = TdJsonClient::load(&config.library_path)?;
@@ -100,6 +130,9 @@ impl LiveGateway {
             }),
             account_label: SyncRwLock::new("Telegram account".into()),
             own_user_id: AtomicI64::new(0),
+            identity: SyncMutex::new(IdentityState::default()),
+            session_binding: Arc::new(SessionBinding::default()),
+            identity_store,
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
@@ -160,13 +193,46 @@ impl LiveGateway {
     }
 
     #[cfg(test)]
-    fn connect_scripted(config: LiveGatewayConfig, client: TdJsonClient) -> Arc<Self> {
+    fn connect_scripted(
+        config: LiveGatewayConfig,
+        client: TdJsonClient,
+        initial_identity: Option<VerifiedTelegramIdentity>,
+        identity_store: Option<Arc<FoundationStore>>,
+        query_initial_authorization: bool,
+    ) -> Arc<Self> {
+        let session_binding = Arc::new(SessionBinding::default());
+        if let Some(identity) = &initial_identity {
+            session_binding
+                .begin_generation(identity.session_generation)
+                .expect("explicit scripted identity has a valid generation");
+        }
+        let initial_user_id = initial_identity
+            .as_ref()
+            .map_or(0, |identity| identity.user_id);
+        let initially_ready = initial_identity.is_some();
         let gateway = Arc::new(Self {
             client,
             config,
-            auth: SyncRwLock::new(AuthSnapshot::ready()),
+            auth: SyncRwLock::new(if initially_ready {
+                AuthSnapshot::ready()
+            } else {
+                AuthSnapshot {
+                    stage: AuthStage::Initializing,
+                    hint: Some("Starting the local Telegram engine…".into()),
+                    qr_link: None,
+                }
+            }),
             account_label: SyncRwLock::new("Synthetic Telegram account".into()),
-            own_user_id: AtomicI64::new(42),
+            own_user_id: AtomicI64::new(initial_user_id),
+            identity: SyncMutex::new(IdentityState {
+                authorization_ready: initially_ready,
+                generation: initial_identity
+                    .as_ref()
+                    .map(|identity| identity.session_generation),
+                verified: initial_identity,
+            }),
+            session_binding,
+            identity_store,
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
@@ -182,6 +248,19 @@ impl LiveGateway {
             catalog_processed: AtomicUsize::new(0),
         });
         Self::start_update_loop(&gateway);
+        if query_initial_authorization {
+            let initial = Arc::clone(&gateway);
+            tauri::async_runtime::spawn(async move {
+                match initial
+                    .client
+                    .request(json!({ "@type": "getAuthorizationState" }))
+                    .await
+                {
+                    Ok(state) => initial.process_authorization_state(&state).await,
+                    Err(error) => initial.set_auth_error(error),
+                }
+            });
+        }
         gateway
     }
 
@@ -235,7 +314,7 @@ impl LiveGateway {
         });
     }
 
-    async fn process_authorization_state(&self, state: &Value) {
+    async fn process_authorization_state(self: &Arc<Self>, state: &Value) {
         if !self.version_compatible.load(Ordering::Acquire) {
             return;
         }
@@ -243,6 +322,9 @@ impl LiveGateway {
             .get("@type")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        if kind != "authorizationStateReady" {
+            self.invalidate_identity();
+        }
         match kind {
             "authorizationStateWaitTdlibParameters" => {
                 self.set_auth(AuthStage::Initializing, Some("Opening the encrypted local message database…"), None);
@@ -299,16 +381,13 @@ impl LiveGateway {
             ),
             "authorizationStateReady" => {
                 self.set_auth(AuthStage::Ready, None, None);
-                self.catalog_loaded.store(false, Ordering::Release);
-                self.invalidate_chat_summary_cache().await;
-                if let Ok(me) = self.client.request(json!({ "@type": "getMe" })).await {
-                    if let Some(id) = value_i64(me.get("id")) {
-                        self.own_user_id.store(id, Ordering::Release);
-                    }
-                    let name = display_user_name(&me);
-                    if !name.is_empty() && let Ok(mut label) = self.account_label.write() {
-                        *label = name;
-                    }
+                if let Some(generation) = self.begin_identity_generation() {
+                    self.catalog_loaded.store(false, Ordering::Release);
+                    self.invalidate_chat_summary_cache().await;
+                    let gateway = Arc::clone(self);
+                    tauri::async_runtime::spawn(async move {
+                        gateway.verify_ready_identity(generation).await;
+                    });
                 }
             }
             "authorizationStateLoggingOut" | "authorizationStateClosing" => self.set_auth(
@@ -329,6 +408,108 @@ impl LiveGateway {
             ),
             _ => self.set_auth(AuthStage::Error, Some("TDLib returned an unsupported authorization state."), None),
         }
+    }
+
+    fn begin_identity_generation(&self) -> Option<Uuid> {
+        let mut identity = self.identity.lock().ok()?;
+        if identity.authorization_ready {
+            return None;
+        }
+        let generation = Uuid::new_v4();
+        identity.authorization_ready = true;
+        identity.generation = Some(generation);
+        identity.verified = None;
+        self.session_binding.begin_generation(generation).ok()?;
+        Some(generation)
+    }
+
+    fn invalidate_identity(&self) {
+        if let Ok(mut identity) = self.identity.lock() {
+            identity.authorization_ready = false;
+            identity.generation = None;
+            identity.verified = None;
+        }
+        self.session_binding.invalidate();
+        self.own_user_id.store(0, Ordering::Release);
+        if let Ok(mut label) = self.account_label.write() {
+            *label = "Telegram account".into();
+        }
+    }
+
+    async fn verify_ready_identity(self: Arc<Self>, generation: Uuid) {
+        let Ok(me) = self.client.request(json!({ "@type": "getMe" })).await else {
+            return;
+        };
+        if me.get("@type").and_then(Value::as_str) != Some("user") {
+            return;
+        }
+        let Some(user_id) = value_i64(me.get("id")) else {
+            return;
+        };
+        if me
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != user_id.to_string())
+        {
+            return;
+        }
+        let environment = if self.config.use_test_dc {
+            TelegramEnvironment::Test
+        } else {
+            TelegramEnvironment::Production
+        };
+        let Ok(verified) = VerifiedTelegramIdentity::new(environment, user_id, generation) else {
+            return;
+        };
+        if !self.identity_generation_is_current(generation) {
+            return;
+        }
+
+        let display_name = match display_user_name(&me) {
+            name if !name.is_empty() => name,
+            _ => "Telegram account".into(),
+        };
+        let username = me
+            .pointer("/usernames/active_usernames/0")
+            .and_then(Value::as_str)
+            .filter(|username| !username.is_empty())
+            .map(str::to_owned);
+        if let Some(store) = &self.identity_store
+            && self
+                .session_binding
+                .publish(
+                    store,
+                    &verified,
+                    &TelegramAccountProfile {
+                        display_name: display_name.clone(),
+                        username,
+                    },
+                )
+                .is_err()
+        {
+            return;
+        }
+        let Ok(mut identity) = self.identity.lock() else {
+            return;
+        };
+        if !identity.authorization_ready || identity.generation != Some(generation) {
+            return;
+        }
+        identity.verified = Some(verified);
+        self.own_user_id.store(user_id, Ordering::Release);
+        if let Ok(mut label) = self.account_label.write() {
+            *label = display_name;
+        }
+    }
+
+    fn identity_generation_is_current(&self, generation: Uuid) -> bool {
+        self.identity.lock().is_ok_and(|identity| {
+            identity.authorization_ready && identity.generation == Some(generation)
+        })
+    }
+
+    pub fn active_context(&self) -> Option<retract_domain::ActiveContext> {
+        self.session_binding.current()
     }
 
     fn set_auth(&self, stage: AuthStage, hint: Option<&str>, qr_link: Option<&str>) {
@@ -353,6 +534,7 @@ impl LiveGateway {
         self.auth
             .read()
             .is_ok_and(|auth| auth.stage == AuthStage::Ready)
+            && self.verified_identity().is_some()
     }
 
     fn ensure_ready(&self) -> Result<(), AppError> {
@@ -1333,6 +1515,13 @@ impl TelegramGateway for LiveGateway {
             })
     }
 
+    fn verified_identity(&self) -> Option<VerifiedTelegramIdentity> {
+        self.identity
+            .lock()
+            .ok()
+            .and_then(|identity| identity.verified.clone())
+    }
+
     fn catalog_progress(&self) -> CatalogProgress {
         self.catalog_progress_snapshot()
     }
@@ -1961,6 +2150,11 @@ fn humanize_message_type(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::{FoundationStore, StoreBinding};
+    use crate::providers::telegram::{
+        identity::VerifiedTelegramIdentity,
+        locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
+    };
     use crate::tdjson::ScriptedTdJson;
 
     const SCRIPTED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1985,8 +2179,72 @@ mod tests {
                 [0x31; 32],
             ),
             client,
+            Some(
+                VerifiedTelegramIdentity::new(
+                    TelegramEnvironment::Test,
+                    42,
+                    Uuid::from_u128(0x700),
+                )
+                .unwrap(),
+            ),
+            None,
+            false,
         );
         (gateway, script, directory)
+    }
+
+    fn unverified_scripted_gateway(
+        store: Option<Arc<FoundationStore>>,
+        query_initial_authorization: bool,
+    ) -> (Arc<LiveGateway>, ScriptedTdJson, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let (client, script) = TdJsonClient::scripted();
+        let gateway = LiveGateway::connect_scripted(
+            LiveGatewayConfig::new(
+                PathBuf::from("synthetic-tdlib"),
+                7,
+                Zeroizing::new("synthetic-api-value".into()),
+                true,
+                directory.path().join("synthetic-profile"),
+                [0x31; 32],
+            ),
+            client,
+            None,
+            store,
+            query_initial_authorization,
+        );
+        (gateway, script, directory)
+    }
+
+    async fn wait_for_request_count(script: &ScriptedTdJson, kind: &str, expected: usize) {
+        tokio::time::timeout(SCRIPTED_WAIT, async {
+            loop {
+                let count = script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == kind)
+                    .count();
+                if count >= expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected {expected} {kind} requests"));
+    }
+
+    async fn wait_for_verified_identity(gateway: &LiveGateway) -> VerifiedTelegramIdentity {
+        tokio::time::timeout(SCRIPTED_WAIT, async {
+            loop {
+                if let Some(identity) = gateway.verified_identity() {
+                    break identity;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("verified Telegram identity")
     }
 
     fn respond_with_chat_mapping(script: &ScriptedTdJson, case: &Value) {
@@ -2840,6 +3098,222 @@ mod tests {
                     1
                 );
             }
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn authorization_ready_waits_for_valid_get_me_and_rejects_malformed_or_failed_results() {
+        tauri::async_runtime::block_on(async {
+            for response in [
+                json!({ "@type": "user", "id": 0, "first_name": "Display only" }),
+                json!({ "@type": "user", "id": 42.5, "first_name": "Malformed" }),
+                json!({ "@type": "chat", "id": 42, "title": "Not an account" }),
+                json!({ "@type": "user", "id": "042", "first_name": "Noncanonical" }),
+                json!({ "@type": "user", "id": "+42", "first_name": "Noncanonical" }),
+                json!({ "@type": "error", "code": 500, "message": "SYNTHETIC_FAILURE" }),
+            ] {
+                let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+                script.respond(json!({ "@type": "getMe" }), response);
+                script.emit_update(json!({
+                    "@type": "updateAuthorizationState",
+                    "authorization_state": { "@type": "authorizationStateReady" }
+                }));
+                wait_for_auth_stage(&gateway, AuthStage::Ready).await;
+                wait_for_request_count(&script, "getMe", 1).await;
+                tokio::task::yield_now().await;
+                assert_eq!(gateway.verified_identity(), None);
+                assert_eq!(gateway.active_context(), None);
+                assert!(gateway.ensure_ready().is_err());
+                assert!(
+                    script
+                        .traces()
+                        .iter()
+                        .all(|trace| !matches!(trace.kind.as_str(), "getChats" | "loadChats"))
+                );
+                script.assert_drained();
+            }
+        });
+    }
+
+    #[test]
+    fn delayed_get_me_does_not_block_sign_out_invalidation_or_publish_stale_identity() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+            let delayed = script.delay_response(json!({ "@type": "getMe" }));
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            wait_for_request_count(&script, "getMe", 1).await;
+            assert_eq!(gateway.verified_identity(), None);
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateLoggingOut" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::LoggingOut).await;
+            delayed.respond(json!({
+                "@type": "user",
+                "id": 42,
+                "first_name": "Old account"
+            }));
+            tokio::task::yield_now().await;
+            assert_eq!(gateway.verified_identity(), None);
+            assert_eq!(gateway.active_context(), None);
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn initial_and_duplicate_ready_are_idempotent_but_nonready_to_ready_is_a_new_generation() {
+        tauri::async_runtime::block_on(async {
+            let (client, script) = TdJsonClient::scripted();
+            script.respond(
+                json!({ "@type": "getAuthorizationState" }),
+                json!({ "@type": "authorizationStateReady" }),
+            );
+            let delayed = script.delay_response(json!({ "@type": "getMe" }));
+            let directory = tempfile::tempdir().unwrap();
+            let gateway = LiveGateway::connect_scripted(
+                LiveGatewayConfig::new(
+                    PathBuf::from("synthetic-tdlib"),
+                    7,
+                    Zeroizing::new("synthetic-api-value".into()),
+                    true,
+                    directory.path().join("synthetic-profile"),
+                    [0x31; 32],
+                ),
+                client,
+                None,
+                None,
+                true,
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            wait_for_request_count(&script, "getMe", 1).await;
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "getMe")
+                    .count(),
+                1
+            );
+            delayed.respond(json!({
+                "@type": "user",
+                "id": 42,
+                "first_name": "First account"
+            }));
+            let first = wait_for_verified_identity(&gateway).await;
+
+            gateway.catalog_loaded.store(true, Ordering::Release);
+            gateway
+                .process_authorization_state(&json!({ "@type": "authorizationStateReady" }))
+                .await;
+            assert!(gateway.catalog_loaded.load(Ordering::Acquire));
+            assert_eq!(gateway.verified_identity(), Some(first.clone()));
+
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitPhoneNumber" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForPhone).await;
+            script.respond(
+                json!({ "@type": "getMe" }),
+                json!({ "@type": "user", "id": 42, "first_name": "First account" }),
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            let second = wait_for_verified_identity(&gateway).await;
+            assert_ne!(first.session_generation, second.session_generation);
+            assert_eq!(second.user_id, 42);
+            wait_for_request_count(&script, "getMe", 2).await;
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn a_pending_old_account_lookup_cannot_replace_a_reconnected_account() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = unverified_scripted_gateway(None, false);
+            let delayed_old = script.delay_response(json!({ "@type": "getMe" }));
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            wait_for_request_count(&script, "getMe", 1).await;
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateWaitPhoneNumber" }
+            }));
+            wait_for_auth_stage(&gateway, AuthStage::WaitingForPhone).await;
+
+            script.respond(
+                json!({ "@type": "getMe" }),
+                json!({ "@type": "user", "id": 43, "first_name": "New account" }),
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            let current = wait_for_verified_identity(&gateway).await;
+            assert_eq!(current.user_id, 43);
+
+            delayed_old.respond(json!({
+                "@type": "user",
+                "id": 42,
+                "first_name": "Old account"
+            }));
+            tokio::task::yield_now().await;
+            assert_eq!(gateway.verified_identity().unwrap().user_id, 43);
+            assert_eq!(gateway.info().account_label, "New account");
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn tdjson_identity_is_persisted_before_active_context_publication() {
+        tauri::async_runtime::block_on(async {
+            let store_directory = tempfile::tempdir().unwrap();
+            let store = FoundationStore::open_with_test_key_and_payload_validator(
+                store_directory.path().join("foundation"),
+                StoreBinding {
+                    provider: telegram_provider_key(),
+                    profile: "tdjson-identity".into(),
+                },
+                [0x62; 32],
+                Arc::new(TelegramPayloadValidator),
+            )
+            .unwrap();
+            let (gateway, script, _directory) =
+                unverified_scripted_gateway(Some(Arc::clone(&store)), false);
+            script.respond(
+                json!({ "@type": "getMe" }),
+                json!({
+                    "@type": "user",
+                    "id": "9007199254740993",
+                    "first_name": "Persisted",
+                    "last_name": "Account",
+                    "usernames": { "active_usernames": ["persisted_account"] }
+                }),
+            );
+            script.emit_update(json!({
+                "@type": "updateAuthorizationState",
+                "authorization_state": { "@type": "authorizationStateReady" }
+            }));
+            let identity = wait_for_verified_identity(&gateway).await;
+            assert_eq!(identity.user_id, 9_007_199_254_740_993);
+            let context = gateway.active_context().expect("persisted active context");
+            assert_eq!(context.session_generation, identity.session_generation);
+            let snapshot = store.snapshot().unwrap();
+            assert_eq!(snapshot.identities.len(), 1);
+            assert_eq!(snapshot.sources.len(), 1);
+            assert_eq!(snapshot.sources[0].scope(), context.scope);
             script.assert_drained();
         });
     }

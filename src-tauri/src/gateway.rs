@@ -4,6 +4,7 @@ use cleaner_domain::{ChatSummary, DeletionReach, MessageSnapshot};
 use crate::{
     error::AppError,
     model::{AuthSnapshot, CatalogProgress, SearchRequest},
+    providers::telegram::identity::VerifiedTelegramIdentity,
 };
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub struct GatewayInfo {
 pub trait TelegramGateway: Send + Sync {
     fn info(&self) -> GatewayInfo;
     fn auth(&self) -> AuthSnapshot;
+    fn verified_identity(&self) -> Option<VerifiedTelegramIdentity>;
     fn catalog_progress(&self) -> CatalogProgress;
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError>;
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError>;

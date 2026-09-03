@@ -39,6 +39,7 @@ pub(crate) enum TestFailurePoint {
 pub struct DemoGateway {
     data: RwLock<DemoData>,
     reason: String,
+    verified_identity: Option<crate::providers::telegram::identity::VerifiedTelegramIdentity>,
     #[cfg(test)]
     chat_list_reads: AtomicUsize,
     #[cfg(test)]
@@ -72,6 +73,7 @@ impl DemoGateway {
             reason:
                 "No Telegram session is connected. Destructive actions affect demo fixtures only."
                     .into(),
+            verified_identity: None,
             #[cfg(test)]
             chat_list_reads: AtomicUsize::new(0),
             #[cfg(test)]
@@ -97,6 +99,15 @@ impl DemoGateway {
             #[cfg(test)]
             injected_failure_notify: Notify::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_verified_identity(
+        identity: crate::providers::telegram::identity::VerifiedTelegramIdentity,
+    ) -> Self {
+        let mut gateway = Self::new();
+        gateway.verified_identity = Some(identity);
+        gateway
     }
 
     #[cfg(test)]
@@ -283,6 +294,12 @@ impl TelegramGateway for DemoGateway {
 
     fn auth(&self) -> crate::model::AuthSnapshot {
         crate::model::AuthSnapshot::ready()
+    }
+
+    fn verified_identity(
+        &self,
+    ) -> Option<crate::providers::telegram::identity::VerifiedTelegramIdentity> {
+        self.verified_identity.clone()
     }
 
     fn catalog_progress(&self) -> CatalogProgress {
