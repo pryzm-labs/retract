@@ -60,6 +60,8 @@ export default function App() {
   const epoch = useRef(0);
   const currentContext = useRef<ActiveContext | null>(null);
   const backgroundRefreshGeneration = useRef(0);
+  const latestConversationRefresh = useRef(new Map<string, number>());
+  const pendingConversationRefreshes = useRef(new Set<number>());
   const snapshotLoadGeneration = useRef(0);
   const catalogSyncStarted = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
@@ -70,6 +72,8 @@ export default function App() {
       epoch.current += 1;
       actionGeneration.current += 1;
       backgroundRefreshGeneration.current += 1;
+      latestConversationRefresh.current.clear();
+      pendingConversationRefreshes.current.clear();
       snapshotLoadGeneration.current += 1;
       actionInFlight.current = false;
       pendingRemovalJobs.current.clear();
@@ -176,14 +180,20 @@ export default function App() {
     if (!context) return;
     const conversations = [...new Map(refs.filter(ref => sameScope(ref.scope, context.scope)).map(ref => [refKey(ref), ref])).values()];
     const removed = new Set(removedRefs.filter(ref => sameScope(ref.scope, context.scope)).map(refKey));
-    const generation = ++backgroundRefreshGeneration.current;
     const capturedEpoch = epoch.current;
     if (!conversations.length) return;
+    const generation = ++backgroundRefreshGeneration.current;
+    const keys = conversations.map(refKey);
+    keys.forEach(key => latestConversationRefresh.current.set(key, generation));
+    pendingConversationRefreshes.current.add(generation);
     setRefreshingCatalog(true);
     void api.refreshChats(conversations, context).then(refreshed => {
-      if (generation !== backgroundRefreshGeneration.current || capturedEpoch !== epoch.current) return;
-      const requested = new Set(conversations.map(refKey));
-      const applicable = refreshed.filter(chat => !removed.has(refKey(chat.ref)));
+      if (capturedEpoch !== epoch.current) return;
+      // A newer request supersedes only its own conversations, not the other
+      // records in this result. Keep absent records in this accepted key set.
+      const requested = new Set(keys.filter(key => latestConversationRefresh.current.get(key) === generation));
+      if (!requested.size) return;
+      const applicable = refreshed.filter(chat => requested.has(refKey(chat.ref)) && !removed.has(refKey(chat.ref)));
       const returned = new Set(applicable.map(chat => refKey(chat.ref)));
       setSnapshot(current => current ? { ...current, chats: current.chats.filter(chat => !requested.has(refKey(chat.ref))).concat(applicable).sort((a, b) => a.title.localeCompare(b.title)) } : current);
       setSelectedChatId(current => current && requested.has(current) && !returned.has(current) ? null : current);
@@ -194,14 +204,20 @@ export default function App() {
       setSettlingRemovalChatIds(current => new Set([...current].filter(key => !requested.has(key))));
       setSearchVersion(value => value + 1);
     }).catch(error => {
-      if (capturedEpoch === epoch.current) showError(error, setToast, "Cleanup finished, but Retract could not refresh the affected chats");
+      if (capturedEpoch === epoch.current && keys.some(key => latestConversationRefresh.current.get(key) === generation)) showError(error, setToast, "Cleanup finished, but Retract could not refresh the affected chats");
     }).finally(() => {
-      if (generation === backgroundRefreshGeneration.current && capturedEpoch === epoch.current) setRefreshingCatalog(false);
+      if (capturedEpoch === epoch.current) {
+        pendingConversationRefreshes.current.delete(generation);
+        setRefreshingCatalog(pendingConversationRefreshes.current.size > 0);
+      }
     });
   }, []);
 
   const chats = snapshot?.chats || [];
   const activeChat = chats.find((chat) => refKey(chat.ref) === selectedChatId);
+  // Reconciliation replaces this ref object; adding intents to the same record
+  // retains it. This is a record revision dependency, not a catalog-wide reload.
+  const activeChatRef = activeChat?.ref;
 
   const scopedChatIds = useMemo(() => {
     if (selectedChatId !== null) return chats.filter(chat => refKey(chat.ref) === selectedChatId).map(chat => chat.ref);
@@ -285,14 +301,14 @@ export default function App() {
 
   useEffect(() => {
     const context = snapshot?.context;
-    if (!activeChat || !context) return;
-    const capturedEpoch = epoch.current, key = refKey(activeChat.ref);
+    if (!activeChatRef || !context) return;
+    const capturedEpoch = epoch.current, key = refKey(activeChatRef);
     let disposed = false;
-    void api.intents([activeChat.ref], context).then(intents => {
-      if (!disposed && capturedEpoch === epoch.current) setSnapshot(current => current ? { ...current, chats: current.chats.map(chat => refKey(chat.ref) === key ? { ...chat, intents } : chat) } : current);
+    void api.intents([activeChatRef], context).then(intents => {
+      if (!disposed && capturedEpoch === epoch.current) setSnapshot(current => current ? { ...current, chats: current.chats.map(chat => chat.ref === activeChatRef && refKey(chat.ref) === key ? { ...chat, intents } : chat) } : current);
     }).catch(error => { if (!disposed && capturedEpoch === epoch.current) showError(error, setToast); });
     return () => { disposed = true; };
-  }, [selectedChatId, snapshot?.context]);
+  }, [activeChatRef, snapshot?.context]);
   useEffect(() => {
     if (!toast) return;
     const timeout = window.setTimeout(() => setToast(null), 4500);

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { StrictMode } from "react";
 import App from "./App";
 import { api } from "./api.desktop";
 import { messageKey } from "./components/ResultsList";
@@ -8,7 +9,7 @@ import fixture from "./test/fixtures/provider-lifecycle.json";
 import type { MessageSnapshot } from "./types";
 import { decodeContext, decodeScope, decodeContent, decodeRef } from "./providers/contract";
 import { contentView } from "./providers/telegram";
-import { wireMessage, wireJob, wireSnapshot, wirePlan, lifecycleContext, lifecycleMessages, lifecycleChats } from "./test/lifecycle-wire";
+import { wireMessage, wireJob, wireSnapshot, wirePlan, wireChat, deletionDescriptor, lifecycleContext, lifecycleMessages, lifecycleChats } from "./test/lifecycle-wire";
 
 // Exercise App -> real desktop adapter. Only the native IPC transport is fake.
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -32,6 +33,8 @@ function installTransport(options: {
   search?: (query: string) => Promise<FixtureMessage[]>;
   switchContext?: FixtureContext;
   switchMessages?: FixtureMessage[];
+  intents?: (targets: unknown[]) => Promise<unknown[]>;
+  execute?: () => Promise<unknown>;
 } = {}) {
   let currentContext = options.context ?? fixture.context;
   let messages = options.messages ?? fixture.messages.slice(0, 2);
@@ -54,7 +57,10 @@ function installTransport(options: {
         return envelope({ items: visible.map(wireMessage), nextCursor: null });
       }
       case "prepare_selection_v2": return envelope(wirePlan(captured, request.payload.messageRefs as unknown[]));
-      case "get_intents_v2": return envelope([]);
+      case "prepare_intent_v2": return envelope(wirePlan(captured, request.payload.targets as unknown[]));
+      case "get_intents_v2": return envelope(options.intents ? await options.intents(request.payload.targets as unknown[]) : []);
+      case "authorize_plan_v2": return envelope({});
+      case "start_execution_v2": return envelope(options.execute ? await options.execute() : null);
       case "get_jobs_v2": return envelope((options.poll ? await options.poll() : []).map(j => wireJob(j as typeof fixture.job)));
       case "refresh_chats_v2": return envelope(options.refresh ? await options.refresh() : []);
       case "save_connection_settings_v2":
@@ -123,6 +129,15 @@ describe("provider foundation lifecycle migration gate", () => {
       context: fixture.context,
       payload: { messageRefs: [fixture.messages[0].ref, fixture.messages[1].ref] }
     } }]);
+  });
+
+  it("publishes a successful settings save after StrictMode replays effect setup", async () => {
+    const transport = installTransport();
+    render(<StrictMode><App /></StrictMode>);
+    await screen.findByText("First lossless target");
+    await switchToSyntheticAccount();
+    expect(transport.mock.calls.find(([c]) => c === "save_connection_settings_v2")?.[1]).toMatchObject({ request: { context: fixture.context } });
+    expect(screen.queryByText("First lossless target")).not.toBeInTheDocument();
   });
 
   it("keeps a nonnumeric synthetic target scoped through desktop IPC", async () => {
@@ -196,6 +211,141 @@ describe("provider foundation lifecycle migration gate", () => {
       "a completed old-account job must not reconcile the new account's matching native chat ID")
       .toHaveClass("is-selected");
     expect(transport.mock.calls.filter(([command]) => command.startsWith("refresh_chats"))).toEqual([]);
+  });
+});
+
+describe("per-conversation cleanup reconciliation", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const first = fixture.chats[0], second = fixture.chats[1];
+  const firstJob = { ...fixture.job, id: "11111111-1111-4111-8111-111111111111", total: 2, dirtyRefs: [first.ref] };
+  const secondJob = { ...fixture.job, id: "22222222-2222-4222-8222-222222222222", total: 2, dirtyRefs: [second.ref] };
+  const completed = (job: typeof fixture.job) => ({ ...job, status: "completed", deleted: job.total });
+  const navigation = () => within(screen.getByRole("complementary", { name: "Chat navigation" }));
+
+  async function twoPendingRefreshes(overlap: boolean) {
+    const older = deferred<unknown[]>(), newer = deferred<unknown[]>();
+    const a = { ...firstJob, dirtyRefs: overlap ? [first.ref, second.ref] : [first.ref] };
+    let currentJobs = [a, secondJob], refreshCount = 0;
+    const transport = installTransport({ jobs: currentJobs, poll: async () => currentJobs, refresh: () => ++refreshCount === 1 ? older.promise : newer.promise });
+    render(<App />);
+    await screen.findByText("First lossless target");
+    currentJobs = [completed(a), secondJob];
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    expect(transport.mock.calls.filter(([c]) => c === "refresh_chats_v2")).toHaveLength(1);
+    currentJobs = [completed(a), completed(secondJob)];
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    expect(transport.mock.calls.filter(([c]) => c === "refresh_chats_v2")).toHaveLength(2);
+    return { older, newer, transport };
+  }
+
+  it("applies both disjoint completed-job refreshes without resetting catalog or job counters", async () => {
+    const { older, newer, transport } = await twoPendingRefreshes(false);
+    await act(async () => newer.resolve([]));
+    expect(navigation().queryByRole("button", { name: new RegExp(second.title) })).not.toBeInTheDocument();
+    expect(screen.getByText("Syncing cleanup…")).toBeInTheDocument();
+    await act(async () => older.resolve([]));
+    expect(navigation().queryByRole("button", { name: new RegExp(first.title) })).not.toBeInTheDocument();
+    expect(screen.queryByText("Syncing cleanup…")).not.toBeInTheDocument();
+    expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
+    for (const id of [firstJob.id, secondJob.id]) expect(within(screen.getByRole("group", { name: `Cleanup job ${id}` })).getByText("completed · 2 deleted")).toBeInTheDocument();
+  });
+
+  it.each(["older first", "newer first"])("keeps latest overlapping data and accepts the older disjoint subset: %s", async order => {
+    const { older, newer, transport } = await twoPendingRefreshes(true);
+    const oldRecords = [{ ...wireChat(first), title: "Accepted disjoint chat" }, { ...wireChat(second), title: "Stale overlapping chat" }];
+    const newRecords = [{ ...wireChat(second), title: "Latest overlapping chat" }];
+    if (order === "older first") {
+      await act(async () => older.resolve(oldRecords));
+      expect(navigation().queryByRole("button", { name: /Stale overlapping chat/ })).not.toBeInTheDocument();
+      await act(async () => newer.resolve(newRecords));
+    } else {
+      await act(async () => newer.resolve(newRecords));
+      await act(async () => older.resolve(oldRecords));
+    }
+    expect(navigation().getByRole("button", { name: /Accepted disjoint chat/ })).toBeInTheDocument();
+    expect(navigation().getByRole("button", { name: /Latest overlapping chat/ })).toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: /Stale overlapping chat/ })).not.toBeInTheDocument();
+    expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
+  });
+
+  it("clears each pending removal when disjoint terminal refreshes finish out of order", async () => {
+    const older = deferred<unknown[]>(), newer = deferred<unknown[]>();
+    let currentJobs: typeof fixture.job[] = [], executionCount = 0, refreshCount = 0;
+    const transport = installTransport({ poll: async () => currentJobs, refresh: () => ++refreshCount === 1 ? older.promise : newer.promise,
+      intents: async () => [{ actionId: "remove_chat_for_self", label: "Remove for me", requiresActor: false, descriptors: [deletionDescriptor] }],
+      execute: async () => {
+        const job = ++executionCount === 1 ? firstJob : secondJob;
+        currentJobs = [...currentJobs, { ...job, status: "queued" }];
+        return wireJob({ ...job, status: "queued" });
+      }
+    });
+    render(<App />);
+    await screen.findByText("First lossless target");
+    for (const [index, chat] of [first, second].entries()) {
+      fireEvent.click(navigation().getByRole("button", { name: new RegExp(chat.title) }));
+      fireEvent.click(screen.getByRole("button", { name: "Delete history & remove for me" }));
+      fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
+      await screen.findByText("Waiting for Telegram to finish removing this chat…");
+      currentJobs = currentJobs.map(completed);
+      await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+      expect(transport.mock.calls.filter(([c]) => c === "refresh_chats_v2")).toHaveLength(index + 1);
+    }
+    await act(async () => newer.resolve([]));
+    await act(async () => older.resolve([]));
+    expect(navigation().queryByRole("button", { name: new RegExp(first.title) })).not.toBeInTheDocument();
+    expect(navigation().queryByRole("button", { name: new RegExp(second.title) })).not.toBeInTheDocument();
+    expect(screen.queryByText("Removing…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Waiting for Telegram to finish removing this chat…")).not.toBeInTheDocument();
+    expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
+  });
+
+  const ownIntent = { actionId: "delete_my_messages", label: "Delete my messages", requiresActor: false, descriptors: [deletionDescriptor] };
+
+  it("reloads the selected refreshed chat's intent catalog without reloading unrelated chats", async () => {
+    let currentJobs = [firstJob, secondJob], intentCount = 0, refreshCount = 0;
+    const updatedCatalog = deferred<unknown[]>();
+    const transport = installTransport({ jobs: currentJobs, poll: async () => currentJobs,
+      refresh: async () => [wireChat(++refreshCount === 1 ? second : first)],
+      intents: async () => ++intentCount === 1 ? [ownIntent] : updatedCatalog.promise });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(first.title) }));
+    await screen.findByRole("button", { name: "Delete all my messages" });
+    currentJobs = [firstJob, completed(secondJob)];
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    expect(intentCount).toBe(1);
+    expect(screen.getByRole("button", { name: "Delete all my messages" })).toBeInTheDocument();
+    currentJobs = [completed(firstJob), completed(secondJob)];
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    await act(async () => updatedCatalog.resolve([{ ...ownIntent, descriptors: [{ ...deletionDescriptor, availability: "executable" }] }]));
+    expect(await screen.findByRole("button", { name: "Delete all my messages" })).toBeInTheDocument();
+    expect(intentCount).toBe(2);
+    // Publishing the loaded catalog must not recursively trigger another read.
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    expect(intentCount).toBe(2);
+    expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
+  });
+
+  it("rejects an old record's intent catalog after a newer accepted refresh", async () => {
+    const oldCatalog = deferred<unknown[]>();
+    let intentCount = 0;
+    const transport = installTransport({ jobs: [firstJob], poll: async () => [completed(firstJob)],
+      refresh: async () => [{ ...wireChat(first), title: "Fresh permission record" }],
+      intents: async () => ++intentCount === 1 ? oldCatalog.promise : [] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(first.title) }));
+    await waitFor(() => expect(intentCount).toBe(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+    expect(navigation().getByRole("button", { name: /Fresh permission record/ })).toBeInTheDocument();
+    await act(async () => oldCatalog.resolve([ownIntent]));
+    expect(screen.queryByRole("button", { name: "Delete all my messages" })).not.toBeInTheDocument();
+    expect(intentCount).toBe(2);
+    expect(transport.mock.calls.filter(([c]) => c === "get_snapshot_v2")).toHaveLength(1);
   });
 });
 
@@ -280,5 +430,22 @@ describe("late v2 responses across account and source changes", () => {
     await act(async () => late.resolve(operation === "poll" ? [{ ...fixture.job, status: "completed" }] : []));
     expect(screen.getByText(sourceMessage.preview).closest("article")).toHaveClass("is-selected");
     if (operation === "poll") expect(transport.mock.calls.filter(([c]) => c === "refresh_chats_v2")).toEqual([]);
+  });
+
+  it("rejects an old source's intent catalog after settings publish a new source", async () => {
+    const oldCatalog = deferred<unknown[]>();
+    let intentCount = 0;
+    installTransport({ switchContext: otherSource, switchMessages: [sourceMessage], intents: async () => ++intentCount === 1 ? oldCatalog.promise : [] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(fixture.chats[0].title) }));
+    await waitFor(() => expect(intentCount).toBe(1));
+    fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save settings" }));
+    await screen.findByText("Connection settings applied.");
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(fixture.chats[0].title) }));
+    await waitFor(() => expect(intentCount).toBe(2));
+    await act(async () => oldCatalog.resolve([{ actionId: "delete_my_messages", label: "Old source permission", requiresActor: false, descriptors: [deletionDescriptor] }]));
+    expect(screen.queryByRole("button", { name: "Delete all my messages" })).not.toBeInTheDocument();
+    expect(await screen.findByText(sourceMessage.preview)).toBeInTheDocument();
   });
 });

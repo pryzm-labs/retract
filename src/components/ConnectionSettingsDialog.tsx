@@ -21,7 +21,10 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
