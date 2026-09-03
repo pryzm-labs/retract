@@ -78,7 +78,9 @@ impl ActionDescriptor {
             || (self.availability == Availability::LivePreflightRequired
                 && !self.requires_live_preflight)
             || (self.effect == ExpectedEffect::ContainerDestroyed
-                && self.confirmation_tier != ConfirmationTier::Critical)
+                && (self.confirmation_tier != ConfirmationTier::Critical
+                    || !self.destructive
+                    || !self.irreversible))
         {
             return Err(DomainError::InvalidPlan);
         }

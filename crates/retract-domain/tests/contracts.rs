@@ -264,6 +264,18 @@ fn target_sets_are_canonical_but_step_order_is_bound() {
 }
 
 #[test]
+fn sealed_plan_rejects_noncanonical_duplicate_targets() {
+    let original = plan();
+    let mut duplicated_global_target = original.clone();
+    duplicated_global_target.targets.push(target(0));
+    assert!(duplicated_global_target.validate().is_err());
+
+    let mut duplicated_step_target = original;
+    duplicated_step_target.steps[0].targets.push(target(0));
+    assert!(duplicated_step_target.validate().is_err());
+}
+
+#[test]
 fn sealing_rejects_conflicting_references_missing_targets_and_unsafe_confirmation() {
     let mut conflicting = plan();
     let mut alias = target(0);
@@ -514,6 +526,14 @@ fn descriptors_reject_invalid_batches_and_missing_unavailable_reason() {
     descriptor.unavailable_reason = None;
     descriptor.effect = ExpectedEffect::ContainerDestroyed;
     assert!(descriptor.validate().is_err());
+    descriptor.confirmation_tier = ConfirmationTier::Critical;
+    descriptor.destructive = false;
+    assert!(descriptor.validate().is_err());
+    descriptor.destructive = true;
+    descriptor.irreversible = false;
+    assert!(descriptor.validate().is_err());
+    descriptor.irreversible = true;
+    descriptor.validate().unwrap();
 }
 
 #[test]
@@ -544,10 +564,13 @@ fn legacy_history_retains_operation_and_counters_without_executable_scope() {
 }
 
 #[test]
-fn plans_reject_recursive_fingerprints_nil_identity_and_empty_targets() {
+fn plans_hash_opaque_recipe_fields_and_reject_nil_identity_and_empty_targets() {
     let mut candidate = plan();
     candidate.recipe.payload["fingerprint"] = json!("unscoped");
-    assert!(candidate.seal().is_err());
+    candidate.seal().unwrap();
+    candidate.validate().unwrap();
+    candidate.recipe.payload["fingerprint"] = json!("different-opaque-value");
+    assert!(candidate.validate().is_err());
     candidate = plan();
     candidate.id = Uuid::nil();
     assert!(candidate.seal().is_err());

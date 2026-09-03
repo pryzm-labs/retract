@@ -56,6 +56,16 @@ impl RemediationPlan {
     pub fn validate(&self) -> Result<(), DomainError> {
         let mut canonical = self.clone();
         canonical.normalize()?;
+        if canonical.targets != self.targets
+            || canonical.steps.len() != self.steps.len()
+            || canonical
+                .steps
+                .iter()
+                .zip(&self.steps)
+                .any(|(normalized, sealed)| normalized.targets != sealed.targets)
+        {
+            return Err(DomainError::InvalidPlan);
+        }
         if canonical.compute_fingerprint()? != self.fingerprint {
             return Err(DomainError::FingerprintMismatch);
         }
@@ -71,10 +81,6 @@ impl RemediationPlan {
             return Err(DomainError::InvalidPlan);
         }
         self.recipe.validate()?;
-        // A recipe cannot smuggle a second fingerprint into the binding.
-        if contains_fingerprint(&self.recipe.payload) {
-            return Err(DomainError::InvalidPlan);
-        }
         self.targets = canonical_targets(&self.targets, &self.scope)?;
         let mut step_targets = Vec::new();
         let mut tier = ConfirmationTier::Low;
@@ -160,16 +166,6 @@ impl RemediationPlan {
         let digest = Sha256::digest(bytes);
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         Ok(format!("sha256-v1:{hex}"))
-    }
-}
-
-fn contains_fingerprint(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(map) => map
-            .iter()
-            .any(|(key, value)| key == "fingerprint" || contains_fingerprint(value)),
-        serde_json::Value::Array(items) => items.iter().any(contains_fingerprint),
-        _ => false,
     }
 }
 
