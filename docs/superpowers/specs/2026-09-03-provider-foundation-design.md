@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-03
 
-**Status:** Approach approved; written specification awaiting review
+**Status:** Approved for implementation on 2026-09-03
 
 **Base:** `ef5f1f62830df6f508bb7a13c2dc4c8868cb0977` — merged Telegram characterization gate, PR #20
 
@@ -317,7 +317,7 @@ The new crate requires its own lockfile while the repository has no root workspa
 - [x] Define backup/write/verify/replace migration and conservative old-job recovery.
 - [x] Include the accessible job-result prerequisite when migrating action/result descriptors.
 - [x] Preserve keychain/session behavior and container cache discipline.
-- [ ] User review of this written specification.
+- [x] User review of this written specification.
 - [ ] Write the detailed implementation plan after specification approval.
 
 No production implementation is included in this document change.
