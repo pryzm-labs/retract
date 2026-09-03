@@ -34,49 +34,10 @@ use tauri::Manager;
 
 pub const KEY: [u8; 32] = [0x71; 32];
 pub fn fixture() -> Value {
-    let mut value: Value = serde_json::from_str(include_str!(
+    serde_json::from_str(include_str!(
         "../../../src/test/fixtures/provider-lifecycle.json"
     ))
-    .unwrap();
-    // Task4's reviewed locator contract adds the typed tuple tag. These UUID
-    // literals were independently calculated with Node crypto (not production
-    // Rust identity helpers); original fixture native strings/scopes stay frozen.
-    fn upgrade(value: &mut Value) {
-        if value["resource"]["provider"] == "telegram" {
-            let id = match value["id"].as_str().unwrap() {
-                "29cdec14-7825-5357-aeab-c44c5ee5223b" => "d567ef1a-2909-5900-86e6-ed8234e0123a",
-                "c5908589-9e4a-5d28-a986-85ee53e53e64" => "94ae034a-90c8-543e-a1ad-df42f6e2b095",
-                "996ba6e4-f60e-5d52-840f-f00157eaf728" => "e8de4fa5-c211-5f5a-bdf1-6f52d06ba26e",
-                "e503aff9-3c4a-5a22-8e1a-72c847cf82f9" => "075e4782-bc3a-5469-97e7-f11781240105",
-                "24bef0a2-1e4f-51ce-bd8e-691c2054751e" => "9cf56e82-c2da-56a8-b48d-2d701e40172a",
-                "f0a9cbb6-b665-5579-b908-c4abfd320bb7" => "e7127c50-f015-5cb8-8e8c-9e2a8b4249ad",
-                "fadffa7f-69f3-5106-beff-09def1ee1a57" => "48d80906-6b4f-51e0-b329-081cd5642261",
-                "57840e34-42dd-5254-af79-5ac5c0a602fc" => "2813b0ae-8c45-564b-a91b-07d894e5a56f",
-                _ => panic!("unreviewed fixture identity"),
-            };
-            value["id"] = json!(id);
-            let resource = &mut value["resource"];
-            let mut tuple: Vec<String> =
-                serde_json::from_str(resource["canonicalKey"].as_str().unwrap()).unwrap();
-            tuple.insert(
-                0,
-                if resource["resourceKind"] == "conversation" {
-                    "telegram-conversation-v1"
-                } else {
-                    "telegram-message-v1"
-                }
-                .into(),
-            );
-            resource["canonicalKey"] = json!(serde_json::to_string(&tuple).unwrap());
-        }
-        match value {
-            Value::Array(items) => items.iter_mut().for_each(upgrade),
-            Value::Object(fields) => fields.values_mut().for_each(upgrade),
-            _ => {}
-        }
-    }
-    upgrade(&mut value);
-    value
+    .unwrap()
 }
 pub fn context(name: &str) -> ActiveContext {
     serde_json::from_value(fixture()[name].clone()).unwrap()

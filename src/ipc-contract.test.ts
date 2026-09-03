@@ -20,7 +20,7 @@ import type {
   SearchRequest,
   SearchResponse,
   SensitiveDataKind,
-} from "./types";
+} from "./test/legacy-types";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends

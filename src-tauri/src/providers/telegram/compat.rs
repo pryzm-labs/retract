@@ -682,6 +682,7 @@ pub struct TelegramContentMetadata {
     pub pinned: bool,
     pub grouping: Option<ScopedResourceRef>,
     pub sender_name: String,
+    pub actor: Option<ScopedResourceRef>,
     pub deletion_reach: DeletionReach,
 }
 
@@ -755,6 +756,12 @@ pub fn normalize_content(
         TelegramMessageLocator::new(message.chat_id.to_string(), message.message_id.to_string())?
             .resource(scope.account_id);
     let actor = actor_locator(message.sender_id)?.resource(scope.account_id);
+    let actor_ref = ScopedResourceRef {
+        scope: scope.clone(),
+        id: actor.resource_id().map_err(|_| invalid_recipe())?,
+        resource: actor.clone(),
+    };
+    actor_ref.validate(scope).map_err(|_| invalid_recipe())?;
     let grouping = message
         .album_id
         .map(|id| -> Result<ScopedResourceRef, AppError> {
@@ -825,6 +832,7 @@ pub fn normalize_content(
                 pinned: message.is_pinned,
                 grouping,
                 sender_name: message.sender_name.clone(),
+                actor: Some(actor_ref),
                 deletion_reach: message.deletion_reach,
             },
         )?),

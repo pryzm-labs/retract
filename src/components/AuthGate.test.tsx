@@ -65,7 +65,7 @@ describe("Telegram authentication gate", () => {
     fireEvent.change(input, { target: { value: "synthetic-value" } });
     fireEvent.submit(input.closest("form")!);
 
-    await waitFor(() => expect(api.submitAuth).toHaveBeenCalledWith(command, "synthetic-value"));
+    await waitFor(() => expect(api.submitAuth).toHaveBeenCalledWith(command, "synthetic-value", null));
     expect(api.submitAuth).toHaveBeenCalledTimes(1);
     expect(onRefresh).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.submitAuth).mock.invocationCallOrder[0])

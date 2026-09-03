@@ -1,16 +1,18 @@
+import type { ActiveContext } from "../providers/identity";
 import { Check, Database, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@retract/api";
 import type { ConnectionSettings, SaveConnectionSettingsResult } from "../types";
 
 interface ConnectionSettingsDialogProps {
+  context?: ActiveContext | null;
   settings: ConnectionSettings;
   required: boolean;
   onClose: () => void;
   onSaved: (result: SaveConnectionSettingsResult) => void;
 }
 
-export function ConnectionSettingsDialog({ settings, required, onClose, onSaved }: ConnectionSettingsDialogProps) {
+export function ConnectionSettingsDialog({ context = null, settings, required, onClose, onSaved }: ConnectionSettingsDialogProps) {
   const [tdlibPath, setTdlibPath] = useState(settings.tdlibPath || settings.detectedTdlibPath || "");
   const [apiId, setApiId] = useState(settings.apiId?.toString() || "");
   const [apiHash, setApiHash] = useState("");
@@ -18,6 +20,8 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -35,7 +39,8 @@ export function ConnectionSettingsDialog({ settings, required, onClose, onSaved 
         apiId: apiId.trim() ? Number(apiId) : null,
         apiHash: apiHash.trim() || null,
         useTestDc
-      });
+      }, context);
+      if (!alive.current) return;
       setSaved(true);
       onSaved(result);
     } catch (cause) {

@@ -5,6 +5,30 @@ use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
 
 use crate::{compatibility::commands_v2, provider_service::ProviderService};
 
+#[test]
+fn compatibility_v2_content_supplies_the_exact_scoped_actor_for_sender_review() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../src/test/fixtures/telegram-ipc-contract.json"
+    ))
+    .unwrap();
+    let message: cleaner_domain::MessageSnapshot =
+        serde_json::from_value(fixture["searchResponse"]["messages"][0].clone()).unwrap();
+    let scope = super::fixtures::context("context").scope;
+    let record = crate::providers::telegram::compat::normalize_content(&scope, &message).unwrap();
+    let metadata = record.provider_metadata.unwrap().payload;
+    let actor = &metadata["actor"];
+    assert_eq!(actor["scope"], serde_json::to_value(&scope).unwrap());
+    assert_eq!(actor["id"], serde_json::to_value(record.author_id).unwrap());
+    assert_eq!(actor["resource"]["resourceKind"], "actor");
+    assert_eq!(
+        actor["resource"]["locatorPayload"],
+        json!({"kind":"user","nativeId":"42"})
+    );
+    let reference: retract_domain::ScopedResourceRef =
+        serde_json::from_value(actor.clone()).unwrap();
+    reference.validate(&scope).unwrap();
+}
+
 fn setup() -> tauri::WebviewWindow<MockRuntime> {
     with_service(ProviderService::setup())
 }

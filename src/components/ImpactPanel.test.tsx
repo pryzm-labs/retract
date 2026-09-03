@@ -1,3 +1,6 @@
+import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "../demo";
+import { testId, testJob } from "../test/v2-fixtures";
+import { uuid } from "../providers/identity";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -6,29 +9,7 @@ import { ImpactPanel } from "./ImpactPanel";
 
 const timestamp = "2026-01-02T03:04:05.000Z";
 
-function job(
-  id: string,
-  status: JobStatus,
-  overrides: Partial<JobRecord> = {},
-): JobRecord {
-  return {
-    id,
-    planId: `plan-${id}`,
-    operation: "selected_messages",
-    targetChatIds: [-2101],
-    status,
-    total: 9,
-    deleted: 0,
-    skipped: 0,
-    failed: 0,
-    nextBatch: 0,
-    retryAfterSeconds: null,
-    errorCodes: [],
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    ...overrides,
-  };
-}
+const job = testJob;
 
 function panelProps(
   jobs: JobRecord[],
@@ -68,9 +49,9 @@ describe("ImpactPanel job activity", () => {
       <ImpactPanel {...panelProps([queued, running, rateLimited], onCancelJob)} />,
     );
 
-    const queuedRow = screen.getByRole("group", { name: "Cleanup job queued-job" });
-    const runningRow = screen.getByRole("group", { name: "Cleanup job running-job" });
-    const retryRow = screen.getByRole("group", { name: "Cleanup job rate-limited-job" });
+    const queuedRow = screen.getByRole("group", { name: `Cleanup job ${testId("queued-job")}` });
+    const runningRow = screen.getByRole("group", { name: `Cleanup job ${testId("running-job")}` });
+    const retryRow = screen.getByRole("group", { name: `Cleanup job ${testId("rate-limited-job")}` });
     expect(within(queuedRow).getByText("queued")).toBeInTheDocument();
     expect(within(runningRow).getByText("running · 4 deleted")).toBeInTheDocument();
     expect(
@@ -84,9 +65,9 @@ describe("ImpactPanel job activity", () => {
     fireEvent.click(within(runningRow).getByRole("button", { name: "Cancel" }));
     fireEvent.click(within(retryRow).getByRole("button", { name: "Cancel" }));
     expect(onCancelJob.mock.calls).toEqual([
-      ["queued-job"],
-      ["running-job"],
-      ["rate-limited-job"],
+      [testId("queued-job")],
+      [testId("running-job")],
+      [testId("rate-limited-job")],
     ]);
 
     const completed = job("completed-job", "completed", {
@@ -112,9 +93,9 @@ describe("ImpactPanel job activity", () => {
       <ImpactPanel {...panelProps([completed, partial, failed], onCancelJob)} />,
     );
 
-    const completedRow = screen.getByRole("group", { name: "Cleanup job completed-job" });
-    const partialRow = screen.getByRole("group", { name: "Cleanup job partial-job" });
-    const failedRow = screen.getByRole("group", { name: "Cleanup job failed-job" });
+    const completedRow = screen.getByRole("group", { name: `Cleanup job ${testId("completed-job")}` });
+    const partialRow = screen.getByRole("group", { name: `Cleanup job ${testId("partial-job")}` });
+    const failedRow = screen.getByRole("group", { name: `Cleanup job ${testId("failed-job")}` });
     expect(within(completedRow).getByText("completed · 2 deleted")).toBeInTheDocument();
     expect(within(partialRow).getByText("partial · 3 deleted")).toBeInTheDocument();
     expect(within(failedRow).getByText("failed")).toBeInTheDocument();
@@ -134,7 +115,7 @@ describe("ImpactPanel job activity", () => {
     });
     rerender(<ImpactPanel {...panelProps([cancelled], onCancelJob)} />);
 
-    const cancelledRow = screen.getByRole("group", { name: "Cleanup job cancelled-job" });
+    const cancelledRow = screen.getByRole("group", { name: `Cleanup job ${testId("cancelled-job")}` });
     expect(within(cancelledRow).getByText("cancelled · 1 deleted")).toBeInTheDocument();
     expect(within(cancelledRow).queryByText(/3 skipped/i)).not.toBeInTheDocument();
     expect(within(cancelledRow).queryByText(/synthetic_cancelled/i)).not.toBeInTheDocument();

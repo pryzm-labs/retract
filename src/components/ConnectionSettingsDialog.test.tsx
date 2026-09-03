@@ -1,3 +1,6 @@
+import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "../demo";
+import { testId, testJob } from "../test/v2-fixtures";
+import { uuid } from "../providers/identity";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
@@ -36,7 +39,10 @@ describe("ConnectionSettingsDialog", () => {
     const liveResult: SaveConnectionSettingsResult = {
       connectionSettings: { ...bundledSettings, setupComplete: true },
       snapshot: {
-        runtimeMode: "live",
+        context: fixtureContext,
+        identity: { state: "ready" },
+        catalog: { phase: "ready", total: 0, processed: 0 },
+        legacyHistory: [],
         accountLabel: "Telegram account",
         modeReason: "Connected locally",
         chats: [],
@@ -57,6 +63,6 @@ describe("ConnectionSettingsDialog", () => {
       apiId: 12345678,
       apiHash: "0123456789abcdef0123456789abcdef",
       useTestDc: false
-    }));
+    }, null));
   });
 });

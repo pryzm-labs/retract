@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@retract/api";
+import { sameContext, sameScope, scopeKey, resourceKey, refKey, type ActiveContext, type ScopedResourceRef, type Uuid } from "./providers/identity";
 import { AuthGate } from "./components/AuthGate";
 import { BrandLogo } from "./components/BrandLogo";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -41,7 +42,7 @@ export default function App() {
   const [excludePinned, setExcludePinned] = useState(false);
   const [privacyScan, setPrivacyScan] = useState(false);
   const [scope, setScope] = useState<ChatScope>("all");
-  const [selectedChatId, setSelectedChatId] = useState<number | null>(null);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState("");
   const [selectedMessages, setSelectedMessages] = useState<Map<string, MessageSnapshot>>(new Map());
   const [plan, setPlan] = useState<PlanView | null>(null);
@@ -49,205 +50,185 @@ export default function App() {
   const [syncingCatalog, setSyncingCatalog] = useState(false);
   const [catalogProgress, setCatalogProgress] = useState<CatalogProgress>({ phase: "idle", total: 0, processed: 0 });
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
-  const [settlingRemovalChatIds, setSettlingRemovalChatIds] = useState<Set<number>>(new Set());
+  const [settlingRemovalChatIds, setSettlingRemovalChatIds] = useState<Set<string>>(new Set());
   const [searching, setSearching] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [searchVersion, setSearchVersion] = useState(0);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const previousHadActiveJobs = useRef(false);
-  const authRefreshInFlight = useRef(false);
-  const jobsRefreshInFlight = useRef(false);
   const actionInFlight = useRef(false);
   const actionGeneration = useRef(0);
-  const catalogSyncStarted = useRef(false);
-  const snapshotLoadGeneration = useRef(0);
+  const epoch = useRef(0);
+  const currentContext = useRef<ActiveContext | null>(null);
   const backgroundRefreshGeneration = useRef(0);
+  const snapshotLoadGeneration = useRef(0);
+  const catalogSyncStarted = useRef(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const pendingRemovalJobs = useRef(new Map<string, ScopedResourceRef[]>());
 
-  const loadSnapshot = useCallback(async (failureContext?: string) => {
-    const generation = ++snapshotLoadGeneration.current;
-    try {
-      const next = await api.snapshot();
-      if (generation !== snapshotLoadGeneration.current) return null;
-      setSnapshot(next);
-      setJobs(next.recentJobs);
-      setCatalogProgress({ phase: "ready", total: next.chats.length, processed: next.chats.length });
-      catalogSyncStarted.current = next.auth.stage === "ready";
-      return next;
-    } catch (error) {
-      if (generation === snapshotLoadGeneration.current) {
-        showError(error, setToast, failureContext);
-      }
-      return null;
-    }
-  }, []);
-
-  const refreshAffectedChatsInBackground = useCallback((chatIds: number[], removedChatIds: number[] = []) => {
-    const uniqueChatIds = Array.from(new Set(chatIds));
-    const removed = new Set(removedChatIds);
-    if (removed.size > 0) {
-      setSnapshot((current) => current
-        ? { ...current, chats: current.chats.filter((chat) => !removed.has(chat.id)) }
-        : current);
-      setSelectedChatId((current) => current !== null && removed.has(current) ? null : current);
-      setSelectedMessages((current) => new Map(
-        Array.from(current.entries()).filter(([, message]) => !removed.has(message.chatId))
-      ));
-      setSettlingRemovalChatIds((current) => {
-        const next = new Set(current);
-        removed.forEach((chatId) => next.delete(chatId));
-        return next;
-      });
-    }
-    if (uniqueChatIds.length === 0) {
-      setSearchVersion((value) => value + 1);
-      return;
-    }
-    const generation = ++backgroundRefreshGeneration.current;
-    setRefreshingCatalog(true);
-    void api.refreshChats(uniqueChatIds)
-      .then((refreshedChats) => {
-        if (generation !== backgroundRefreshGeneration.current) return;
-        const requested = new Set(uniqueChatIds);
-        const applicableChats = refreshedChats.filter((chat) => !removed.has(chat.id));
-        const returned = new Set(applicableChats.map((chat) => chat.id));
-        setSnapshot((current) => {
-          if (!current) return current;
-          const chats = current.chats
-            .filter((chat) => !requested.has(chat.id))
-            .concat(applicableChats)
-            .sort((left, right) => left.title.localeCompare(right.title));
-          return { ...current, chats };
-        });
-        setSelectedChatId((current) => current !== null && requested.has(current) && !returned.has(current) ? null : current);
-        setSearchVersion((value) => value + 1);
-      })
-      .catch((error) => {
-        if (generation === backgroundRefreshGeneration.current) {
-          showError(error, setToast, "Cleanup finished, but Retract could not refresh the affected chats");
-        }
-      })
-      .finally(() => {
-        if (generation === backgroundRefreshGeneration.current) {
-          setRefreshingCatalog(false);
-        }
-      });
-  }, []);
-
-  const loadBootstrapSnapshot = useCallback(async () => {
-    try {
-      const next = await api.bootstrapSnapshot();
-      setSnapshot(next);
-      setJobs(next.recentJobs);
-      setCatalogProgress(next.runtimeMode === "demo"
-        ? { phase: "ready", total: next.chats.length, processed: next.chats.length }
-        : { phase: "idle", total: 0, processed: 0 });
+  const publish = useCallback((next: AppSnapshot) => {
+    if (!sameContext(currentContext.current, next.context)) {
+      epoch.current += 1;
+      actionGeneration.current += 1;
+      backgroundRefreshGeneration.current += 1;
+      snapshotLoadGeneration.current += 1;
+      actionInFlight.current = false;
+      pendingRemovalJobs.current.clear();
+      setBusyLabel(null);
+      setSelectedChatId(null);
+      setSelectedMessages(new Map());
+      setPlan(null);
+      setResults({ messages: [], returned: 0, truncated: false });
+      setSettlingRemovalChatIds(new Set());
+      setRefreshingCatalog(false);
+      setSearching(false);
       catalogSyncStarted.current = false;
-      return next;
-    } catch (error) {
-      showError(error, setToast);
-      return null;
     }
+    currentContext.current = next.context;
+    setSnapshot(next);
+    setJobs(next.context ? next.recentJobs.filter(job => sameScope(job.scope, next.context!.scope)) : []);
+    setCatalogProgress(next.catalog);
+    setStartupError(null);
   }, []);
+
+  const loadSnapshot = useCallback(async (context: ActiveContext) => {
+    const generation = ++snapshotLoadGeneration.current;
+    const capturedEpoch = epoch.current;
+    setSyncingCatalog(true);
+    try {
+      const next = await api.snapshot(context);
+      if (generation !== snapshotLoadGeneration.current || capturedEpoch !== epoch.current) return;
+      publish(next);
+      catalogSyncStarted.current = true;
+    } catch (error) {
+      if (capturedEpoch === epoch.current) {
+        catalogSyncStarted.current = false;
+        setStartupError(error instanceof Error ? error.message : "The catalog could not be loaded.");
+      }
+    } finally {
+      if (capturedEpoch === epoch.current) setSyncingCatalog(false);
+    }
+  }, [publish]);
 
   const refreshAuth = useCallback(async () => {
-    if (authRefreshInFlight.current) return;
-    authRefreshInFlight.current = true;
+    let capturedEpoch = epoch.current;
     try {
-      const auth = await api.authSnapshot();
-      setSnapshot((current) => current ? { ...current, auth } : current);
-      if (auth.stage === "ready") {
-        if (!catalogSyncStarted.current) {
-          catalogSyncStarted.current = true;
-          setSyncingCatalog(true);
-          void loadSnapshot().finally(() => setSyncingCatalog(false));
-        }
+      const next = await api.bootstrapSnapshot(currentContext.current);
+      if (capturedEpoch !== epoch.current) return;
+      const same = sameContext(currentContext.current, next.context);
+      if (same && catalogSyncStarted.current) {
+        setSnapshot(current => current ? { ...current, auth: next.auth, identity: next.identity, catalog: next.catalog } : next);
+        setCatalogProgress(next.catalog);
       } else {
-        catalogSyncStarted.current = false;
+        publish(next);
+      }
+      capturedEpoch = epoch.current;
+      if (!connectionSettings) {
+        const settings = await api.connectionSettings(next.context);
+        if (capturedEpoch !== epoch.current) return;
+        setConnectionSettings(settings);
+        if (!settings.setupComplete) setSettingsOpen(true);
+      }
+      if (next.context && next.identity.state === "ready" && !catalogSyncStarted.current) {
+        catalogSyncStarted.current = true;
+        void loadSnapshot(next.context);
       }
     } catch (error) {
-      showError(error, setToast);
-    } finally {
-      authRefreshInFlight.current = false;
+      if (capturedEpoch === epoch.current) setStartupError(error instanceof Error ? error.message : "The connection could not be verified.");
     }
-  }, [loadSnapshot]);
+  }, [publish, loadSnapshot, connectionSettings]);
 
-  const loadConnectionSettings = useCallback(async () => {
-    try {
-      const next = await api.connectionSettings();
-      setConnectionSettings(next);
-      if (!next.setupComplete) setSettingsOpen(true);
-    } catch (error) {
-      showError(error, setToast);
-    }
+  useEffect(() => {
+    let disposed = false;
+    void (async () => {
+      try {
+        const next = await api.bootstrapSnapshot();
+        if (disposed) return;
+        publish(next);
+        const capturedEpoch = epoch.current;
+        const settings = await api.connectionSettings(next.context);
+        if (disposed || capturedEpoch !== epoch.current) return;
+        setConnectionSettings(settings);
+        if (!settings.setupComplete) setSettingsOpen(true);
+        if (next.context && next.identity.state === "ready") {
+          catalogSyncStarted.current = true;
+          void loadSnapshot(next.context);
+        }
+      } catch (error) {
+        if (!disposed) setStartupError(error instanceof Error ? error.message : "The workspace could not be opened.");
+      } finally { if (!disposed) setLoading(false); }
+    })();
+    return () => { disposed = true; epoch.current += 1; };
+  }, [publish, loadSnapshot]);
+
+  useEffect(() => {
+    if (!snapshot || (snapshot.context && !syncingCatalog && snapshot.catalog.phase === "ready")) return;
+    let pending = false;
+    const interval = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
+      void refreshAuth().finally(() => { pending = false; });
+    }, 750);
+    return () => window.clearInterval(interval);
+  }, [snapshot?.context, snapshot?.identity.state, snapshot?.catalog.phase, syncingCatalog, refreshAuth]);
+
+  const refreshAffectedChatsInBackground = useCallback((refs: ScopedResourceRef[], removedRefs: ScopedResourceRef[] = []) => {
+    const context = currentContext.current;
+    if (!context) return;
+    const conversations = [...new Map(refs.filter(ref => sameScope(ref.scope, context.scope)).map(ref => [refKey(ref), ref])).values()];
+    const removed = new Set(removedRefs.filter(ref => sameScope(ref.scope, context.scope)).map(refKey));
+    const generation = ++backgroundRefreshGeneration.current;
+    const capturedEpoch = epoch.current;
+    if (!conversations.length) return;
+    setRefreshingCatalog(true);
+    void api.refreshChats(conversations, context).then(refreshed => {
+      if (generation !== backgroundRefreshGeneration.current || capturedEpoch !== epoch.current) return;
+      const requested = new Set(conversations.map(refKey));
+      const applicable = refreshed.filter(chat => !removed.has(refKey(chat.ref)));
+      const returned = new Set(applicable.map(chat => refKey(chat.ref)));
+      setSnapshot(current => current ? { ...current, chats: current.chats.filter(chat => !requested.has(refKey(chat.ref))).concat(applicable).sort((a, b) => a.title.localeCompare(b.title)) } : current);
+      setSelectedChatId(current => current && requested.has(current) && !returned.has(current) ? null : current);
+      setSelectedMessages(current => new Map([...current].filter(([, message]) => {
+        const key = resourceKey(message.scope, "conversation", message.chatId);
+        return !requested.has(key) || returned.has(key);
+      })));
+      setSettlingRemovalChatIds(current => new Set([...current].filter(key => !requested.has(key))));
+      setSearchVersion(value => value + 1);
+    }).catch(error => {
+      if (capturedEpoch === epoch.current) showError(error, setToast, "Cleanup finished, but Retract could not refresh the affected chats");
+    }).finally(() => {
+      if (generation === backgroundRefreshGeneration.current && capturedEpoch === epoch.current) setRefreshingCatalog(false);
+    });
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    void Promise.all([loadBootstrapSnapshot(), loadConnectionSettings()]).then(([initial]) => {
-      if (disposed) return;
-      setLoading(false);
-      if (initial?.runtimeMode === "live" && initial.auth.stage === "ready") {
-        catalogSyncStarted.current = true;
-        setSyncingCatalog(true);
-        void loadSnapshot().finally(() => setSyncingCatalog(false));
-      }
-    });
-    return () => { disposed = true; };
-  }, [loadBootstrapSnapshot, loadSnapshot, loadConnectionSettings]);
-
-  useEffect(() => {
-    if (!snapshot || snapshot.runtimeMode !== "live" || snapshot.auth.stage === "ready") return;
-    const interval = window.setInterval(() => { void refreshAuth(); }, 750);
-    return () => window.clearInterval(interval);
-  }, [snapshot?.runtimeMode, snapshot?.auth.stage, refreshAuth]);
-
-  useEffect(() => {
-    if (!syncingCatalog) return;
-    let disposed = false;
-    const refreshProgress = async () => {
-      try {
-        const progress = await api.catalogProgress();
-        if (!disposed) setCatalogProgress(progress);
-      } catch {
-        // Catalog loading itself owns user-facing errors. Progress polling is
-        // best-effort and must never obscure or interrupt the real operation.
-      }
-    };
-    void refreshProgress();
-    const interval = window.setInterval(() => { void refreshProgress(); }, 300);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [syncingCatalog]);
-
   const chats = snapshot?.chats || [];
-  const activeChat = chats.find((chat) => chat.id === selectedChatId);
+  const activeChat = chats.find((chat) => refKey(chat.ref) === selectedChatId);
 
   const scopedChatIds = useMemo(() => {
-    if (selectedChatId !== null) return [selectedChatId];
+    if (selectedChatId !== null) return chats.filter(chat => refKey(chat.ref) === selectedChatId).map(chat => chat.ref);
     if (scope === "admin") {
       return chats
         .filter((chat) => chat.capabilities.role !== "member")
-        .map((chat) => chat.id);
+        .map((chat) => chat.ref);
     }
-    if (scope === "unanswered") return chats.filter((chat) => chat.conversationState === "never_replied").map((chat) => chat.id);
-    if (scope === "empty") return chats.filter((chat) => chat.conversationState === "empty").map((chat) => chat.id);
-    if (scope === "archive") return chats.filter((chat) => chat.archived).map((chat) => chat.id);
+    if (scope === "unanswered") return chats.filter((chat) => chat.conversationState === "never_replied").map((chat) => chat.ref);
+    if (scope === "empty") return chats.filter((chat) => chat.conversationState === "empty").map((chat) => chat.ref);
+    if (scope === "archive") return chats.filter((chat) => chat.archived).map((chat) => chat.ref);
     return [];
   }, [chats, scope, selectedChatId]);
 
   const dateBounds = useMemo(() => searchDateBounds(dateFilter), [dateFilter]);
 
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot?.context || snapshot.identity.state !== "ready" || syncingCatalog || snapshot.catalog.phase !== "ready") return;
+    const context = snapshot.context;
+    const capturedEpoch = epoch.current;
     let disposed = false;
     const timeout = window.setTimeout(async () => {
       setSearching(true);
       try {
         const response = await api.search({
           query: deferredQuery,
-          chatIds: scopedChatIds,
+          conversations: scopedChatIds,
           chatKinds: [],
           contentKinds: contentKindsForFilter[contentFilter],
           direction,
@@ -256,12 +237,12 @@ export default function App() {
           excludePinned,
           privacyScan,
           limit: 500
-        });
-        if (!disposed) setResults(response);
+        }, context);
+        if (!disposed && capturedEpoch === epoch.current) setResults(response);
       } catch (error) {
-        if (!disposed) showError(error, setToast);
+        if (!disposed && capturedEpoch === epoch.current) showError(error, setToast);
       } finally {
-        if (!disposed) setSearching(false);
+        if (!disposed && capturedEpoch === epoch.current) setSearching(false);
       }
     }, 120);
     return () => {
@@ -270,70 +251,48 @@ export default function App() {
     };
   }, [snapshot, deferredQuery, scopedChatIds, contentFilter, direction, dateBounds, excludePinned, privacyScan, searchVersion]);
 
-  const hasActiveJobs = jobs.some((job) => job.status === "queued" || job.status === "running");
-  const pendingRemovalChatIds = useMemo(() => {
-    const pending = new Set(settlingRemovalChatIds);
-    jobs
-      .filter((job) => (job.status === "queued" || job.status === "running") && operationRemovesChat(job.operation))
-      .forEach((job) => job.targetChatIds.forEach((chatId) => pending.add(chatId)));
-    return pending;
-  }, [jobs, settlingRemovalChatIds]);
+  const hasActiveJobs = jobs.some(job => job.status === "queued" || job.status === "running");
+  const pendingRemovalChatIds = settlingRemovalChatIds;
   useEffect(() => {
-    if (!hasActiveJobs) return;
-    previousHadActiveJobs.current = true;
-    let trackedActiveJobs = new Set(
-      jobs
-        .filter((job) => job.status === "queued" || job.status === "running")
-        .map((job) => job.id)
-    );
-    const affectedChatIds = new Set<number>();
-    const completedRemovalChatIds = new Set<number>();
-    const failedRemovalChatIds = new Set<number>();
+    const context = snapshot?.context;
+    if (!hasActiveJobs || !context) return;
+    const capturedEpoch = epoch.current;
+    let disposed = false, pending = false;
+    let tracked = new Set(jobs.filter(job => job.status === "queued" || job.status === "running").map(job => job.id));
     const interval = window.setInterval(async () => {
-      if (jobsRefreshInFlight.current) return;
-      jobsRefreshInFlight.current = true;
+      if (pending) return;
+      pending = true;
       try {
-        const next = await api.jobs();
+        const next = (await api.jobs(context)).filter(job => sameScope(job.scope, context.scope));
+        if (disposed || capturedEpoch !== epoch.current) return;
         setJobs(next);
-        for (const job of next) {
-          if (trackedActiveJobs.has(job.id) && job.status !== "queued" && job.status !== "running") {
-            job.targetChatIds.forEach((chatId) => affectedChatIds.add(chatId));
-            if (operationRemovesChat(job.operation)) {
-              const destination = job.status === "completed" ? completedRemovalChatIds : failedRemovalChatIds;
-              job.targetChatIds.forEach((chatId) => destination.add(chatId));
-            }
+        const finished = next.filter(job => tracked.has(job.id) && job.status !== "queued" && job.status !== "running");
+        const removedRefs = finished.filter(job => job.status === "completed").flatMap(job => pendingRemovalJobs.current.get(job.id) ?? []);
+        for (const job of finished) {
+          const pendingRefs = pendingRemovalJobs.current.get(job.id) ?? [];
+          if (job.status !== "completed") {
+            setSettlingRemovalChatIds(current => new Set([...current].filter(key => !pendingRefs.some(ref => refKey(ref) === key))));
           }
+          pendingRemovalJobs.current.delete(job.id);
         }
-        trackedActiveJobs = new Set(
-          next
-            .filter((job) => job.status === "queued" || job.status === "running")
-            .map((job) => job.id)
-        );
-        const stillActive = next.some((job) => job.status === "queued" || job.status === "running");
-        if (!stillActive && previousHadActiveJobs.current) {
-          previousHadActiveJobs.current = false;
-          if (failedRemovalChatIds.size > 0) {
-            setSettlingRemovalChatIds((current) => {
-              const nextIds = new Set(current);
-              failedRemovalChatIds.forEach((chatId) => nextIds.delete(chatId));
-              return nextIds;
-            });
-            setToast({
-              tone: "error",
-              message: "Telegram did not remove one or more chats. They remain available; review Job activity for the failure."
-            });
-          }
-          refreshAffectedChatsInBackground(Array.from(affectedChatIds), Array.from(completedRemovalChatIds));
-        }
-      } catch (error) {
-        showError(error, setToast);
-      } finally {
-        jobsRefreshInFlight.current = false;
-      }
+        if (finished.length) refreshAffectedChatsInBackground(finished.flatMap(job => job.dirtyRefs), removedRefs);
+        tracked = new Set(next.filter(job => job.status === "queued" || job.status === "running").map(job => job.id));
+      } catch (error) { if (!disposed && capturedEpoch === epoch.current) showError(error, setToast); }
+      finally { pending = false; }
     }, 700);
-    return () => window.clearInterval(interval);
-  }, [hasActiveJobs, refreshAffectedChatsInBackground]);
+    return () => { disposed = true; window.clearInterval(interval); };
+  }, [hasActiveJobs, snapshot?.context, refreshAffectedChatsInBackground]);
 
+  useEffect(() => {
+    const context = snapshot?.context;
+    if (!activeChat || !context) return;
+    const capturedEpoch = epoch.current, key = refKey(activeChat.ref);
+    let disposed = false;
+    void api.intents([activeChat.ref], context).then(intents => {
+      if (!disposed && capturedEpoch === epoch.current) setSnapshot(current => current ? { ...current, chats: current.chats.map(chat => refKey(chat.ref) === key ? { ...chat, intents } : chat) } : current);
+    }).catch(error => { if (!disposed && capturedEpoch === epoch.current) showError(error, setToast); });
+    return () => { disposed = true; };
+  }, [selectedChatId, snapshot?.context]);
   useEffect(() => {
     if (!toast) return;
     const timeout = window.setTimeout(() => setToast(null), 4500);
@@ -375,7 +334,7 @@ export default function App() {
       const next = new Map(current);
       const album = message.albumId == null
         ? [message]
-        : results.messages.filter((candidate) => candidate.chatId === message.chatId && candidate.albumId === message.albumId);
+        : results.messages.filter((candidate) => sameScope(candidate.scope, message.scope) && candidate.chatId === message.chatId && candidate.albumId === message.albumId);
       const albumIsSelected = album.every((candidate) => next.has(messageKey(candidate)));
       for (const candidate of album) {
         const key = messageKey(candidate);
@@ -399,40 +358,26 @@ export default function App() {
     });
   };
 
+  const renderedEpoch = epoch.current;
   const applyConnectionSettings = (result: SaveConnectionSettingsResult) => {
-    actionGeneration.current += 1;
-    actionInFlight.current = false;
-    setBusyLabel(null);
-    snapshotLoadGeneration.current += 1;
-    backgroundRefreshGeneration.current += 1;
-    catalogSyncStarted.current = result.snapshot.auth.stage === "ready";
-    setSyncingCatalog(false);
-    setCatalogProgress({
-      phase: "ready",
-      total: result.snapshot.chats.length,
-      processed: result.snapshot.chats.length
-    });
-    setRefreshingCatalog(false);
-    setSettlingRemovalChatIds(new Set());
+    if (renderedEpoch !== epoch.current) return;
+    publish(result.snapshot);
     setConnectionSettings(result.connectionSettings);
-    setSnapshot(result.snapshot);
-    setJobs(result.snapshot.recentJobs);
     setSettingsOpen(false);
-    setSelectedChatId(null);
-    setSelectedMessages(new Map());
-    setPlan(null);
-    setSearchVersion((value) => value + 1);
     setToast({ tone: "success", message: "Connection settings applied." });
+    if (result.snapshot.context) {
+      catalogSyncStarted.current = true;
+      void loadSnapshot(result.snapshot.context);
+    }
   };
 
   const prepareSelected = async () => {
+    const context = currentContext.current;
+    if (!context) return;
     const generation = beginAction("Preparing deletion review…");
     if (generation === null) return;
     try {
-      const prepared = await api.prepareSelection(selected.map((message) => ({
-        chatId: message.chatId,
-        messageId: message.messageId
-      })));
+      const prepared = await api.prepareSelection(selected.map(message => message.ref), context);
       if (generation === actionGeneration.current) setPlan(prepared);
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -442,13 +387,14 @@ export default function App() {
   };
 
   const prepareChatAction = async (operation: PlanOperation) => {
-    if (!activeChat) return;
+    const context = currentContext.current;
+    if (!activeChat || !context) return;
     const generation = beginAction(operation === "leave_chat"
       ? "Determining maximum cleanup scope…"
       : "Checking current chat authority…");
     if (generation === null) return;
     try {
-      const prepared = await api.prepareChatAction(activeChat.id, operation);
+      const prepared = await api.prepareChatAction(activeChat.ref, operation, context);
       if (generation === actionGeneration.current) setPlan(prepared);
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -458,11 +404,12 @@ export default function App() {
   };
 
   const prepareOwnMessages = async () => {
-    if (!activeChat) return;
+    const context = currentContext.current;
+    if (!activeChat || !context) return;
     const generation = beginAction("Finding every message you sent…");
     if (generation === null) return;
     try {
-      const prepared = await api.prepareOwnMessages(activeChat.id);
+      const prepared = await api.prepareOwnMessages(activeChat.ref, context);
       if (generation === actionGeneration.current) setPlan(prepared);
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -472,11 +419,13 @@ export default function App() {
   };
 
   const prepareSenderAction = async (sender: MessageSnapshot) => {
-    if (!activeChat) return;
+    if (!sender.actorRef) return;
+    const context = currentContext.current;
+    if (!activeChat || !context) return;
     const generation = beginAction("Preparing sender-wide review…");
     if (generation === null) return;
     try {
-      const prepared = await api.prepareSenderAction(activeChat.id, sender.senderId);
+      const prepared = await api.prepareSenderAction(activeChat.ref, sender.actorRef!, context);
       if (generation === actionGeneration.current) setPlan(prepared);
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -489,21 +438,23 @@ export default function App() {
     if (!plan) return;
     const generation = beginAction("Starting Telegram cleanup…");
     if (generation === null) return;
-    let refreshAfterExecution: number[] = [];
-    let removedAfterExecution: number[] = [];
+    let refreshAfterExecution: ScopedResourceRef[] = [];
+    let removedAfterExecution: ScopedResourceRef[] = [];
     try {
       await api.authorizePlan(plan);
+      if (generation !== actionGeneration.current) return;
       const job = await api.execute(plan, acknowledged, typedTitle);
       if (job.status !== "queued" && job.status !== "running") {
-        refreshAfterExecution = job.targetChatIds;
+        refreshAfterExecution = job.dirtyRefs;
         if (job.status === "completed" && operationRemovesChat(plan.operation)) {
-          removedAfterExecution = job.targetChatIds;
+          removedAfterExecution = job.dirtyRefs;
         }
       }
       if (generation !== actionGeneration.current) return;
       setJobs((current) => [job, ...current.filter((candidate) => candidate.id !== job.id)]);
       if ((job.status === "queued" || job.status === "running") && operationRemovesChat(plan.operation)) {
-        setSettlingRemovalChatIds((current) => new Set([...current, ...job.targetChatIds]));
+        pendingRemovalJobs.current.set(job.id, job.dirtyRefs);
+        setSettlingRemovalChatIds((current) => new Set([...current, ...job.dirtyRefs.map(refKey)]));
       }
       setPlan(null);
       setSelectedMessages(new Map());
@@ -531,12 +482,14 @@ export default function App() {
     }
   };
 
-  const cancelJob = async (jobId: string) => {
+  const cancelJob = async (jobId: Uuid) => {
+    const context = currentContext.current;
+    if (!context) return;
     const generation = beginAction("Requesting cancellation…");
     if (generation === null) return;
     try {
-      await api.cancelJob(jobId);
-      const next = await api.jobs();
+      await api.cancelJob(jobId, context);
+      const next = await api.jobs(context);
       if (generation === actionGeneration.current) {
         setJobs(next);
         setToast({ tone: "success", message: "Cancellation requested. The current Telegram call may finish; no later batch will start." });
@@ -548,22 +501,30 @@ export default function App() {
     }
   };
 
+  if (startupError) {
+    return <div className="app-loading"><section className="loading-card"><h1>Workspace not ready</h1><p role="alert">{startupError}</p><button onClick={() => { setStartupError(null); void refreshAuth(); }}>Retry</button></section></div>;
+  }
+
   if (loading || !snapshot) {
     return (
       <StartupLoading />
     );
   }
 
-  if (syncingCatalog) {
+  if (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready")) {
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><button onClick={() => void api.retryIdentity(snapshot.context).then(refreshAuth).catch(error => showError(error, setToast))}>Retry verification</button></> : <LoaderCircle className="spin" />}<button onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />}</section></div>;
+  }
+
+  if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
     return <CatalogLoading progress={catalogProgress} />;
   }
 
-  if (snapshot.runtimeMode === "live" && snapshot.auth.stage !== "ready") {
+  if (snapshot.auth.stage !== "ready") {
     return (
       <>
-        <AuthGate auth={snapshot.auth} onRefresh={refreshAuth} onOpenSettings={() => setSettingsOpen(true)} />
+        <AuthGate context={snapshot.context} auth={snapshot.auth} onRefresh={refreshAuth} onOpenSettings={() => setSettingsOpen(true)} />
         {connectionSettings && settingsOpen && (
-          <ConnectionSettingsDialog settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
+          <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
         )}
       </>
     );
@@ -620,7 +581,7 @@ export default function App() {
         jobs={jobs}
         busy={busy}
         busyLabel={busyLabel}
-        chatRemovalPending={activeChat ? pendingRemovalChatIds.has(activeChat.id) : false}
+        chatRemovalPending={activeChat ? pendingRemovalChatIds.has(refKey(activeChat.ref)) : false}
         hiddenSelectionCount={hiddenSelectionCount}
         onReview={prepareSelected}
         onChatAction={prepareChatAction}
@@ -635,7 +596,7 @@ export default function App() {
       )}
 
       {connectionSettings && settingsOpen && (
-        <ConnectionSettingsDialog settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
+        <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} />
       )}
 
       {toast && (

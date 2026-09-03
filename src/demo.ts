@@ -1,3 +1,6 @@
+import { decodeContext, decodePlan, decodeJob, type ActionDescriptor, type IntentDescriptor, type RemediationPlan } from "./providers/contract";
+import { resourceId, uuid, refKey, type ScopedResourceRef, type ResourceKind, type ConversationId, type ContentId, type ActorId, type Uuid } from "./providers/identity";
+import { jobView } from "./providers/telegram";
 import type {
   AppSnapshot,
   CatalogProgress,
@@ -12,9 +15,18 @@ import type {
   SensitiveDataKind
 } from "./types";
 
+export const fixtureContext = decodeContext({ scope: { provider: "telegram", accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId: "11111111-1111-4111-8111-111111111111" }, sessionGeneration: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" });
+export function fixtureRef(kind: ResourceKind, ...keys: string[]): ScopedResourceRef {
+  const resource = { provider: fixtureContext.scope.provider, accountId: fixtureContext.scope.accountId, resourceKind: kind, locatorSchema: "screenshot." + kind, locatorVersion: 1, canonicalKey: JSON.stringify(["screenshot-v2", ...keys]), locatorPayload: { keys } };
+  return { scope: fixtureContext.scope, id: resourceId(resource), resource };
+}
+export const fixtureChatId = (key: string) => uuid<"ConversationId">(fixtureRef("conversation", key).id);
+export const fixtureMessageId = (chat: string, message: string) => uuid<"ContentId">(fixtureRef("content", chat, message).id);
+function chatIdentity(key: string) { const ref = fixtureRef("conversation", key); return { id: uuid<"ConversationId">(ref.id), ref, scope: fixtureContext.scope, intents: [] as IntentDescriptor[] }; }
+
 const initialChats: ChatSummary[] = [
   {
-    id: 101,
+    ...chatIdentity("101"),
     title: "Maya Chen",
     kind: "direct",
     archived: false,
@@ -32,7 +44,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: -1001,
+    ...chatIdentity("-1001"),
     title: "Design Team",
     kind: "supergroup",
     archived: false,
@@ -50,7 +62,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: -1002,
+    ...chatIdentity("-1002"),
     title: "Neighborhood Exchange",
     kind: "supergroup",
     archived: false,
@@ -68,7 +80,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: -1003,
+    ...chatIdentity("-1003"),
     title: "Volunteer Archive",
     kind: "supergroup",
     archived: true,
@@ -86,7 +98,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: -1004,
+    ...chatIdentity("-1004"),
     title: "Open Source News",
     kind: "channel",
     archived: false,
@@ -104,7 +116,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: 202,
+    ...chatIdentity("202"),
     title: "Old devices",
     kind: "secret",
     archived: true,
@@ -122,7 +134,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: 303,
+    ...chatIdentity("303"),
     title: "Prize Support",
     kind: "direct",
     archived: false,
@@ -140,7 +152,7 @@ const initialChats: ChatSummary[] = [
     }
   },
   {
-    id: 304,
+    ...chatIdentity("304"),
     title: "Empty invite",
     kind: "direct",
     archived: false,
@@ -162,46 +174,51 @@ const initialChats: ChatSummary[] = [
 type Fixture = Omit<MessageSnapshot, "sentAt">;
 
 const fixtureMessages: Fixture[] = [
-  msg(101, 1, 501, "Maya", false, "text", "The temporary address was 17 Juniper Lane.", "everyone"),
-  msg(101, 2, 42, "You", true, "photo", "Passport scan for the apartment application", "everyone"),
-  msg(101, 3, 501, "Maya", false, "text", "I deleted the shared folder already.", "everyone"),
-  msg(101, 4, 42, "You", true, "voice", "Voice message · 0:18", "everyone"),
-  msg(-1001, 11, 42, "You", true, "text", "Project Cedar launch credentials moved to the vault.", "everyone", true),
-  msg(-1001, 12, 712, "Nora", false, "file", "cedar_research_notes.pdf · 4.8 MB", "everyone", false, 7001),
-  msg(-1001, 13, 713, "Owen", false, "photo", "Whiteboard with customer email list", "everyone", false, 7001),
-  msg(-1001, 14, 42, "You", true, "text", "My old phone number ends in 0441.", "everyone"),
-  msg(-1001, 15, 714, "Priya", false, "poll", "Where should we hold the offsite?", "everyone"),
-  msg(-1002, 21, 818, "Unknown", false, "text", "Limited offer — contact me directly", "everyone"),
-  msg(-1002, 22, 818, "Unknown", false, "photo", "Advertisement image", "everyone"),
-  msg(-1002, 23, 42, "You", true, "location", "Old pickup point", "everyone"),
-  msg(-1002, 24, 819, "Jo", false, "contact", "Contact card · Alex R.", "everyone"),
-  msg(-1003, 31, 42, "You", true, "text", "Here is my personal email for the volunteer roster.", "everyone"),
-  msg(-1003, 32, 920, "Sam", false, "file", "volunteer_roster_2022.xlsx", "none", true),
-  msg(-1003, 33, 921, "Lee", false, "text", "The archive should remain read-only.", "none"),
-  msg(-1004, 41, 1004, "Open Source News", false, "text", "Release notes for version 8.4", "none"),
-  msg(-1004, 42, 1004, "Open Source News", false, "video", "Conference keynote · 24:10", "none"),
-  msg(202, 51, 42, "You", true, "text", "Recovery phrase moved offline; delete this reminder.", "everyone"),
-  msg(202, 52, 1202, "Old devices", false, "text", "This secret chat only exists on this device.", "everyone"),
-  msg(303, 61, 1303, "Prize Support", false, "text", "You won a prize — reply with your account details", "everyone"),
-  msg(101, 5, 42, "You", true, "text", "Backup contact person@example.com · wallet 0x52908400098527886E0F7030069857D2E4169EE7", "everyone")
+  msg("101", "1", "501", "Maya", false, "text", "The temporary address was 17 Juniper Lane.", "everyone"),
+  msg("101", "2", "42", "You", true, "photo", "Passport scan for the apartment application", "everyone"),
+  msg("101", "3", "501", "Maya", false, "text", "I deleted the shared folder already.", "everyone"),
+  msg("101", "4", "42", "You", true, "voice", "Voice message · 0:18", "everyone"),
+  msg("-1001", "11", "42", "You", true, "text", "Project Cedar launch credentials moved to the vault.", "everyone", true),
+  msg("-1001", "12", "712", "Nora", false, "file", "cedar_research_notes.pdf · 4.8 MB", "everyone", false, "7001"),
+  msg("-1001", "13", "713", "Owen", false, "photo", "Whiteboard with customer email list", "everyone", false, "7001"),
+  msg("-1001", "14", "42", "You", true, "text", "My old phone number ends in 0441.", "everyone"),
+  msg("-1001", "15", "714", "Priya", false, "poll", "Where should we hold the offsite?", "everyone"),
+  msg("-1002", "21", "818", "Unknown", false, "text", "Limited offer — contact me directly", "everyone"),
+  msg("-1002", "22", "818", "Unknown", false, "photo", "Advertisement image", "everyone"),
+  msg("-1002", "23", "42", "You", true, "location", "Old pickup point", "everyone"),
+  msg("-1002", "24", "819", "Jo", false, "contact", "Contact card · Alex R.", "everyone"),
+  msg("-1003", "31", "42", "You", true, "text", "Here is my personal email for the volunteer roster.", "everyone"),
+  msg("-1003", "32", "920", "Sam", false, "file", "volunteer_roster_2022.xlsx", "none", true),
+  msg("-1003", "33", "921", "Lee", false, "text", "The archive should remain read-only.", "none"),
+  msg("-1004", "41", "1004", "Open Source News", false, "text", "Release notes for version 8.4", "none"),
+  msg("-1004", "42", "1004", "Open Source News", false, "video", "Conference keynote · 24:10", "none"),
+  msg("202", "51", "42", "You", true, "text", "Recovery phrase moved offline; delete this reminder.", "everyone"),
+  msg("202", "52", "1202", "Old devices", false, "text", "This secret chat only exists on this device.", "everyone"),
+  msg("303", "61", "1303", "Prize Support", false, "text", "You won a prize — reply with your account details", "everyone"),
+  msg("101", "5", "42", "You", true, "text", "Backup contact person@example.com · wallet 0x52908400098527886E0F7030069857D2E4169EE7", "everyone")
 ];
 
 function msg(
-  chatId: number,
-  messageId: number,
-  senderId: number,
+  chatKey: string,
+  messageKey: string,
+  senderKey: string,
   senderName: string,
   isOutgoing: boolean,
   contentKind: Fixture["contentKind"],
   preview: string,
   deletionReach: Fixture["deletionReach"],
   isPinned = false,
-  albumId: number | null = null
+  albumKey: string | null = null
 ): Fixture {
+  const ref = fixtureRef("content", chatKey, messageKey);
+  const actorRef = fixtureRef("actor", senderKey);
   return {
-    chatId,
-    messageId,
-    senderId,
+    scope: fixtureContext.scope,
+    ref,
+    actorRef,
+    chatId: fixtureChatId(chatKey),
+    messageId: uuid<"ContentId">(ref.id),
+    senderId: uuid<"ActorId">(actorRef.id),
     senderName,
     isOutgoing,
     contentKind,
@@ -209,7 +226,7 @@ function msg(
     privacyFindings: [],
     deletionReach,
     isPinned,
-    albumId
+    albumId: albumKey ? fixtureRef("grouping", chatKey, albumKey).id : null
   };
 }
 
@@ -223,14 +240,18 @@ function datedMessages(): MessageSnapshot[] {
 let chats = structuredClone(initialChats);
 let messages = datedMessages();
 let jobs: JobRecord[] = [];
-const plans = new Map<string, PlanView & { refs?: Array<[number, number]>; chatId?: number; senderId?: number }>();
+type DraftPlan = Pick<PlanView, "id" | "operation" | "chatTitle" | "targetSenderName" | "summary" | "confirmationTier" | "fingerprint" | "createdAt"> & { refs?: Array<[ConversationId, ContentId]>; chatId?: ConversationId; senderId?: ActorId };
+const plans = new Map<string, DraftPlan & PlanView>();
 
 const delay = (milliseconds = 80) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 export async function demoSnapshot(): Promise<AppSnapshot> {
   await delay();
   return {
-    runtimeMode: "demo",
+    context: fixtureContext,
+    identity: { state: "ready" },
+    catalog: { phase: "ready", total: chats.length, processed: chats.length },
+    legacyHistory: [],
     accountLabel: "Retract Preview",
     modeReason: "Synthetic data for automated tests and documentation screenshots.",
     chats: structuredClone(chats.map((chat) => ({
@@ -251,7 +272,7 @@ export function demoCatalogProgress(): Promise<CatalogProgress> {
   });
 }
 
-export async function demoRefreshChats(chatIds: number[]): Promise<ChatSummary[]> {
+export async function demoRefreshChats(chatIds: ConversationId[]): Promise<ChatSummary[]> {
   await delay(25);
   const requested = new Set(chatIds);
   return structuredClone(
@@ -273,7 +294,7 @@ export async function demoSearch(request: SearchRequest): Promise<SearchResponse
       ...message,
       privacyFindings: request.privacyScan ? detectSensitiveData(message) : []
     }))
-    .filter((message) => request.chatIds.length === 0 || request.chatIds.includes(message.chatId))
+    .filter((message) => request.conversations.length === 0 || request.conversations.some(ref => ref.id === (message.chatId as string)))
     .filter((message) => request.chatKinds.length === 0 || request.chatKinds.includes(kindsByChat.get(message.chatId)!))
     .filter((message) => request.contentKinds.length === 0 || request.contentKinds.includes(message.contentKind))
     .filter((message) => request.direction === "any" || (request.direction === "mine") === message.isOutgoing)
@@ -293,16 +314,16 @@ export async function demoSearch(request: SearchRequest): Promise<SearchResponse
   };
 }
 
-export async function demoPrepareSelection(refs: Array<{ chatId: number; messageId: number }>): Promise<PlanView> {
+export async function demoPrepareSelection(refs: ScopedResourceRef[]): Promise<PlanView> {
   await delay();
   const selected = refs
-    .map((ref) => messages.find((message) => message.chatId === ref.chatId && message.messageId === ref.messageId))
+    .map((ref) => messages.find((message) => message.ref.id === ref.id))
     .filter((message): message is MessageSnapshot => Boolean(message));
   if (selected.length !== refs.length) throw new Error("One or more selected messages no longer exist.");
   const everyone = selected.filter((message) => message.deletionReach === "everyone").length;
   if (everyone === 0) throw new Error("None of the selected messages can be deleted for everyone.");
-  const plan: PlanView & { refs: Array<[number, number]> } = {
-    id: crypto.randomUUID(),
+  const draft: DraftPlan = {
+    id: uuid(crypto.randomUUID()),
     operation: "selected_messages",
     chatTitle: null,
     summary: {
@@ -312,15 +333,16 @@ export async function demoPrepareSelection(refs: Array<{ chatId: number; message
       cannotDelete: selected.filter((message) => message.deletionReach === "none").length
     },
     confirmationTier: selected.length <= 10 ? "low" : "medium",
-    fingerprint: crypto.randomUUID().replaceAll("-", ""),
+    fingerprint: "sha256-v1:" + "a".repeat(64),
     createdAt: new Date().toISOString(),
-    refs: refs.map((ref) => [ref.chatId, ref.messageId])
+    refs: selected.map(message => [message.chatId, message.messageId])
   };
+  const plan = completeFixturePlan(draft);
   plans.set(plan.id, plan);
   return structuredClone(plan);
 }
 
-export async function demoPrepareOwnMessages(chatId: number): Promise<PlanView> {
+export async function demoPrepareOwnMessages(chatId: ConversationId): Promise<PlanView> {
   await delay();
   const chat = chats.find((candidate) => candidate.id === chatId);
   if (!chat) throw new Error("Chat no longer exists.");
@@ -331,8 +353,8 @@ export async function demoPrepareOwnMessages(chatId: number): Promise<PlanView> 
   if (ownMessages.length === 0) throw new Error("Telegram found no messages sent by your account in this group.");
   const everyone = ownMessages.filter((message) => message.deletionReach === "everyone").length;
   if (everyone === 0) throw new Error("None of your messages can currently be deleted for everyone.");
-  const plan: PlanView & { refs: Array<[number, number]>; chatId: number } = {
-    id: crypto.randomUUID(),
+  const draft: DraftPlan = {
+    id: uuid(crypto.randomUUID()),
     operation: "delete_my_messages",
     chatTitle: chat.title,
     summary: {
@@ -342,16 +364,17 @@ export async function demoPrepareOwnMessages(chatId: number): Promise<PlanView> 
       cannotDelete: ownMessages.filter((message) => message.deletionReach === "none").length
     },
     confirmationTier: "high",
-    fingerprint: crypto.randomUUID().replaceAll("-", ""),
+    fingerprint: "sha256-v1:" + "a".repeat(64),
     createdAt: new Date().toISOString(),
     refs: ownMessages.map((message) => [message.chatId, message.messageId]),
     chatId
   };
+  const plan = completeFixturePlan(draft);
   plans.set(plan.id, plan);
   return structuredClone(plan);
 }
 
-export async function demoPrepareChatAction(chatId: number, operation: PlanOperation): Promise<PlanView> {
+export async function demoPrepareChatAction(chatId: ConversationId, operation: PlanOperation): Promise<PlanView> {
   await delay();
   const chat = chats.find((candidate) => candidate.id === chatId);
   if (!chat) throw new Error("Chat no longer exists.");
@@ -377,8 +400,8 @@ export async function demoPrepareChatAction(chatId: number, operation: PlanOpera
     : leaveOperation === "leave_chat"
       ? messages.filter((message) => message.chatId === chatId && message.isOutgoing)
       : [];
-  const plan: PlanView & { chatId: number; refs?: Array<[number, number]> } = {
-    id: crypto.randomUUID(),
+  const draft: DraftPlan = {
+    id: uuid(crypto.randomUUID()),
     operation: leaveOperation,
     chatTitle: chat.title,
     summary: leaveOperation === "leave_chat" || leaveOperation === "delete_all_messages_and_leave"
@@ -396,42 +419,75 @@ export async function demoPrepareChatAction(chatId: number, operation: PlanOpera
       : leaveOperation === "leave_chat"
         ? cleanupMessages.some((message) => message.deletionReach === "everyone") ? "high" : "medium"
         : operation === "remove_chat_for_self" ? "medium" : "high",
-    fingerprint: crypto.randomUUID().replaceAll("-", ""),
+    fingerprint: "sha256-v1:" + "a".repeat(64),
     createdAt: new Date().toISOString(),
     chatId,
     refs: leaveOperation === "leave_chat" || leaveOperation === "delete_all_messages_and_leave"
       ? cleanupMessages.map((message) => [message.chatId, message.messageId])
       : undefined
   };
+  const plan = completeFixturePlan(draft);
   plans.set(plan.id, plan);
   return structuredClone(plan);
 }
 
-export async function demoPrepareSenderAction(chatId: number, senderId: number): Promise<PlanView> {
+export async function demoPrepareSenderAction(chatId: ConversationId, senderId: ActorId): Promise<PlanView> {
   await delay();
   const chat = chats.find((candidate) => candidate.id === chatId);
   if (!chat) throw new Error("Chat no longer exists.");
   if (!chat.capabilities.canDeleteBySender) throw new Error("Telegram’s current capability flags do not allow deleting by sender.");
   const senderName = messages.find((message) => message.senderId === senderId)?.senderName;
   if (!senderName) throw new Error("Sender no longer exists.");
-  const plan: PlanView & { chatId: number; senderId: number } = {
-    id: crypto.randomUUID(),
+  const draft: DraftPlan = {
+    id: uuid(crypto.randomUUID()),
     operation: "delete_by_sender",
     chatTitle: chat.title,
     targetSenderName: senderName,
     summary: { selected: 0, deleteForEveryone: 0, selfOnly: 0, cannotDelete: 0 },
     confirmationTier: "high",
-    fingerprint: crypto.randomUUID().replaceAll("-", ""),
+    fingerprint: "sha256-v1:" + "a".repeat(64),
     createdAt: new Date().toISOString(),
     chatId,
     senderId
   };
+  const plan = completeFixturePlan(draft);
   plans.set(plan.id, plan);
   return structuredClone(plan);
 }
 
+export function fixtureDescriptor(operation: PlanOperation, tier: PlanView["confirmationTier"] = "low"): ActionDescriptor {
+  const kind = operation === "delete_group" ? "delete_conversation" : operation === "delete_by_sender" ? "delete_by_actor" : operation === "clear_history" ? "clear_conversation" : operation === "remove_chat_for_self" ? "remove_for_current_account" : operation.includes("leave") ? "leave_conversation" : "delete_remote_item";
+  return { id: "screenshot." + operation, kind, effect: kind === "delete_conversation" ? "container_destroyed" : kind === "leave_conversation" ? "membership_removed" : kind === "remove_for_current_account" ? "removed_for_current_account_only" : "removed_for_all_participants", availability: "live_preflight_required", unavailableReason: null, requiresLivePreflight: true, batch: { maxTargets: 100, maxParallel: 1 }, confirmationTier: tier, destructive: true, irreversible: true, advisory: null };
+}
+export async function demoIntents(refs: ScopedResourceRef[]): Promise<IntentDescriptor[]> {
+  const chat = chats.find(chat => refs.some(ref => ref.id === (chat.id as string)));
+  const ops: PlanOperation[] = chat ? [
+    ...(chat.capabilities.canClearForEveryone ? ["clear_history" as const] : []),
+    ...(chat.capabilities.canRemoveForSelf ? ["remove_chat_for_self" as const] : []),
+    ...(chat.capabilities.canLeaveChat ? ["leave_chat" as const] : []),
+    ...(chat.capabilities.canDeleteGroup ? ["delete_group" as const] : []),
+    ...(chat.capabilities.canDeleteBySender ? ["delete_by_sender" as const] : []),
+    ...((chat.kind === "supergroup" || chat.kind === "basic_group") && (chat.capabilities.role !== "member" || chat.capabilities.canLeaveChat) && messages.some(message => message.chatId === chat.id && message.isOutgoing) ? ["delete_my_messages" as const] : [])
+  ] : ["selected_messages"];
+  return ops.map(operation => ({ actionId: operation, label: operation, requiresActor: operation === "delete_by_sender", descriptors: [fixtureDescriptor(operation, operation === "delete_group" ? "critical" : operation === "selected_messages" ? "low" : "high")] }));
+}
+function completeFixturePlan(draft: DraftPlan): DraftPlan & PlanView {
+  const selected = (draft.refs ?? []).flatMap(([chatId, messageId]) => messages.filter(m => m.chatId === chatId && m.messageId === messageId));
+  const conversation = chats.find(chat => chat.id === draft.chatId);
+  const targets = selected.filter(m => m.deletionReach === "everyone").map(m => m.ref);
+  if (conversation && !["delete_my_messages"].includes(draft.operation)) targets.push(conversation.ref);
+  const descriptor = fixtureDescriptor(draft.operation, draft.confirmationTier);
+  const plan: RemediationPlan = {
+    id: draft.id, scope: fixtureContext.scope, targets, steps: [{ descriptor, targets }],
+    confirmation: { tier: draft.confirmationTier, acknowledgementRequired: true, ownerAuthRequired: true, exactText: ["high", "critical"].includes(draft.confirmationTier) ? draft.chatTitle ?? null : null },
+    recipe: { schema: "telegram.compatibility_recipe", version: 1, payload: { operation: draft.operation, conversationConfirmationTitle: draft.chatTitle ?? null, actorConfirmationName: draft.targetSenderName ?? null, items: selected.map(m => ({ reach: m.deletionReach })) } },
+    restartPolicy: "requires_new_review", createdAt: draft.createdAt, fingerprint: draft.fingerprint
+  };
+  return { ...draft, ...decodePlan(plan, fixtureContext.scope), context: fixtureContext };
+}
+
 export async function demoExecute(
-  planId: string,
+  planId: Uuid,
   fingerprint: string,
   acknowledged: boolean,
   typedTitle?: string | null
@@ -442,21 +498,16 @@ export async function demoExecute(
     throw new Error("Type the exact chat title to continue.");
   }
   const now = new Date().toISOString();
+  const dirtyRefs = Array.from(new Set(plan.chatId ? [plan.chatId] : (plan.refs ?? []).filter(([chatId, messageId]) => messages.some(m => m.chatId === chatId && m.messageId === messageId && m.deletionReach === "everyone")).map(([chatId]) => chatId))).flatMap(id => chats.filter(chat => chat.id === id).map(chat => chat.ref));
   const job: JobRecord = {
-    id: crypto.randomUUID(),
+    id: uuid(crypto.randomUUID()),
     planId,
-    operation: plan.operation,
-    targetChatIds: Array.from(new Set(
-      plan.chatId !== undefined
-        ? [plan.chatId]
-        : (plan.refs ?? [])
-            .filter(([chatId, messageId]) => messages.some((message) =>
-              message.chatId === chatId
-              && message.messageId === messageId
-              && message.deletionReach === "everyone"
-            ))
-            .map(([chatId]) => chatId)
-    )).sort((left, right) => left - right),
+    scope: fixtureContext.scope,
+    dirtyRefs,
+    counters: { selected: plan.summary.selected, eligible: plan.summary.deleteForEveryone, deleted: 0, skipped: plan.summary.selfOnly + plan.summary.cannotDelete, failed: 0, uncertain: 0 },
+    retryAt: null,
+    diagnostics: [],
+    startedAuthorized: true,
     status: "running",
     total: plan.summary.deleteForEveryone,
     deleted: 0,
@@ -471,9 +522,9 @@ export async function demoExecute(
   jobs = [job, ...jobs];
   await delay(350);
   if ((plan.operation === "selected_messages" || plan.operation === "delete_my_messages") && plan.refs) {
-    const refs = new Set(plan.refs.map(([chatId, messageId]) => `${chatId}:${messageId}`));
+    const refs = new Set(plan.refs.map(([chatId, messageId]) => JSON.stringify([chatId, messageId])));
     const before = messages.length;
-    messages = messages.filter((message) => message.deletionReach !== "everyone" || !refs.has(`${message.chatId}:${message.messageId}`));
+    messages = messages.filter((message) => message.deletionReach !== "everyone" || !refs.has(JSON.stringify([message.chatId, message.messageId])));
     job.deleted = before - messages.length;
   } else if (plan.operation === "clear_history" && plan.chatId !== undefined) {
     messages = messages.filter((message) => message.chatId !== plan.chatId);
@@ -489,11 +540,11 @@ export async function demoExecute(
     chats = chats.filter((chat) => chat.id !== plan.chatId);
   } else if ((plan.operation === "leave_chat" || plan.operation === "delete_all_messages_and_leave") && plan.chatId !== undefined) {
     if (plan.refs) {
-      const refs = new Set(plan.refs.map(([chatId, messageId]) => `${chatId}:${messageId}`));
+      const refs = new Set(plan.refs.map(([chatId, messageId]) => JSON.stringify([chatId, messageId])));
       const before = messages.length;
       messages = messages.filter((message) =>
         message.deletionReach !== "everyone"
-        || !refs.has(`${message.chatId}:${message.messageId}`)
+        || !refs.has(JSON.stringify([message.chatId, message.messageId]))
       );
       job.deleted = before - messages.length;
     }
@@ -503,13 +554,15 @@ export async function demoExecute(
     messages = messages.filter((message) => message.chatId !== plan.chatId || message.senderId !== plan.senderId);
   }
   job.status = "completed";
+  job.counters.deleted = job.deleted;
+  plans.delete(plan.id);
   job.updatedAt = new Date().toISOString();
   jobs = jobs.map((candidate) => candidate.id === job.id ? structuredClone(job) : candidate);
-  return structuredClone(job);
+  return jobView(decodeJob(structuredClone(job)));
 }
 
 export async function demoJobs(): Promise<JobRecord[]> {
-  return structuredClone(jobs);
+  return structuredClone(jobs).map(job => jobView(decodeJob(job)));
 }
 
 export async function demoReset(): Promise<AppSnapshot> {

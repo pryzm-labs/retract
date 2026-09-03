@@ -1,3 +1,4 @@
+import { sameScope, type Uuid } from "../providers/identity";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -28,7 +29,7 @@ interface ImpactPanelProps {
   onOwnMessagesAction: () => void;
   onSenderAction: (sender: MessageSnapshot) => void;
   onClearSelection: () => void;
-  onCancelJob: (jobId: string) => void;
+  onCancelJob: (jobId: Uuid) => void;
 }
 
 export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatRemovalPending, hiddenSelectionCount, onReview, onChatAction, onOwnMessagesAction, onSenderAction, onClearSelection, onCancelJob }: ImpactPanelProps) {
@@ -38,14 +39,10 @@ export function ImpactPanel({ selected, activeChat, jobs, busy, busyLabel, chatR
   const recentJobs = jobs.slice(0, 3);
   const senderCandidate = activeChat
     && selected.length > 0
-    && selected.every((message) => message.chatId === activeChat.id && message.senderId === selected[0].senderId)
+    && selected.every((message) => sameScope(message.scope, activeChat.scope) && message.chatId === activeChat.id && message.senderId === selected[0].senderId)
       ? selected[0]
       : undefined;
-  const canDeleteOwnHistory = activeChat
-    && (activeChat.kind === "basic_group" || activeChat.kind === "supergroup")
-    && (activeChat.capabilities.role !== "member" || activeChat.capabilities.canLeaveChat)
-    && activeChat.conversationState !== "empty"
-    && activeChat.conversationState !== "never_replied";
+  const canDeleteOwnHistory = activeChat?.intents.some(intent => intent.actionId === "delete_my_messages" && intent.descriptors.some(d => d.availability === "executable" || d.availability === "live_preflight_required"));
 
   return (
     <aside className="impact-panel" aria-label="Selection impact">
@@ -180,13 +177,13 @@ function ImpactRow({ icon, tone, count, label }: { icon: React.ReactNode; tone: 
   return <div className={`impact-row tone-${tone}`}><span className="impact-icon">{icon}</span><span>{label}</span><strong>{count.toLocaleString()}</strong></div>;
 }
 
-function JobRow({ job, busy, onCancel }: { job: JobRecord; busy: boolean; onCancel: (jobId: string) => void }) {
+function JobRow({ job, busy, onCancel }: { job: JobRecord; busy: boolean; onCancel: (jobId: Uuid) => void }) {
   const active = job.status === "queued" || job.status === "running";
   return (
     <div className="job-row" role="group" aria-label={`Cleanup job ${job.id}`}>
       <span className={`job-state job-${job.status}`}>{active ? <History size={14} /> : job.status === "completed" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}</span>
       <span className="job-copy">
-        <strong>{job.operation === "selected_messages" ? plural(job.total, "message") : job.operation === "delete_my_messages" ? `${job.total.toLocaleString()} of my messages` : job.operation === "clear_history_and_leave" ? "Clear all history & leave" : job.operation === "delete_all_messages_and_leave" ? "Delete all possible history & leave" : job.operation === "leave_chat" ? "Revoke my messages & leave" : job.operation === "remove_chat_for_self" ? "Remove chat for me" : job.operation.replaceAll("_", " ")}</strong>
+        <strong>{plural(job.total, "message")}</strong>
         <small>{job.retryAfterSeconds ? `rate limited · retry in ${job.retryAfterSeconds}s` : job.status}{job.deleted > 0 ? ` · ${job.deleted} deleted` : ""}</small>
       </span>
       {active && <button type="button" className="job-cancel" disabled={busy} onClick={() => onCancel(job.id)}>Cancel</button>}
