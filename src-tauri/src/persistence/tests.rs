@@ -21,8 +21,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    FoundationState, FoundationStore, LegacyStoreFormat, ProviderPayloadValidator, RealStoreIo,
-    StoreBinding, StoreIo, VerifiedNativeAccountIdentity, foundation_store::store_aad,
+    FoundationState, FoundationStore, LegacyStoreFormat, ProviderPayloadValidator,
+    ProviderValidationPolicyKey, RealStoreIo, StoreBinding, StoreIo, VerifiedNativeAccountIdentity,
+    foundation_store::store_aad,
 };
 use crate::{
     error::AppError,
@@ -49,6 +50,10 @@ fn binding() -> StoreBinding {
 struct StrictTestPayloadValidator;
 
 impl ProviderPayloadValidator for StrictTestPayloadValidator {
+    fn validation_policy_key(&self) -> ProviderValidationPolicyKey {
+        ProviderValidationPolicyKey::try_from("strict-test-payloads-v1".to_owned()).unwrap()
+    }
+
     fn validate_account(
         &self,
         account: &AccountRecord,
@@ -754,6 +759,76 @@ fn callers_share_one_arc_but_an_independent_writer_gets_profile_in_use() {
     )
     .unwrap_err();
     assert!(matches!(error, AppError::ProfileInUse));
+}
+
+#[test]
+fn live_default_store_rejects_a_validated_opener_and_keeps_rejecting_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let default =
+        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), CURRENT_KEY)
+            .unwrap();
+    let shared_default =
+        FoundationStore::open_with_test_key(directory.path().to_path_buf(), binding(), [0x99; 32])
+            .unwrap();
+    assert!(Arc::ptr_eq(&default, &shared_default));
+
+    let key_reads = Arc::new(AtomicUsize::new(0));
+    let observed_reads = key_reads.clone();
+    let error = FoundationStore::open_with_test_key_loader_and_payload_validator(
+        directory.path().to_path_buf(),
+        binding(),
+        strict_validator(),
+        move |_| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+            Ok(CURRENT_KEY)
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, AppError::ProfileInUse));
+    assert_eq!(key_reads.load(Ordering::Acquire), 0);
+    assert!(
+        default
+            .transaction(|state| {
+                state.identities.push(account());
+                Ok(())
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn live_validated_store_rejects_a_default_opener_and_keeps_accepting_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let validated = open_validated(directory.path());
+    let shared_validated = FoundationStore::open_with_test_key_and_payload_validator(
+        directory.path().to_path_buf(),
+        binding(),
+        [0x99; 32],
+        strict_validator(),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&validated, &shared_validated));
+
+    let key_reads = Arc::new(AtomicUsize::new(0));
+    let observed_reads = key_reads.clone();
+    let error = FoundationStore::open_with_test_key_loader(
+        directory.path().to_path_buf(),
+        binding(),
+        move |_| {
+            observed_reads.fetch_add(1, Ordering::AcqRel);
+            Ok(CURRENT_KEY)
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, AppError::ProfileInUse));
+    assert_eq!(key_reads.load(Ordering::Acquire), 0);
+    validated
+        .transaction(|state| {
+            state.identities.push(account());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(validated.snapshot().unwrap().identities.len(), 1);
 }
 
 #[test]

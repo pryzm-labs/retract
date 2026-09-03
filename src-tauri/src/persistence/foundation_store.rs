@@ -12,8 +12,8 @@ use zeroize::Zeroizing;
 use super::{
     migration::migrate_legacy,
     model::{
-        FoundationState, LegacyStoreFormat, ProviderPayloadValidator, RejectProviderPayloads,
-        StoreBinding,
+        FoundationState, LegacyStoreFormat, ProviderPayloadValidator, ProviderValidationPolicyKey,
+        RejectProviderPayloads, StoreBinding,
     },
 };
 use crate::{
@@ -62,11 +62,18 @@ struct RuntimeState {
     reload_required: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidationPolicy {
+    Rejecting,
+    Adapter(ProviderValidationPolicyKey),
+}
+
 pub struct FoundationStore {
     key: Zeroizing<[u8; KEY_LENGTH]>,
     profile_dir: PathBuf,
     active_path: PathBuf,
     binding: StoreBinding,
+    validation_policy: ValidationPolicy,
     payload_validator: Arc<dyn ProviderPayloadValidator>,
     state: Mutex<RuntimeState>,
     io: Arc<dyn StoreIo>,
@@ -79,6 +86,7 @@ impl std::fmt::Debug for FoundationStore {
             .debug_struct("FoundationStore")
             .field("profile_dir", &self.profile_dir)
             .field("binding", &self.binding)
+            .field("validation_policy", &self.validation_policy)
             .finish_non_exhaustive()
     }
 }
@@ -90,6 +98,7 @@ impl FoundationStore {
         Self::open_registered(
             profile,
             binding,
+            ValidationPolicy::Rejecting,
             Arc::new(RejectProviderPayloads),
             load_job_store_key,
         )
@@ -103,7 +112,15 @@ impl FoundationStore {
         binding: StoreBinding,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_registered(profile, binding, payload_validator, load_job_store_key)
+        let validation_policy =
+            ValidationPolicy::Adapter(payload_validator.validation_policy_key());
+        Self::open_registered(
+            profile,
+            binding,
+            validation_policy,
+            payload_validator,
+            load_job_store_key,
+        )
     }
 
     #[cfg(test)]
@@ -115,8 +132,24 @@ impl FoundationStore {
         Self::open_registered(
             profile,
             binding,
+            ValidationPolicy::Rejecting,
             Arc::new(RejectProviderPayloads),
             move |_| Ok(key),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_test_key_loader(
+        profile: PathBuf,
+        binding: StoreBinding,
+        load_key: impl FnOnce(&Path) -> Result<[u8; KEY_LENGTH], AppError>,
+    ) -> Result<Arc<Self>, AppError> {
+        Self::open_registered(
+            profile,
+            binding,
+            ValidationPolicy::Rejecting,
+            Arc::new(RejectProviderPayloads),
+            load_key,
         )
     }
 
@@ -127,7 +160,33 @@ impl FoundationStore {
         key: [u8; KEY_LENGTH],
         payload_validator: Arc<dyn ProviderPayloadValidator>,
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_registered(profile, binding, payload_validator, move |_| Ok(key))
+        let validation_policy =
+            ValidationPolicy::Adapter(payload_validator.validation_policy_key());
+        Self::open_registered(
+            profile,
+            binding,
+            validation_policy,
+            payload_validator,
+            move |_| Ok(key),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_test_key_loader_and_payload_validator(
+        profile: PathBuf,
+        binding: StoreBinding,
+        payload_validator: Arc<dyn ProviderPayloadValidator>,
+        load_key: impl FnOnce(&Path) -> Result<[u8; KEY_LENGTH], AppError>,
+    ) -> Result<Arc<Self>, AppError> {
+        let validation_policy =
+            ValidationPolicy::Adapter(payload_validator.validation_policy_key());
+        Self::open_registered(
+            profile,
+            binding,
+            validation_policy,
+            payload_validator,
+            load_key,
+        )
     }
 
     #[cfg(test)]
@@ -141,6 +200,7 @@ impl FoundationStore {
             binding,
             key,
             Arc::new(RealStoreIo),
+            ValidationPolicy::Rejecting,
             Arc::new(RejectProviderPayloads),
         )
     }
@@ -160,6 +220,7 @@ impl FoundationStore {
             binding,
             key,
             Arc::new(RealStoreIo),
+            ValidationPolicy::Rejecting,
             Arc::new(RejectProviderPayloads),
             profile_lock,
         )
@@ -172,7 +233,14 @@ impl FoundationStore {
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_independent(profile, binding, key, io, Arc::new(RejectProviderPayloads))
+        Self::open_independent(
+            profile,
+            binding,
+            key,
+            io,
+            ValidationPolicy::Rejecting,
+            Arc::new(RejectProviderPayloads),
+        )
     }
 
     #[cfg(test)]
@@ -183,12 +251,22 @@ impl FoundationStore {
         io: Arc<dyn StoreIo>,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
     ) -> Result<Arc<Self>, AppError> {
-        Self::open_independent(profile, binding, key, io, payload_validator)
+        let validation_policy =
+            ValidationPolicy::Adapter(payload_validator.validation_policy_key());
+        Self::open_independent(
+            profile,
+            binding,
+            key,
+            io,
+            validation_policy,
+            payload_validator,
+        )
     }
 
     fn open_registered(
         profile: PathBuf,
         binding: StoreBinding,
+        validation_policy: ValidationPolicy,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
         load_key: impl FnOnce(&Path) -> Result<[u8; KEY_LENGTH], AppError>,
     ) -> Result<Arc<Self>, AppError> {
@@ -197,7 +275,7 @@ impl FoundationStore {
         let registry = OPEN_STORES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut registry = registry.lock().map_err(|_| AppError::StateUnavailable)?;
         if let Some(existing) = registry.get(&profile).and_then(Weak::upgrade) {
-            if existing.binding != binding {
+            if existing.binding != binding || existing.validation_policy != validation_policy {
                 return Err(AppError::ProfileInUse);
             }
             return Ok(existing);
@@ -210,6 +288,7 @@ impl FoundationStore {
             binding,
             key,
             Arc::new(RealStoreIo),
+            validation_policy,
             payload_validator,
             profile_lock,
         )?;
@@ -223,12 +302,21 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
+        validation_policy: ValidationPolicy,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
     ) -> Result<Arc<Self>, AppError> {
         binding.validate()?;
         let profile = prepare_profile(&profile)?;
         let profile_lock = acquire_profile_lock(&profile)?;
-        Self::build(profile, binding, key, io, payload_validator, profile_lock)
+        Self::build(
+            profile,
+            binding,
+            key,
+            io,
+            validation_policy,
+            payload_validator,
+            profile_lock,
+        )
     }
 
     fn build(
@@ -236,6 +324,7 @@ impl FoundationStore {
         binding: StoreBinding,
         key: [u8; KEY_LENGTH],
         io: Arc<dyn StoreIo>,
+        validation_policy: ValidationPolicy,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
         profile_lock: File,
     ) -> Result<Arc<Self>, AppError> {
@@ -253,6 +342,7 @@ impl FoundationStore {
             profile_dir,
             active_path,
             binding,
+            validation_policy,
             payload_validator,
             state: Mutex::new(RuntimeState {
                 committed,

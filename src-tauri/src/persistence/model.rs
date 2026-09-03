@@ -11,6 +11,20 @@ use crate::error::AppError;
 pub const FOUNDATION_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderValidationPolicyKey(String);
+
+impl TryFrom<String> for ProviderValidationPolicyKey {
+    type Error = AppError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(invalid_state("invalid provider validation policy key"));
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VerifiedNativeAccountIdentity(String);
 
 impl TryFrom<String> for VerifiedNativeAccountIdentity {
@@ -28,6 +42,12 @@ impl TryFrom<String> for VerifiedNativeAccountIdentity {
 /// Implementations must parse typed payloads, reject unknown schema versions,
 /// and prove canonical locator and recipe/target agreement.
 pub trait ProviderPayloadValidator: Send + Sync {
+    /// Stable backend-owned identity for these exact validation semantics.
+    /// Equivalent validator instances must return the same key; any semantic
+    /// policy change must use a different key. A shared store retains the
+    /// first validator instance registered under a compatible key.
+    fn validation_policy_key(&self) -> ProviderValidationPolicyKey;
+
     fn validate_account(
         &self,
         account: &AccountRecord,
@@ -48,6 +68,10 @@ pub trait ProviderPayloadValidator: Send + Sync {
 pub(crate) struct RejectProviderPayloads;
 
 impl ProviderPayloadValidator for RejectProviderPayloads {
+    fn validation_policy_key(&self) -> ProviderValidationPolicyKey {
+        ProviderValidationPolicyKey("reject-provider-payloads".into())
+    }
+
     fn validate_account(
         &self,
         _account: &AccountRecord,
