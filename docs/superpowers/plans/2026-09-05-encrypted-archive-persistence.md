@@ -51,7 +51,7 @@ Regenerate a changed Cargo lockfile inside the dependency/toolchain container, n
 ### Task 1: Establish the pinned SQLCipher native gate
 
 **Files:**
-- Modify: `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/src/persistence/mod.rs`, `.github/workflows/secure-build.yml`, `.github/workflows/release.yml`, `src-tauri/tauri.conf.json`, `scripts/verify-app-contents.sh`, `scripts/release-metadata.node-test.mjs`, `THIRD_PARTY_NOTICES.md`.
+- Modify: `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/src/persistence/mod.rs`, `.github/workflows/secure-build.yml`, `.github/workflows/release.yml`, `src-tauri/tauri.conf.json`, `scripts/package-unsigned-macos.sh`, `scripts/verify-app-contents.sh`, `scripts/release-metadata.node-test.mjs`, `THIRD_PARTY_NOTICES.md`.
 - Create: `src-tauri/src/persistence/archive/{mod,error,codec,codec_tests}.rs`, `docs/ARCHIVE_STORAGE.md`, `vendor/sqlcipher/LICENSE.txt`, `vendor/sqlcipher/provenance.json` and corresponding OpenSSL notice if required by the selected vendored source.
 
 **Interfaces:**
@@ -74,9 +74,9 @@ fn keyed_connection_reopens_encrypted_fts_and_rejects_wrong_key() {
     drop(db);
     assert!(open_keyed(&path, &ArchiveKey::new([0x43; 32]), false).is_err());
     let db = open_keyed(&path, &key, false).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM gate_text WHERE gate_text MATCH 'syntheticcanary'", [], |r| r.get::<_, u64>(0)).unwrap(), 1);
+    assert_eq!(db.query_row("SELECT count(*) FROM gate_text WHERE gate_text MATCH 'syntheticcanary'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     db.execute("DELETE FROM gate_text", []).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM gate_text WHERE gate_text MATCH 'syntheticcanary'", [], |r| r.get::<_, u64>(0)).unwrap(), 0);
+    assert_eq!(db.query_row("SELECT count(*) FROM gate_text WHERE gate_text MATCH 'syntheticcanary'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }
 ```
 
