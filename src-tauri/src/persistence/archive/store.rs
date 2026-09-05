@@ -20,19 +20,24 @@ use super::{ArchiveError, ArchiveKey, codec::open_keyed, model, preflight, schem
 #[path = "test_support.rs"]
 pub(in crate::persistence) mod test_support;
 
+#[cfg(test)]
+type MaintenanceHook = dyn Fn(&Connection) -> Result<(), ArchiveError> + Send + Sync;
+
 pub(crate) struct ArchiveStore {
     // Declaration order closes the connection before releasing the file lock.
-    connection: Mutex<Connection>,
+    pub(super) connection: Mutex<Connection>,
     pub(super) key: ArchiveKey,
     pub(super) path: PathBuf,
     pub(super) validators: BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>>,
     pub(super) import_limits: model::ImportLimits,
     #[cfg(test)]
     pub(super) before_commit: Option<Box<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    pub(super) before_maintenance: Option<Box<MaintenanceHook>>,
     _process_lock: ProcessLock,
 }
 
-struct ProcessLock(File);
+pub(super) struct ProcessLock(File);
 
 impl Drop for ProcessLock {
     fn drop(&mut self) {
@@ -60,6 +65,7 @@ impl ArchiveStore {
         validate_parent(&path)?;
         validate_artifacts(&path)?;
         let process_lock = acquire_lock(&sidecar(&path, ".lock"))?;
+        super::migration::validate_active_presence(&path)?;
         preflight::validate_artifact_set(&path)?;
         let key = load()?;
         let is_new = match private_options().create_new(true).open(&path) {
@@ -107,6 +113,8 @@ impl ArchiveStore {
             import_limits: model::ImportLimits::default(),
             #[cfg(test)]
             before_commit: None,
+            #[cfg(test)]
+            before_maintenance: None,
             _process_lock: process_lock,
         })
     }
@@ -122,6 +130,8 @@ impl ArchiveStore {
             .ok_or(ArchiveError::InvalidRecord)?;
         let native = model::validate_archive_account(&account, validator.as_ref())?;
         self.transaction(|tx| {
+            let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM cleanup_tasks WHERE source_id=?)", [source.id.as_uuid().to_string()], |row| row.get(0)).map_err(|_| ArchiveError::StorageFailure)?;
+            if retired { return Err(ArchiveError::InvalidRecord); }
             let previous: Option<(String, String, String)> = tx.query_row(
                 "SELECT provider, canonical_identity, record_json FROM accounts WHERE account_id = ?",
                 [account.id.as_uuid().to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -286,13 +296,13 @@ pub(super) fn validate_parent(path: &Path) -> Result<(), ArchiveError> {
     Ok(())
 }
 
-fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+pub(super) fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
 }
 
-fn validate_artifacts(path: &Path) -> Result<(), ArchiveError> {
+pub(super) fn validate_artifacts(path: &Path) -> Result<(), ArchiveError> {
     for suffix in ["", ".lock", "-wal", "-shm", "-journal"] {
         validate_file(&sidecar(path, suffix))?;
     }
@@ -326,7 +336,7 @@ pub(super) fn private_options() -> OpenOptions {
     options
 }
 
-fn acquire_lock(path: &Path) -> Result<ProcessLock, ArchiveError> {
+pub(super) fn acquire_lock(path: &Path) -> Result<ProcessLock, ArchiveError> {
     validate_file(path)?;
     let file = private_options()
         .create(true)

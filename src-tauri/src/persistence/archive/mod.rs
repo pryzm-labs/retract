@@ -2,9 +2,11 @@ mod codec;
 mod error;
 mod ingest;
 mod ingest_state;
+mod migration;
 mod model;
 mod preflight;
 mod query;
+mod remove;
 mod schema;
 mod store;
 
@@ -14,7 +16,7 @@ pub(crate) use error::ArchiveError;
 #[allow(unused_imports)]
 pub(crate) use model::{
     ArchiveSearch, ImportBatch, ImportCancellation, ImportCheckpoint, ImportPhase, ImportProgress,
-    ImportSession,
+    ImportSession, RemovalOutcome,
 };
 #[allow(unused_imports)]
 pub(crate) use store::ArchiveStore;
@@ -26,7 +28,11 @@ mod ingest_state_tests;
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
+mod migration_tests;
+#[cfg(test)]
 mod query_tests;
+#[cfg(test)]
+mod remove_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]

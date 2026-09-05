@@ -221,7 +221,23 @@ fn self_consistent_older_development_schema_is_rejected_without_mutation() {
     let fixture = Fixture::new();
     drop(fixture.open());
     let db = open_keyed(&fixture.path, &key(), false).unwrap();
-    db.execute_batch("DROP INDEX content_scope_author_order; DROP INDEX content_scope_kind_order;")
+    db.execute_batch("DROP INDEX conversation_identity_reference; DROP INDEX actor_identity_reference; DROP INDEX content_identity_reference;
+DROP TRIGGER source_retired_insert; DROP TRIGGER cleanup_scope_insert; DROP TRIGGER cleanup_scope_update; DROP TABLE cleanup_tasks;
+CREATE TABLE cleanup_tasks (
+    task_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL,
+    state TEXT NOT NULL
+) STRICT;
+CREATE TRIGGER cleanup_scope_insert BEFORE INSERT ON cleanup_tasks BEGIN
+    SELECT RAISE(ABORT, 'archive cleanup scope') WHERE NOT EXISTS (
+        SELECT 1 FROM sources s WHERE s.provider = new.provider
+        AND s.account_id = new.account_id AND s.source_id = new.source_id
+    );
+END;
+CREATE TRIGGER cleanup_scope_update BEFORE UPDATE ON cleanup_tasks
+WHEN old.provider != new.provider OR old.account_id != new.account_id OR old.source_id != new.source_id BEGIN
+    SELECT RAISE(ABORT, 'archive cleanup scope');
+END;")
         .unwrap();
     let mut digest = Sha256::new();
     {
@@ -240,6 +256,10 @@ fn self_consistent_older_development_schema_is_rejected_without_mutation() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    assert_eq!(
+        hash,
+        "4f9beb21d45b587327d82902bbd9a1783c1677bce8093ed5d0700c16706023aa"
+    );
     db.execute("UPDATE schema_migrations SET schema_hash=?", [hash])
         .unwrap();
     drop(db);
@@ -640,7 +660,8 @@ fn cleanup_tombstones_bind_original_scope_and_survive_source_deletion() {
         tx.execute("INSERT INTO cleanup_tasks(task_id, provider, account_id, source_id, state) VALUES('44444444-4444-4444-8444-444444444444', 'synthetic', '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'pending')", []).map_err(sql)?;
         tx.execute("DELETE FROM sources", []).map_err(sql)?;
         assert_eq!(tx.query_row("SELECT count(*) FROM cleanup_tasks", [], |row| row.get::<_, i64>(0)).map_err(sql)?, 1);
-        tx.execute("UPDATE cleanup_tasks SET state = 'compacting'", []).map_err(sql)?;
+        assert!(tx.execute("UPDATE cleanup_tasks SET state = 'compacting'", []).is_err());
+        tx.execute("UPDATE cleanup_tasks SET state = 'completed'", []).map_err(sql)?;
         for field in ["provider", "account_id", "source_id"] {
             assert!(tx.execute(&format!("UPDATE cleanup_tasks SET {field} = 'foreign'"), []).is_err());
         }

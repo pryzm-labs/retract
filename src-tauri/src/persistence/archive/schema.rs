@@ -9,7 +9,7 @@ const VERSION: i64 = 1;
 const APPLICATION: &str = "retract.archive-index";
 // Intentional DDL edits require an explicit reviewed fingerprint update.
 const EXPECTED_SCHEMA_HASH: &str =
-    "4f9beb21d45b587327d82902bbd9a1783c1677bce8093ed5d0700c16706023aa";
+    "65ffc843284679b08831ff2a54d8693cdeda9afc683af8f818b332fd4794560a";
 
 const TABLES: &str = "
 CREATE TABLE schema_migrations (
@@ -75,6 +75,9 @@ CREATE TABLE content_observations (
     FOREIGN KEY(provider, account_id, resource_id, resource_kind) REFERENCES resource_identities(provider, account_id, resource_id, kind)
 ) STRICT;
 CREATE INDEX content_scope_order ON content_observations(provider, account_id, source_id, timestamp_seconds, timestamp_nanos, resource_id);
+CREATE INDEX conversation_identity_reference ON conversation_observations(provider, account_id, resource_id, resource_kind);
+CREATE INDEX actor_identity_reference ON actor_observations(provider, account_id, resource_id, resource_kind);
+CREATE INDEX content_identity_reference ON content_observations(provider, account_id, resource_id, resource_kind);
 CREATE INDEX content_scope_author_order ON content_observations(provider, account_id, source_id, author_id, timestamp_seconds, timestamp_nanos, resource_id);
 CREATE INDEX content_scope_kind_order ON content_observations(provider, account_id, source_id, json_extract(record_json, '$.kind'), timestamp_seconds, timestamp_nanos, resource_id);
 CREATE INDEX content_conversation_reference ON content_observations(conversation_id);
@@ -124,8 +127,9 @@ CREATE TABLE import_warnings (
 ) STRICT;
 CREATE TABLE cleanup_tasks (
     task_id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL,
-    state TEXT NOT NULL
+    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE,
+    removed_items INTEGER NOT NULL DEFAULT 0 CHECK(removed_items >= 0),
+    state TEXT NOT NULL CHECK(state IN ('pending', 'completed'))
 ) STRICT;
 -- Cleanup provenance must be established while the source exists, then survive
 -- its logical deletion so later compaction can update the same tombstone.
@@ -136,8 +140,15 @@ CREATE TRIGGER cleanup_scope_insert BEFORE INSERT ON cleanup_tasks BEGIN
     );
 END;
 CREATE TRIGGER cleanup_scope_update BEFORE UPDATE ON cleanup_tasks
-WHEN old.provider != new.provider OR old.account_id != new.account_id OR old.source_id != new.source_id BEGIN
+WHEN old.provider != new.provider OR old.account_id != new.account_id OR old.source_id != new.source_id
+    OR old.task_id != new.task_id OR old.removed_items != new.removed_items
+    OR (old.state = 'completed' AND new.state != 'completed') BEGIN
     SELECT RAISE(ABORT, 'archive cleanup scope');
+END;
+CREATE TRIGGER source_retired_insert BEFORE INSERT ON sources BEGIN
+    SELECT RAISE(ABORT, 'archive source retired') WHERE EXISTS (
+        SELECT 1 FROM cleanup_tasks c WHERE c.source_id = new.source_id
+    );
 END;
 CREATE VIRTUAL TABLE content_fts USING fts5(searchable_text, attachment_names, content='content_observations', content_rowid='observation_key');
 CREATE TRIGGER content_fts_insert AFTER INSERT ON content_observations BEGIN

@@ -16,6 +16,12 @@ use crate::persistence::{ProviderPayloadValidator, VerifiedNativeAccountIdentity
 
 use super::ArchiveError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RemovalOutcome {
+    pub removed_items: u64,
+    pub maintenance_pending: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct ArchiveSearch {
     pub scope: Scope,
