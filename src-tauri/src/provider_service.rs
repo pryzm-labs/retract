@@ -75,6 +75,9 @@ impl ProviderService {
             .map_err(|_| safe(ErrorCode::ScopeMismatch))
     }
     pub fn check_optional(&self, expected: Option<&ActiveContext>) -> Result<(), SafeError> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(safe(ErrorCode::IdentityUnavailable));
+        }
         match (expected, self.context()) {
             (Some(expected), _) => self.check(expected),
             (None, None) => Ok(()),

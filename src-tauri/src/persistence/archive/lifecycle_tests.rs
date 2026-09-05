@@ -92,6 +92,58 @@ fn lifecycle_is_lazy_reuses_settings_lease_and_drains_before_terminal_clear() {
 }
 
 #[test]
+fn lifecycle_queued_settings_cannot_recreate_during_archive_drain_or_after_closure() {
+    use crate::{RuntimeState, provider_service::ProviderService};
+    use std::{cell::Cell, task::Poll};
+    let fixture = Fixture::new();
+    let path = fixture.path.clone();
+    runtime().block_on(async move {
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        let blocking = gate.clone();
+        let application = RuntimeState {
+            service: tokio::sync::RwLock::new(ProviderService::setup()),
+            archives: ArchiveOwner::with_opener(move || {
+                let mut store = ArchiveStore::open(path.clone(), key(), validators())?;
+                let hook = blocking.clone();
+                store.before_commit = Some(Box::new(move || hook.wait()));
+                Ok(store)
+            }),
+        };
+        let archive = application.archives.open().await.unwrap();
+        archive.register_source(&account(), &source()).await.unwrap();
+        let session = archive.begin_import(&source().scope()).await.unwrap();
+        gate.armed.store(true, Ordering::Release);
+        let active = archive.append_batch(&session, 0, &batch("1", "draining")).unwrap();
+        gate.entered().await;
+        let cleared = Cell::new(false);
+        let saves = Cell::new(0);
+        let creates = Cell::new(0);
+        let request = || serde_json::json!({"contractVersion":2,"context":null,"payload":{"tdlibPath":"synthetic-library","apiId":1,"apiHash":null,"useTestDc":true}});
+        let mut shutdown = Box::pin(application.shutdown(|| cleared.set(true)));
+        assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
+        let mut settings = Box::pin(application.save_settings(request(), |_| { saves.set(saves.get() + 1); Ok(()) }, || { creates.set(creates.get() + 1); Ok(ProviderService::setup()) }));
+        let queued = futures_util::poll!(settings.as_mut());
+        let calls_during_drain = (saves.get(), creates.get());
+        assert!(!cleared.get());
+        gate.release();
+        shutdown.await;
+        active.await.unwrap().unwrap();
+        let was_queued = queued.is_pending();
+        let result = match queued { Poll::Ready(result) => result, Poll::Pending => settings.await };
+        let late = application.save_settings(request(), |_| { saves.set(saves.get() + 1); Ok(()) }, || { creates.set(creates.get() + 1); Ok(ProviderService::setup()) }).await;
+        assert_eq!(calls_during_drain, (0, 0), "queued settings performed I/O during archive shutdown");
+        assert!(was_queued, "settings must wait through archive drain and credential clearing");
+        assert_eq!(result.unwrap_err().code, retract_domain::ErrorCode::IdentityUnavailable);
+        assert_eq!(late.unwrap_err().code, retract_domain::ErrorCode::IdentityUnavailable);
+        assert_eq!((saves.get(), creates.get()), (0, 0));
+        assert!(cleared.get());
+        assert_eq!(application.archives.open().await.err(), Some(ArchiveError::Cancelled));
+        drop(fixture.open());
+    });
+}
+
+#[test]
 fn lifecycle_cancelled_open_and_shutdown_waiters_retain_tracked_work() {
     let fixture = Fixture::new();
     let path = fixture.path.clone();

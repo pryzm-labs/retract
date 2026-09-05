@@ -35,6 +35,17 @@ pub(crate) struct RuntimeState {
     pub(crate) archives: persistence::archive::ArchiveOwner,
 }
 impl RuntimeState {
+    /// Application exit owns the credential-clear callback; tests inject it.
+    pub(crate) async fn shutdown(&self, clear_cached_secrets: impl FnOnce()) {
+        let current = self.service.write().await;
+        current.shutdown().await;
+        self.archives.shutdown().await;
+        clear_cached_secrets();
+        // Queued settings can acquire coordination only after all stores are
+        // drained and credentials cleared; the stopped service then rejects it.
+        drop(current);
+    }
+
     #[cfg(test)]
     pub(crate) fn new(service: Arc<ProviderService>) -> Self {
         Self {
@@ -122,9 +133,7 @@ pub fn run() {
             let app = app.clone();
             let runtime = app.state::<Arc<RuntimeState>>().inner().clone();
             tauri::async_runtime::spawn(async move {
-                runtime.service.write().await.shutdown().await;
-                runtime.archives.shutdown().await;
-                secure_store::clear_cached_secrets();
+                runtime.shutdown(secure_store::clear_cached_secrets).await;
                 app.exit(code.unwrap_or(0));
             });
         }

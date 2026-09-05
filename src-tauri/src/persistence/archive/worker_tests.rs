@@ -91,6 +91,55 @@ fn worker_open_runs_off_runtime_and_retains_repository_lock() {
 }
 
 #[test]
+fn worker_shutdown_wakes_with_reserved_unsent_slots_after_waiter_cancellation() {
+    let fixture = Fixture::new();
+    let path = fixture.path.clone();
+    runtime().block_on(async {
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        let blocking = gate.clone();
+        let service = ArchiveService::open(move || {
+            let mut store = ArchiveStore::open(path, key(), validators())?;
+            store.before_commit = Some(Box::new(move || blocking.wait()));
+            Ok(store)
+        })
+        .await
+        .unwrap();
+        service
+            .register_source(&account(), &source())
+            .await
+            .unwrap();
+        let session = service.begin_import(&source().scope()).await.unwrap();
+        gate.armed.store(true, Ordering::Release);
+        let active = service
+            .append_batch(&session, 0, &batch("1", "in flight"))
+            .unwrap();
+        gate.entered().await;
+        let first = super::worker::reserve_command_slot(&service);
+        let second = super::worker::reserve_command_slot(&service);
+        let mut shutdown = Box::pin(service.shutdown());
+        assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
+        drop(shutdown);
+        drop(first);
+        drop(second);
+        gate.release();
+        let drained = tokio::time::timeout(Duration::from_millis(500), service.shutdown()).await;
+        // Drop can wake the original buggy worker after permits are free; do
+        // this before asserting so the RED regression cannot hang teardown.
+        if drained.is_err() {
+            drop(service);
+            panic!("shutdown lost its wakeup while both empty queue slots were reserved");
+        }
+        active.await.unwrap().unwrap();
+        drop(fixture.open());
+        assert_eq!(
+            service.source(&source().scope()).await.err(),
+            Some(ArchiveError::Cancelled)
+        );
+    });
+}
+
+#[test]
 fn worker_full_queue_backpressures_and_cancellation_preempts_queued_mutations() {
     let fixture = Fixture::new();
     let path = fixture.path.clone();

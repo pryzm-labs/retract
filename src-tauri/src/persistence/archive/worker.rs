@@ -17,6 +17,12 @@ use std::sync::{
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 type Reply<T> = oneshot::Sender<Result<T, ArchiveError>>;
+
+#[cfg(test)]
+pub(super) fn reserve_command_slot(service: &ArchiveService) -> impl Drop + '_ {
+    service.sender.try_reserve().unwrap()
+}
+
 enum Command {
     Register(Box<(AccountRecord, SourceRecord)>, Reply<SourceRecord>),
     Source(Scope, Reply<SourceRecord>),
@@ -36,12 +42,12 @@ enum Command {
     Resolve(ResolveRequest, Reply<Vec<ContentRecord>>),
     Remove(Scope, Reply<RemovalOutcome>),
     Cleanup(Scope, Reply<RemovalOutcome>),
-    Stop,
 }
 
 pub(crate) struct ArchiveService {
     sender: mpsc::Sender<Command>,
     stopped: Arc<AtomicBool>,
+    shutdown_signal: watch::Sender<bool>,
     ready: watch::Receiver<Option<Result<(), ArchiveError>>>,
     // Await through &mut: dropping a shutdown waiter retains the join handle.
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -64,6 +70,7 @@ impl ArchiveService {
     ) -> Arc<Self> {
         let (sender, mut receiver) = mpsc::channel(model::MAX_QUEUED_BATCHES);
         let (ready_sender, ready) = watch::channel(None);
+        let (shutdown_signal, mut shutdown_receiver) = watch::channel(false);
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
         let worker = tokio::task::spawn_blocking(move || {
@@ -75,7 +82,21 @@ impl ArchiveService {
                 }
             };
             let _ = ready_sender.send(Some(Ok(())));
-            while let Some(command) = receiver.blocking_recv() {
+            let runtime = tokio::runtime::Handle::current();
+            while let Some(command) = runtime.block_on(async {
+                if *shutdown_receiver.borrow() {
+                    return None;
+                }
+                // Reservations can exhaust command capacity without waking a
+                // receiver. The independent signal must also wake this wait.
+                let command = receiver.recv();
+                let shutdown = shutdown_receiver.changed();
+                futures_util::pin_mut!(command, shutdown);
+                match futures_util::future::select(command, shutdown).await {
+                    futures_util::future::Either::Left((command, _)) => command,
+                    futures_util::future::Either::Right(_) => None,
+                }
+            }) {
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
@@ -120,7 +141,6 @@ impl ArchiveService {
                     Command::Cleanup(scope, reply) => {
                         let _ = reply.send(store.retry_cleanup(&scope));
                     }
-                    Command::Stop => break,
                 }
             }
             // Cancels response channels for all unstarted commands before exit.
@@ -131,6 +151,7 @@ impl ArchiveService {
         Arc::new(Self {
             sender,
             stopped,
+            shutdown_signal,
             ready,
             worker: Mutex::new(Some(worker)),
         })
@@ -300,11 +321,8 @@ impl ArchiveService {
     }
 
     pub(crate) async fn shutdown(&self) {
-        if !self.stopped.swap(true, Ordering::AcqRel) {
-            // Wake an idle worker. A full queue already provides its wakeup;
-            // the stop flag prevents every unstarted command from executing.
-            let _ = self.sender.try_send(Command::Stop);
-        }
+        self.stopped.store(true, Ordering::Release);
+        self.shutdown_signal.send_replace(true);
         let mut completion = self.worker.lock().await;
         if let Some(running) = completion.as_mut() {
             // Keep ownership in the service while awaiting completion, so a
@@ -318,7 +336,7 @@ impl ArchiveService {
 impl Drop for ArchiveService {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
-        let _ = self.sender.try_send(Command::Stop);
+        self.shutdown_signal.send_replace(true);
     }
 }
 
