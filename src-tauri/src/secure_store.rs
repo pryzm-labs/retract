@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "macos")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
     aead::{Aead, Generate, Payload},
 };
 use zeroize::Zeroizing;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{error::AppError, model::PersistedState};
@@ -30,33 +30,14 @@ pub(crate) enum LegacyCipherFormat {
 }
 
 #[cfg(any(target_os = "macos", test))]
-const VAULT_MAGIC: &[u8; 7] = b"RTRCTV1";
-#[cfg(any(target_os = "macos", test))]
-const VAULT_API_HASH: u8 = 1 << 0;
-#[cfg(any(target_os = "macos", test))]
-const VAULT_TDLIB_DATABASE_KEY: u8 = 1 << 1;
-#[cfg(any(target_os = "macos", test))]
-const VAULT_JOB_STORE_KEY: u8 = 1 << 2;
-#[cfg(any(target_os = "macos", test))]
-const VAULT_KNOWN_FLAGS: u8 = VAULT_API_HASH | VAULT_TDLIB_DATABASE_KEY | VAULT_JOB_STORE_KEY;
-
-#[cfg(any(target_os = "macos", test))]
-#[derive(Default, Zeroize, ZeroizeOnDrop)]
-struct SecretVault {
-    telegram_api_hash: Option<String>,
-    tdlib_database_key: Option<[u8; KEY_LENGTH]>,
-    job_store_key: Option<[u8; KEY_LENGTH]>,
-}
+mod vault;
+#[cfg(test)]
+use vault::{SecretVault, VAULT_MAGIC, decode_secret_vault, encode_secret_vault};
+#[cfg(target_os = "macos")]
+use vault::{VAULT_ACCOUNT, VaultCache, VaultIo};
 
 #[cfg(target_os = "macos")]
-enum MacVaultState {
-    Unloaded,
-    Ready(SecretVault),
-    Failed(String),
-}
-
-#[cfg(target_os = "macos")]
-static MAC_VAULT: OnceLock<Mutex<MacVaultState>> = OnceLock::new();
+static MAC_VAULT: OnceLock<VaultCache> = OnceLock::new();
 
 #[cfg(test)]
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -240,10 +221,8 @@ pub(crate) fn decrypt_authenticated(
 
 #[cfg(target_os = "macos")]
 pub fn clear_cached_secrets() {
-    if let Some(state) = MAC_VAULT.get()
-        && let Ok(mut state) = state.lock()
-    {
-        *state = MacVaultState::Unloaded;
+    if let Some(cache) = MAC_VAULT.get() {
+        cache.clear();
     }
 }
 
@@ -254,29 +233,27 @@ pub fn clear_cached_secrets() {}
 pub fn load_telegram_api_hash(
     _data_dir: &std::path::Path,
 ) -> Result<Option<Zeroizing<String>>, AppError> {
-    with_mac_secret_vault(|vault| {
-        Ok(vault
-            .telegram_api_hash
-            .as_ref()
-            .map(|value| Zeroizing::new(value.clone())))
-    })
+    MAC_VAULT
+        .get_or_init(VaultCache::default)
+        .api_hash(&mut MacVaultIo)
 }
 
 #[cfg(target_os = "macos")]
 pub fn save_telegram_api_hash(_data_dir: &std::path::Path, value: &str) -> Result<(), AppError> {
-    if !valid_api_hash(value) {
-        return Err(AppError::SecureStore(
-            "Telegram API hash must be exactly 32 hexadecimal characters".into(),
-        ));
-    }
-    with_mac_secret_vault(|vault| {
-        let previous = vault.telegram_api_hash.replace(value.to_owned());
-        if let Err(error) = store_mac_secret_vault(vault) {
-            vault.telegram_api_hash = previous;
-            return Err(error);
-        }
-        Ok(())
-    })
+    MAC_VAULT
+        .get_or_init(VaultCache::default)
+        .save_api_hash(&mut MacVaultIo, value)
+}
+
+/// Loaded only when an archive operation first needs its independent key.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // The archive service will consume this in a later task.
+pub(crate) fn load_archive_index_key() -> Result<crate::persistence::archive::ArchiveKey, AppError>
+{
+    MAC_VAULT
+        .get_or_init(VaultCache::default)
+        .archive_key(&mut MacVaultIo)
+        .map(crate::persistence::archive::ArchiveKey::new)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -331,268 +308,37 @@ fn load_or_create_named_key(
     account: &str,
     _file_name: &str,
 ) -> Result<[u8; KEY_LENGTH], AppError> {
-    with_mac_secret_vault(|vault| {
-        if let Some(key) = vault_named_key(vault, account)? {
-            return Ok(key);
-        }
-
-        let mut key = random_bytes::<KEY_LENGTH>()?;
-        set_vault_named_key(vault, account, Some(key))?;
-        if let Err(error) = store_mac_secret_vault(vault) {
-            set_vault_named_key(vault, account, None)?;
-            key.zeroize();
-            return Err(error);
-        }
-        Ok(key)
-    })
+    MAC_VAULT
+        .get_or_init(VaultCache::default)
+        .named_key(&mut MacVaultIo, account)
 }
 
 #[cfg(target_os = "macos")]
-fn with_mac_secret_vault<T>(
-    operation: impl FnOnce(&mut SecretVault) -> Result<T, AppError>,
-) -> Result<T, AppError> {
-    let state = MAC_VAULT.get_or_init(|| Mutex::new(MacVaultState::Unloaded));
-    let mut state = state.lock().map_err(|_| AppError::StateUnavailable)?;
-
-    if matches!(*state, MacVaultState::Unloaded) {
-        *state = match load_mac_secret_vault() {
-            Ok(vault) => MacVaultState::Ready(vault),
-            Err(error) => MacVaultState::Failed(secure_store_message(error)),
-        };
-    }
-
-    let result = match &mut *state {
-        MacVaultState::Ready(vault) => operation(vault),
-        MacVaultState::Failed(message) => {
-            return Err(AppError::SecureStore(message.clone()));
-        }
-        MacVaultState::Unloaded => unreachable!("the Keychain vault must be initialized"),
-    };
-
-    if let Err(AppError::SecureStore(message)) = &result
-        && message.starts_with("macOS Keychain:")
-    {
-        *state = MacVaultState::Failed(message.clone());
-    }
-    result
-}
+struct MacVaultIo;
 
 #[cfg(target_os = "macos")]
-fn secure_store_message(error: AppError) -> String {
-    match error {
-        AppError::SecureStore(message) => message,
-        other => other.to_string(),
-    }
-}
+impl VaultIo for MacVaultIo {
+    fn read(&mut self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, AppError> {
+        use security_framework::passwords::get_generic_password;
 
-#[cfg(target_os = "macos")]
-fn load_mac_secret_vault() -> Result<SecretVault, AppError> {
-    use security_framework::passwords::get_generic_password;
-
-    const SERVICE: &str = "app.retract.cleaner";
-    const VAULT_ACCOUNT: &str = "secret-vault-v1";
-    const ITEM_NOT_FOUND: i32 = -25300;
-
-    match get_generic_password(SERVICE, VAULT_ACCOUNT) {
-        Ok(value) => decode_secret_vault(&value),
-        Err(error) if error.code() == ITEM_NOT_FOUND => {
-            let mut vault = SecretVault::default();
-            let mut migrated = false;
-
-            if let Some(value) = read_legacy_keychain_item("telegram-api-hash")? {
-                let value = String::from_utf8(value).map_err(|_| {
-                    AppError::SecureStore(
-                        "macOS Keychain contains a malformed Telegram API hash".into(),
-                    )
-                })?;
-                if !valid_api_hash(&value) {
-                    return Err(AppError::SecureStore(
-                        "macOS Keychain contains a malformed Telegram API hash".into(),
-                    ));
-                }
-                vault.telegram_api_hash = Some(value);
-                migrated = true;
-            }
-            if let Some(value) = read_legacy_keychain_item("tdlib-database")? {
-                vault.tdlib_database_key = Some(value.try_into().map_err(|_| {
-                    AppError::SecureStore(
-                        "macOS Keychain contains a malformed TDLib database key".into(),
-                    )
-                })?);
-                migrated = true;
-            }
-            if let Some(value) = read_legacy_keychain_item("encrypted-job-store")? {
-                vault.job_store_key = Some(value.try_into().map_err(|_| {
-                    AppError::SecureStore(
-                        "macOS Keychain contains a malformed job-store key".into(),
-                    )
-                })?);
-                migrated = true;
-            }
-            if migrated {
-                store_mac_secret_vault(&vault)?;
-            }
-            Ok(vault)
-        }
-        Err(error) => Err(AppError::SecureStore(format!("macOS Keychain: {error}"))),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn read_legacy_keychain_item(account: &str) -> Result<Option<Vec<u8>>, AppError> {
-    use security_framework::passwords::get_generic_password;
-
-    const SERVICE: &str = "app.retract.cleaner";
-    const ITEM_NOT_FOUND: i32 = -25300;
-    match get_generic_password(SERVICE, account) {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if error.code() == ITEM_NOT_FOUND => Ok(None),
-        Err(error) => Err(AppError::SecureStore(format!("macOS Keychain: {error}"))),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn store_mac_secret_vault(vault: &SecretVault) -> Result<(), AppError> {
-    use security_framework::passwords::set_generic_password;
-
-    const SERVICE: &str = "app.retract.cleaner";
-    const VAULT_ACCOUNT: &str = "secret-vault-v1";
-    let encoded = encode_secret_vault(vault)?;
-    set_generic_password(SERVICE, VAULT_ACCOUNT, encoded.as_slice())
-        .map_err(|error| AppError::SecureStore(format!("macOS Keychain: {error}")))
-}
-
-#[cfg(target_os = "macos")]
-fn vault_named_key(
-    vault: &SecretVault,
-    account: &str,
-) -> Result<Option<[u8; KEY_LENGTH]>, AppError> {
-    match account {
-        "tdlib-database" => Ok(vault.tdlib_database_key),
-        "encrypted-job-store" => Ok(vault.job_store_key),
-        _ => Err(AppError::SecureStore(format!(
-            "unsupported Retract secret account: {account}"
-        ))),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn set_vault_named_key(
-    vault: &mut SecretVault,
-    account: &str,
-    value: Option<[u8; KEY_LENGTH]>,
-) -> Result<(), AppError> {
-    match account {
-        "tdlib-database" => vault.tdlib_database_key = value,
-        "encrypted-job-store" => vault.job_store_key = value,
-        _ => {
-            return Err(AppError::SecureStore(format!(
-                "unsupported Retract secret account: {account}"
-            )));
+        const SERVICE: &str = "app.retract.cleaner";
+        const ITEM_NOT_FOUND: i32 = -25300;
+        match get_generic_password(SERVICE, account) {
+            Ok(value) => Ok(Some(Zeroizing::new(value))),
+            Err(error) if error.code() == ITEM_NOT_FOUND => Ok(None),
+            Err(error) => Err(AppError::SecureStore(format!("macOS Keychain: {error}"))),
         }
     }
-    Ok(())
-}
 
-#[cfg(any(target_os = "macos", test))]
-fn encode_secret_vault(vault: &SecretVault) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if vault
-        .telegram_api_hash
-        .as_deref()
-        .is_some_and(|value| !valid_api_hash(value))
-    {
-        return Err(AppError::SecureStore(
-            "Keychain vault contains a malformed Telegram API hash".into(),
-        ));
-    }
-    let mut flags = 0_u8;
-    if vault.telegram_api_hash.is_some() {
-        flags |= VAULT_API_HASH;
-    }
-    if vault.tdlib_database_key.is_some() {
-        flags |= VAULT_TDLIB_DATABASE_KEY;
-    }
-    if vault.job_store_key.is_some() {
-        flags |= VAULT_JOB_STORE_KEY;
-    }
+    fn write(&mut self, bytes: &[u8]) -> Result<(), AppError> {
+        use security_framework::passwords::set_generic_password;
 
-    let mut encoded = Zeroizing::new(Vec::with_capacity(VAULT_MAGIC.len() + 1 + 96));
-    encoded.extend_from_slice(VAULT_MAGIC);
-    encoded.push(flags);
-    if let Some(value) = &vault.telegram_api_hash {
-        encoded.extend_from_slice(value.as_bytes());
+        const SERVICE: &str = "app.retract.cleaner";
+        // Keep the original item identity: old builds reject RTRCTV2 instead of
+        // interpreting a different item as an absent vault and minting keys.
+        set_generic_password(SERVICE, VAULT_ACCOUNT, bytes)
+            .map_err(|error| AppError::SecureStore(format!("macOS Keychain: {error}")))
     }
-    if let Some(value) = &vault.tdlib_database_key {
-        encoded.extend_from_slice(value);
-    }
-    if let Some(value) = &vault.job_store_key {
-        encoded.extend_from_slice(value);
-    }
-    Ok(encoded)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn decode_secret_vault(encoded: &[u8]) -> Result<SecretVault, AppError> {
-    if encoded.len() < VAULT_MAGIC.len() + 1 || !encoded.starts_with(VAULT_MAGIC) {
-        return Err(AppError::SecureStore(
-            "macOS Keychain contains an invalid Retract secret vault".into(),
-        ));
-    }
-    let flags = encoded[VAULT_MAGIC.len()];
-    if flags & !VAULT_KNOWN_FLAGS != 0 {
-        return Err(AppError::SecureStore(
-            "macOS Keychain contains an unsupported Retract secret vault".into(),
-        ));
-    }
-    let mut cursor = VAULT_MAGIC.len() + 1;
-    let mut vault = SecretVault::default();
-    if flags & VAULT_API_HASH != 0 {
-        let bytes = take_vault_field(encoded, &mut cursor)?;
-        let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
-            AppError::SecureStore("macOS Keychain contains a malformed Telegram API hash".into())
-        })?;
-        if !valid_api_hash(&value) {
-            return Err(AppError::SecureStore(
-                "macOS Keychain contains a malformed Telegram API hash".into(),
-            ));
-        }
-        vault.telegram_api_hash = Some(value);
-    }
-    if flags & VAULT_TDLIB_DATABASE_KEY != 0 {
-        vault.tdlib_database_key = Some(
-            take_vault_field(encoded, &mut cursor)?
-                .try_into()
-                .map_err(|_| {
-                    AppError::SecureStore("malformed TDLib database key in Keychain vault".into())
-                })?,
-        );
-    }
-    if flags & VAULT_JOB_STORE_KEY != 0 {
-        vault.job_store_key = Some(take_vault_field(encoded, &mut cursor)?.try_into().map_err(
-            |_| AppError::SecureStore("malformed job-store key in Keychain vault".into()),
-        )?);
-    }
-    if cursor != encoded.len() {
-        return Err(AppError::SecureStore(
-            "macOS Keychain contains a malformed Retract secret vault".into(),
-        ));
-    }
-    Ok(vault)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn take_vault_field<'a>(encoded: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], AppError> {
-    let end = cursor.saturating_add(KEY_LENGTH);
-    let field = encoded.get(*cursor..end).ok_or_else(|| {
-        AppError::SecureStore("macOS Keychain contains a truncated Retract secret vault".into())
-    })?;
-    *cursor = end;
-    Ok(field)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn valid_api_hash(value: &str) -> bool {
-    value.len() == KEY_LENGTH && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -636,6 +382,10 @@ pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), 
     file.sync_all()?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "secure_store/vault_tests.rs"]
+mod vault_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1105,6 +855,7 @@ mod tests {
             telegram_api_hash: Some("0123456789abcdef0123456789abcdef".into()),
             tdlib_database_key: Some([0x2a; KEY_LENGTH]),
             job_store_key: Some([0x7c; KEY_LENGTH]),
+            ..SecretVault::default()
         };
         let encoded = encode_secret_vault(&expected).unwrap();
         let decoded = decode_secret_vault(&encoded).unwrap();
@@ -1120,6 +871,7 @@ mod tests {
             telegram_api_hash: Some("0123456789abcdef0123456789abcdef".into()),
             tdlib_database_key: Some([0x2a; KEY_LENGTH]),
             job_store_key: None,
+            ..SecretVault::default()
         };
         let encoded = encode_secret_vault(&expected).unwrap();
         assert!(decode_secret_vault(&encoded[..encoded.len() - 1]).is_err());
