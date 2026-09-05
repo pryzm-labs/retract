@@ -95,6 +95,9 @@ jobs:
       - name: Install locked JavaScript dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      - name: Verify the native SQLCipher codec gate
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml persistence::archive::codec_tests
+
       - name: Build and verify the unsigned preview
         run: npm run package:unsigned
 

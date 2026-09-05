@@ -24,6 +24,7 @@ cleaner-domain = { path = "../crates/cleaner-domain" }
 retract-domain = { path = "../crates/retract-domain" }
 futures-util = "0.3"
 libloading = "0.9.0"
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

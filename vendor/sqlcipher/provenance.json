@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "selection": {
+    "rustBinding": "rusqlite 0.40.2",
+    "defaultFeatures": false,
+    "features": [
+      "bundled-sqlcipher-vendored-openssl"
+    ]
+  },
+  "cargoPackages": {
+    "rusqlite": {
+      "version": "0.40.2",
+      "checksum": "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3",
+      "vcsRevision": "e88f112bef7899234a497baed5cc3c3d553deeb8"
+    },
+    "libsqlite3-sys": {
+      "version": "0.38.2",
+      "checksum": "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8",
+      "vcsRevision": "e88f112bef7899234a497baed5cc3c3d553deeb8"
+    },
+    "openssl-sys": {
+      "version": "0.9.117",
+      "checksum": "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695",
+      "vcsRevision": "db9c9e2f5db2ad7b45fd894e8d297ee15bfd0c7c"
+    },
+    "openssl-src": {
+      "version": "300.6.1+3.6.3",
+      "checksum": "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846",
+      "vcsRevision": "64c38cc48205400720199476aff8a780f98d167d"
+    }
+  },
+  "sqlcipherSource": {
+    "edition": "community",
+    "versionMacro": "4.14.0",
+    "sqliteVersion": "3.51.3",
+    "sqliteSourceId": "2026-03-13 10:38:09 737ae4a34738ffa0c3ff7f9bb18df914dd1cad163f28fd6b6e114a344fe6alt1",
+    "amalgamationSha256": "ea0bf0b08f688ca5d9312b2e33e7f81b3f4ae54b5016fb062ae1f2632a30a1b9",
+    "headerSha256": "91190701218669c31d2f56835c98882074ad051f2d38afee9f5b9c35d8406149",
+    "licenseSha256": "ea4fcb309f14a22065e1ea45362d494d320012249ed865fe9c7c0946db754131"
+  },
+  "cryptoBackend": {
+    "provider": "openssl",
+    "opensslVersion": "3.6.3",
+    "upstreamReleaseDate": "2026-06-09",
+    "licenseSha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+  },
+  "libsqlite3SysCompilerDefines": [
+    "SQLITE_CORE",
+    "SQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "SQLITE_ENABLE_API_ARMOR",
+    "SQLITE_ENABLE_COLUMN_METADATA",
+    "SQLITE_ENABLE_DBSTAT_VTAB",
+    "SQLITE_ENABLE_FTS3",
+    "SQLITE_ENABLE_FTS3_PARENTHESIS",
+    "SQLITE_ENABLE_FTS5",
+    "SQLITE_ENABLE_JSON1",
+    "SQLITE_ENABLE_LOAD_EXTENSION=1",
+    "SQLITE_ENABLE_MEMORY_MANAGEMENT",
+    "SQLITE_ENABLE_RTREE",
+    "SQLITE_ENABLE_STAT4",
+    "SQLITE_SOUNDEX",
+    "SQLITE_THREADSAFE=1",
+    "SQLITE_USE_URI",
+    "HAVE_USLEEP=1",
+    "HAVE_ISNAN",
+    "_POSIX_THREAD_SAFE_FUNCTIONS",
+    "SQLITE_HAS_CODEC",
+    "SQLITE_TEMP_STORE=2",
+    "SQLITE_EXTRA_INIT=sqlcipher_extra_init",
+    "SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown",
+    "HAVE_STDINT_H=1",
+    "HAVE_LOCALTIME_R"
+  ],
+  "opensslConfigure": {
+    "commonArguments": [
+      "no-shared",
+      "no-module",
+      "no-tests",
+      "no-comp",
+      "no-zlib",
+      "no-zlib-dynamic",
+      "--libdir=lib",
+      "no-legacy",
+      "no-ssl3",
+      "no-md2",
+      "no-rc5",
+      "no-weak-ssl-ciphers",
+      "no-camellia",
+      "no-idea",
+      "no-seed"
+    ],
+    "targets": {
+      "aarch64-apple-darwin": "darwin64-arm64-cc",
+      "aarch64-unknown-linux-gnu": "linux-aarch64",
+      "x86_64-unknown-linux-gnu": "linux-x86_64"
+    }
+  },
+  "runtimePolicy": {
+    "requiredCipherProvider": "openssl",
+    "extensionLoading": false,
+    "temporaryStore": "memory",
+    "foreignKeys": true,
+    "synchronous": "full",
+    "secureDelete": true,
+    "fts5": true,
+    "sqlcipherLogging": false
+  }
+}

@@ -21,6 +21,9 @@ const expectedBundleFiles = [
   "Contents/Resources/lib/libtdjson.dylib",
   "Contents/Resources/licenses/TDLib-LICENSE_1_0.txt",
   "Contents/Resources/licenses/TDLib-build-stamp.txt",
+  "Contents/Resources/licenses/SQLCipher-LICENSE.txt",
+  "Contents/Resources/licenses/SQLCipher-provenance.json",
+  "Contents/Resources/licenses/OpenSSL-LICENSE.txt",
   "Contents/_CodeSignature/CodeResources"
 ];
 

@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+pub(crate) mod archive;
 mod foundation_store;
 mod migration;
 mod model;
