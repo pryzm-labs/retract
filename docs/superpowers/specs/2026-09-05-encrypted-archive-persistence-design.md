@@ -1,6 +1,6 @@
 # Encrypted Archive Persistence — Stage Proposal
 
-**Status:** Proposed; awaiting scope/design approval. No implementation is included.
+**Status:** Approved for implementation on 2026-09-05, including archive-only storage and deferral of job-store consolidation.
 
 **Date:** 2026-09-05
 
@@ -138,4 +138,4 @@ Return stable, content-free errors for wrong/unavailable keys, corrupt or unsupp
 
 ## Next checkpoint
 
-Review this archive-only scope and the explicit decision to defer job-store consolidation. After approval, write the task-by-task implementation plan, starting with the native dependency gate. This document does not authorize live-account tests, production data migration, or implementation before that approval.
+The user approved this archive-only scope and implementation on 2026-09-05. Execute the task-by-task plan starting with the native dependency gate. Live-account tests and production data migration remain outside this approval.
