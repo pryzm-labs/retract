@@ -56,6 +56,22 @@ pub(super) fn validate_account_envelopes(account: &AccountRecord) -> Result<(), 
     Ok(())
 }
 
+pub(super) fn validate_archive_account(
+    account: &AccountRecord,
+    validator: &dyn ProviderPayloadValidator,
+) -> Result<VerifiedNativeAccountIdentity, ArchiveError> {
+    if account.connection_state != ConnectionState::Disconnected {
+        return Err(ArchiveError::InvalidRecord);
+    }
+    validate_account_envelopes(account)?;
+    account
+        .validate()
+        .map_err(|_| ArchiveError::InvalidRecord)?;
+    validator
+        .validate_account(account)
+        .map_err(|_| ArchiveError::InvalidRecord)
+}
+
 pub(super) fn validate_registration(
     account: &AccountRecord,
     source: &SourceRecord,
@@ -64,18 +80,13 @@ pub(super) fn validate_registration(
     if source.provider != account.provider || source.account_id != account.id {
         return Err(ArchiveError::ScopeMismatch);
     }
-    if source.kind != SourceKind::ArchiveImport
-        || account.connection_state != ConnectionState::Disconnected
-    {
+    if source.kind != SourceKind::ArchiveImport {
         return Err(ArchiveError::InvalidRecord);
     }
-    validate_account_envelopes(account)?;
+    let native = validate_archive_account(account, validator)?;
     encoded_size(&source.schema_profile, ENVELOPE_BYTES)?;
     source
         .validate(account)
-        .map_err(|_| ArchiveError::InvalidRecord)?;
-    let native = validator
-        .validate_account(account)
         .map_err(|_| ArchiveError::InvalidRecord)?;
     validator
         .validate_source(source, account)

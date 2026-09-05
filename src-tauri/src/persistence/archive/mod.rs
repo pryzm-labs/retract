@@ -1,6 +1,7 @@
 mod codec;
 mod error;
 mod model;
+mod preflight;
 mod schema;
 mod store;
 

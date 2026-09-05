@@ -47,6 +47,69 @@ pub(in crate::persistence::archive) fn validators()
     BTreeMap::from([(provider(), Arc::new(SyntheticValidator) as Arc<_>)])
 }
 
+pub(in crate::persistence::archive) fn account_dependent_validators()
+-> BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>> {
+    BTreeMap::from([(provider(), Arc::new(AccountDependentValidator) as Arc<_>)])
+}
+
+struct AccountDependentValidator;
+
+impl ProviderPayloadValidator for AccountDependentValidator {
+    fn validation_policy_key(&self) -> ProviderValidationPolicyKey {
+        "synthetic-account-dependent-v1"
+            .to_owned()
+            .try_into()
+            .unwrap()
+    }
+
+    fn validate_account(
+        &self,
+        account: &AccountRecord,
+    ) -> Result<VerifiedNativeAccountIdentity, AppError> {
+        SyntheticValidator.validate_account(account)
+    }
+
+    fn validate_source(
+        &self,
+        source: &SourceRecord,
+        account: &AccountRecord,
+    ) -> Result<(), AppError> {
+        if source.schema_profile.schema != "synthetic.archive"
+            || source.schema_profile.version != 1
+            || source.schema_profile.payload != json!({"accountName": account.display_name})
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    fn validate_resource(&self, resource: &ProviderResourceRef) -> Result<(), AppError> {
+        SyntheticValidator.validate_resource(resource)
+    }
+
+    fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError> {
+        SyntheticValidator.validate_recipe(plan)
+    }
+}
+
+pub(in crate::persistence::archive) fn snapshot_recovery_files(
+    path: &std::path::Path,
+) -> Vec<(String, Option<Vec<u8>>)> {
+    ["", "-wal", "-shm", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            let bytes = match fs::read(PathBuf::from(name)) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("could not snapshot synthetic recovery artifact: {error}"),
+            };
+            (suffix.to_owned(), bytes)
+        })
+        .collect()
+}
+
 pub(in crate::persistence::archive) fn account() -> AccountRecord {
     serde_json::from_value(json!({
         "id": "11111111-1111-4111-8111-111111111111",

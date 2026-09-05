@@ -658,3 +658,189 @@ fn encoded_byte_ceiling_counts_json_quotes_utf8_and_escaping() {
         Err(ArchiveError::LimitExceeded)
     );
 }
+
+#[test]
+fn reused_account_validation_uses_retained_metadata_and_remains_reopenable() {
+    use super::test_support::account_dependent_validators;
+
+    let fixture = Fixture::new();
+    let store =
+        ArchiveStore::open(fixture.path.clone(), key(), account_dependent_validators()).unwrap();
+    let mut original = source();
+    original.schema_profile.payload = json!({"accountName": "Synthetic archive account"});
+    store.register_source(account(), original.clone()).unwrap();
+    let mut changed_account = account();
+    changed_account.display_name = "Caller replacement metadata".into();
+    let mut conflicting = original.clone();
+    conflicting.id = Uuid::new_v4().try_into().unwrap();
+    conflicting.schema_profile.payload = json!({"accountName": "Caller replacement metadata"});
+    assert_eq!(
+        store.register_source(changed_account.clone(), conflicting),
+        Err(ArchiveError::InvalidRecord)
+    );
+    // The new source is valid for the actual retained account. The supplied
+    // account's matching canonical identity does not implicitly update metadata.
+    let mut compatible = original.clone();
+    compatible.id = Uuid::new_v4().try_into().unwrap();
+    store
+        .register_source(changed_account, compatible.clone())
+        .unwrap();
+    drop(store);
+    let reopened =
+        ArchiveStore::open(fixture.path.clone(), key(), account_dependent_validators()).unwrap();
+    assert_eq!(reopened.source(&original.scope()).unwrap(), original);
+    assert_eq!(reopened.source(&compatible.scope()).unwrap(), compatible);
+}
+
+#[test]
+fn recovery_fixture_child() {
+    const CHILD_PATH: &str = "RETRACT_ARCHIVE_RECOVERY_TEST_PATH";
+    const CHILD_MODE: &str = "RETRACT_ARCHIVE_RECOVERY_TEST_MODE";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let db = open_keyed(std::path::Path::new(&path), &key(), false).unwrap();
+        match std::env::var(CHILD_MODE).unwrap().as_str() {
+            "unsupported-wal" => db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; UPDATE schema_migrations SET version = 2;").unwrap(),
+            "supported-wal" => {
+                db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;").unwrap();
+                let mut updated = source();
+                updated.state = SourceState::Failed;
+                db.execute("UPDATE sources SET record_json = ?", [serde_json::to_string(&updated).unwrap()]).unwrap();
+            }
+            mode @ ("unsupported-journal" | "supported-journal") => {
+                if mode == "unsupported-journal" {
+                    db.execute_batch("UPDATE schema_migrations SET version = 2;").unwrap();
+                }
+                db.execute_batch("PRAGMA cache_size = 1; PRAGMA cache_spill = ON; BEGIN IMMEDIATE;").unwrap();
+                db.execute("UPDATE schema_migrations SET application = ?", ["synthetic-uncommitted".repeat(100000)]).unwrap();
+            }
+            mode => panic!("unexpected recovery mode: {mode}"),
+        }
+        // Emulate a process stopping with durable SQLite recovery artifacts.
+        // This child owns no user files or credentials and skips connection drop.
+        std::process::exit(0);
+    }
+}
+
+fn recovery_fixture(mode: &str) -> Fixture {
+    use super::test_support::snapshot_recovery_files;
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store.register_source(account(), source()).unwrap();
+    drop(store);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "persistence::archive::store_tests::recovery_fixture_child",
+            "--nocapture",
+        ])
+        .env("RETRACT_ARCHIVE_RECOVERY_TEST_PATH", &fixture.path)
+        .env("RETRACT_ARCHIVE_RECOVERY_TEST_MODE", mode)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "synthetic recovery child failed: {output:?}"
+    );
+    let before = snapshot_recovery_files(&fixture.path);
+    assert!(before.iter().any(|(suffix, bytes)| suffix
+        == if mode.ends_with("wal") {
+            "-wal"
+        } else {
+            "-journal"
+        }
+        && bytes.as_ref().is_some_and(|bytes| bytes.len() > 512)));
+    fixture
+}
+
+fn assert_rejected_recovery_preserved(mode: &str) {
+    use super::test_support::snapshot_recovery_files;
+    let fixture = recovery_fixture(mode);
+    let before = snapshot_recovery_files(&fixture.path);
+    assert_eq!(
+        ArchiveStore::open(fixture.path.clone(), key(), validators()).err(),
+        Some(ArchiveError::UnsupportedSchema)
+    );
+    let after = snapshot_recovery_files(&fixture.path);
+    for ((suffix, before), (_, after)) in before.iter().zip(after.iter()) {
+        assert!(
+            before == after,
+            "rejected {mode} store changed {suffix:?}: original bytes {}, remaining bytes {}",
+            before.as_ref().map_or(0, Vec::len),
+            after.as_ref().map_or(0, Vec::len)
+        );
+    }
+}
+
+#[test]
+fn rejected_wal_store_preserves_original_database_and_sidecars() {
+    assert_rejected_recovery_preserved("unsupported-wal");
+}
+
+#[test]
+fn rejected_hot_journal_store_preserves_original_database_and_sidecars() {
+    assert_rejected_recovery_preserved("unsupported-journal");
+}
+
+#[test]
+fn supported_recovery_replays_committed_wal_and_rolls_back_hot_journal() {
+    for (mode, expected) in [
+        ("supported-wal", SourceState::Failed),
+        ("supported-journal", SourceState::Preparing),
+    ] {
+        let fixture = recovery_fixture(mode);
+        let recovered = fixture.open();
+        assert_eq!(recovered.source(&source().scope()).unwrap().state, expected);
+        drop(recovered);
+        assert_eq!(
+            fixture.open().source(&source().scope()).unwrap().state,
+            expected
+        );
+    }
+}
+
+#[test]
+fn rejected_clean_wal_database_with_absent_sidecars_stays_byte_preserved() {
+    use super::test_support::snapshot_recovery_files;
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let db = open_keyed(&fixture.path, &key(), false).unwrap();
+    db.execute_batch("PRAGMA journal_mode = WAL; UPDATE schema_migrations SET version = 2;")
+        .unwrap();
+    drop(db);
+    let before = snapshot_recovery_files(&fixture.path);
+    assert!(before.iter().skip(1).all(|(_, bytes)| bytes.is_none()));
+    assert_eq!(
+        ArchiveStore::open(fixture.path.clone(), key(), validators()).err(),
+        Some(ArchiveError::UnsupportedSchema)
+    );
+    assert_eq!(snapshot_recovery_files(&fixture.path), before);
+}
+
+#[test]
+fn orphan_and_ambiguous_recovery_artifacts_are_rejected_before_database_creation() {
+    use super::test_support::snapshot_recovery_files;
+    for suffixes in [vec!["-wal"], vec!["-journal"], vec!["-shm"]] {
+        let fixture = Fixture::new();
+        for suffix in suffixes {
+            let path = fixture.path.with_file_name(format!("archive.db{suffix}"));
+            fs::write(&path, b"synthetic orphan").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let before = snapshot_recovery_files(&fixture.path);
+        assert_eq!(
+            ArchiveStore::open(fixture.path.clone(), key(), validators()).err(),
+            Some(ArchiveError::InvalidStore)
+        );
+        assert_eq!(snapshot_recovery_files(&fixture.path), before);
+    }
+    let fixture = recovery_fixture("supported-wal");
+    let journal = fixture.path.with_file_name("archive.db-journal");
+    fs::write(&journal, b"synthetic ambiguous journal").unwrap();
+    fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+    let before = snapshot_recovery_files(&fixture.path);
+    assert_eq!(
+        ArchiveStore::open(fixture.path.clone(), key(), validators()).err(),
+        Some(ArchiveError::InvalidStore)
+    );
+    assert_eq!(snapshot_recovery_files(&fixture.path), before);
+}

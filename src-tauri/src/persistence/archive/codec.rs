@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, fs, io::ErrorKind, path::Path};
+use std::{fmt::Write as _, fs, io::ErrorKind, os::unix::ffi::OsStrExt, path::Path};
 
 use rusqlite::{Connection, OpenFlags, ffi};
 use zeroize::Zeroizing;
@@ -47,6 +47,33 @@ pub(super) fn open_keyed(
         }
     })?;
 
+    configure_keyed(connection, key)
+}
+
+/// Used only after the process lock and an artifact snapshot establish that no
+/// recovery sidecars exist. Immutable mode prevents even WAL/shm creation.
+pub(super) fn open_immutable_keyed(
+    path: &Path,
+    key: &ArchiveKey,
+) -> Result<Connection, ArchiveError> {
+    validate_path(path, false)?;
+    let mut uri = String::from("file:");
+    for byte in path.as_os_str().as_bytes() {
+        write!(&mut uri, "%{byte:02X}").expect("writing into a String cannot fail");
+    }
+    uri.push_str("?immutable=1");
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        | OpenFlags::SQLITE_OPEN_EXRESCODE;
+    let connection =
+        Connection::open_with_flags(uri, flags).map_err(|_| ArchiveError::InvalidStore)?;
+    configure_keyed(connection, key)
+}
+
+fn configure_keyed(connection: Connection, key: &ArchiveKey) -> Result<Connection, ArchiveError> {
     connection
         .pragma_update(None, "cipher_log_level", "NONE")
         .map_err(|_| ArchiveError::UnsupportedCodec)?;

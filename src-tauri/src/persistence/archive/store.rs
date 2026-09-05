@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::persistence::ProviderPayloadValidator;
 
-use super::{ArchiveError, ArchiveKey, codec::open_keyed, model, schema};
+use super::{ArchiveError, ArchiveKey, codec::open_keyed, model, preflight, schema};
 
 #[cfg(test)]
 #[path = "test_support.rs"]
@@ -57,6 +57,7 @@ impl ArchiveStore {
         validate_parent(&path)?;
         validate_artifacts(&path)?;
         let process_lock = acquire_lock(&sidecar(&path, ".lock"))?;
+        preflight::validate_artifact_set(&path)?;
         let key = load()?;
         let is_new = match private_options().create_new(true).open(&path) {
             Ok(file) => {
@@ -74,6 +75,12 @@ impl ArchiveStore {
                 == 0
         {
             return Err(ArchiveError::InvalidStore);
+        }
+        if !is_new {
+            preflight::validate_existing(&path, &key, |connection| {
+                schema::validate(connection)?;
+                validate_registrations(connection, &validators)
+            })?;
         }
         let mut connection = open_keyed(&path, &key, false)?;
         if is_new {
@@ -102,18 +109,22 @@ impl ArchiveStore {
             .validators
             .get(&account.provider)
             .ok_or(ArchiveError::InvalidRecord)?;
-        let native = model::validate_registration(&account, &source, validator.as_ref())?;
+        let native = model::validate_archive_account(&account, validator.as_ref())?;
         self.transaction(|tx| {
-            let previous: Option<(String, String)> = tx.query_row(
-                "SELECT provider, canonical_identity FROM accounts WHERE account_id = ?",
-                [account.id.as_uuid().to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+            let previous: Option<(String, String, String)> = tx.query_row(
+                "SELECT provider, canonical_identity, record_json FROM accounts WHERE account_id = ?",
+                [account.id.as_uuid().to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional().map_err(|_| ArchiveError::StorageFailure)?;
             match previous {
-                Some((provider, identity)) if provider != account.provider.as_str() || identity != native.as_canonical_str() => {
+                Some((provider, identity, _)) if provider != account.provider.as_str() || identity != native.as_canonical_str() => {
                     return Err(ArchiveError::InvalidRecord);
                 }
-                Some(_) => (),
+                Some((_, _, encoded)) => {
+                    let retained: AccountRecord = model::decode(&encoded)?;
+                    model::validate_registration(&retained, &source, validator.as_ref())?;
+                }
                 None => {
+                    model::validate_registration(&account, &source, validator.as_ref())?;
                     tx.execute("INSERT INTO accounts(provider, account_id, canonical_identity, record_json) VALUES(?, ?, ?, ?)",
                         (account.provider.as_str(), account.id.as_uuid().to_string(), native.as_canonical_str(), model::encode(&account)?))
                         .map_err(|_| ArchiveError::InvalidRecord)?;
@@ -194,16 +205,10 @@ fn validate_registrations(
             row.get(3).map_err(|_| ArchiveError::InvalidStore)?,
         );
         let account: AccountRecord = model::decode(&encoded)?;
-        model::validate_account_envelopes(&account)?;
         let validator = validators
             .get(&account.provider)
             .ok_or(ArchiveError::InvalidRecord)?;
-        account
-            .validate()
-            .map_err(|_| ArchiveError::InvalidRecord)?;
-        let verified = validator
-            .validate_account(&account)
-            .map_err(|_| ArchiveError::InvalidRecord)?;
+        let verified = model::validate_archive_account(&account, validator.as_ref())?;
         if account.provider.as_str() != provider
             || account.id.as_uuid().to_string() != id
             || account.connection_state != ConnectionState::Disconnected
@@ -242,7 +247,7 @@ fn validate_registrations(
     Ok(())
 }
 
-fn validate_parent(path: &Path) -> Result<(), ArchiveError> {
+pub(super) fn validate_parent(path: &Path) -> Result<(), ArchiveError> {
     let parent = path.parent().ok_or(ArchiveError::InvalidStore)?;
     if !path.is_absolute()
         || path.file_name().is_none()
@@ -285,7 +290,7 @@ fn validate_file(path: &Path) -> Result<(), ArchiveError> {
     }
 }
 
-fn private_options() -> OpenOptions {
+pub(super) fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.read(true).write(true).mode(0o600);
     // O_NOFOLLOW values from the supported target ABIs. SQLite separately uses

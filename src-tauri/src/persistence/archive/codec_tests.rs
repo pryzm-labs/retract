@@ -37,6 +37,45 @@ fn database_fixture_path(root: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn immutable_keyed_probe_of_clean_wal_store_cannot_write_or_create_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = database_fixture_path(dir.path(), "synthetic ?#%.db");
+    let key = ArchiveKey::new([0x42; 32]);
+    let db = open_keyed(&path, &key, true).unwrap();
+    db.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE probe(value TEXT); INSERT INTO probe VALUES('encryptedcanary');").unwrap();
+    drop(db);
+    let before = fs::read(&path).unwrap();
+    let db = super::codec::open_immutable_keyed(&path, &key).unwrap();
+    assert_eq!(
+        db.query_row("SELECT value FROM probe", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "encryptedcanary"
+    );
+    assert!(
+        db.execute("INSERT INTO probe VALUES('forbidden')", [])
+            .is_err()
+    );
+    drop(db);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        assert!(!PathBuf::from(sidecar).exists());
+    }
+    assert_eq!(
+        super::codec::open_immutable_keyed(&path, &ArchiveKey::new([0x43; 32])).err(),
+        Some(ArchiveError::InvalidStore)
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let alias = database_fixture_path(dir.path(), "alias.db");
+    symlink(&path, &alias).unwrap();
+    assert_eq!(
+        super::codec::open_immutable_keyed(&alias, &key).err(),
+        Some(ArchiveError::InvalidStore)
+    );
+}
+
+#[test]
 fn keyed_connection_reopens_encrypted_fts_and_rejects_wrong_key() {
     let dir = tempfile::tempdir().unwrap();
     let path = database_fixture_path(dir.path(), "synthetic.db");
