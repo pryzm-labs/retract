@@ -10,7 +10,10 @@ All notable changes to Retract are documented here. The project follows [Semanti
 - Authenticated account verification, stable account/source mappings, session-bound plan authorization, and fail-closed cross-account recovery.
 - A single-writer version-3 encrypted job store with exact legacy ciphertext preservation in `jobs.pre-provider.enc`; unfinished legacy work requires new review and the backup is never restored automatically.
 - Backend-described ordered cleanup effects and accessible complete job outcomes, including skipped, failed, uncertain, retry and blocked states.
-- Synthetic lifecycle, migration, interprocess-lock and stale-response regression coverage. No additional production provider, content index or archive importer is included.
+- Synthetic lifecycle, migration, interprocess-lock and stale-response regression coverage.
+- A lazy, bounded SQLCipher archive backend with scoped import/retry/query/removal ports, cancellation and application-lifetime shutdown ownership. No real importer, automatic Telegram indexing, Discord/X support or archive destructive IPC is enabled.
+- A shared fail-fast macOS credential lease, lazy archive-key vault upgrade and injected process/lifecycle tests. All older Retract copies must quit before first archive use; vault-format downgrades are unsupported.
+- An opt-in 100,000-item synthetic same-worker storage benchmark and complete synthetic archive/injected-vault native pre-package gates.
 
 ## [0.1.0] - 2026-08-20
 

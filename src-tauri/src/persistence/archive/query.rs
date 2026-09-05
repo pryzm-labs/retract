@@ -43,14 +43,7 @@ impl ArchiveStore {
         &self,
         request: ArchiveSearch,
     ) -> Result<Page<ContentRecord>, ArchiveError> {
-        validate_limit(request.limit)?;
-        if request.text.len() > MAX_QUERY || request.kinds.len() > 13 {
-            return Err(ArchiveError::LimitExceeded);
-        }
-        if matches!((request.after, request.before), (Some(after), Some(before)) if after >= before)
-        {
-            return Err(ArchiveError::InvalidRecord);
-        }
+        search_bounds(&request)?;
         let text = request.text.trim();
         let mut kinds = request
             .kinds
@@ -123,7 +116,7 @@ impl ArchiveStore {
         &self,
         request: ConversationQuery,
     ) -> Result<Page<ConversationRecord>, ArchiveError> {
-        validate_limit(request.limit)?;
+        conversation_bounds(&request)?;
         let filter = digest(&"conversations")?;
         let cursor = decode_cursor(request.cursor.as_deref(), &request.scope, &filter, false)?;
         self.transaction(|tx| {
@@ -153,9 +146,7 @@ impl ArchiveStore {
         &self,
         request: ResolveRequest,
     ) -> Result<Vec<ContentRecord>, ArchiveError> {
-        if request.refs.len() > MAX_PAGE as usize {
-            return Err(ArchiveError::LimitExceeded);
-        }
+        resolve_bounds(&request)?;
         self.transaction(|tx| {
             generation(tx, &request.scope, None)?;
             let validator = self.validators.get(&request.scope.provider).ok_or(ArchiveError::InvalidRecord)?;
@@ -186,6 +177,43 @@ impl ArchiveStore {
             Ok(items)
         })
     }
+}
+
+pub(super) fn search_bounds(request: &ArchiveSearch) -> Result<(), ArchiveError> {
+    if request.text.len() > MAX_QUERY || request.kinds.len() > 13 {
+        return Err(ArchiveError::LimitExceeded);
+    }
+    validate_limit(request.limit)?;
+    cursor_bounds(request.cursor.as_deref())?;
+    if let (Some(after), Some(before)) = (request.after, request.before)
+        && after >= before
+    {
+        return Err(ArchiveError::InvalidRecord);
+    }
+    Ok(())
+}
+
+pub(super) fn conversation_bounds(request: &ConversationQuery) -> Result<(), ArchiveError> {
+    cursor_bounds(request.cursor.as_deref())?;
+    validate_limit(request.limit)
+}
+
+pub(super) fn resolve_bounds(request: &ResolveRequest) -> Result<(), ArchiveError> {
+    if request.refs.len() > MAX_PAGE as usize {
+        return Err(ArchiveError::LimitExceeded);
+    }
+    for reference in &request.refs {
+        model::encoded_size(&reference.resource, model::ENVELOPE_BYTES)?;
+    }
+    model::encoded_size(request, model::MAX_BATCH_BYTES)?;
+    Ok(())
+}
+
+fn cursor_bounds(cursor: Option<&str>) -> Result<(), ArchiveError> {
+    if cursor.is_some_and(|value| value.len() > MAX_CURSOR) {
+        return Err(ArchiveError::StaleCursor);
+    }
+    Ok(())
 }
 
 fn validate_limit(limit: u32) -> Result<(), ArchiveError> {

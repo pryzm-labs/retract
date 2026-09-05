@@ -12,6 +12,13 @@ homepage = "https://github.com/Pryzm-Labs/retract"
 name = "retract_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+archive-bench = []
+
+[[example]]
+name = "archive_storage_bench"
+required-features = ["archive-bench"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

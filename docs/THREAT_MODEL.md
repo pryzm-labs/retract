@@ -37,6 +37,16 @@ Retract helps the signed-in Telegram user revoke history that Telegram still per
 - Test-DC and production plans/databases use separate app-data profiles, and AES-GCM associated data binds persisted jobs to the selected profile. Legacy unbound nonterminal jobs are stopped rather than resumed. The synthetic gateway is test-only, and the production frontend boundary excludes fixture modules.
 - Stored plans intentionally retain only IDs, reach expectations, titles needed for confirmation, counters, and timestamps—not message text or media.
 
+## Encrypted archive backend boundary
+
+The separate archive backend stores only explicitly imported normalized observations; automatic Telegram indexing, real archive parsers, Discord/X support and archive destructive IPC are not enabled. Its SQLCipher/OpenSSL source provenance, crypto flags and licenses are recorded in [ARCHIVE_STORAGE.md](ARCHIVE_STORAGE.md) and the pinned native provenance manifest. Archive evidence and inert locators never grant remote remediation authority.
+
+Every import/query/removal binds provider, account and source. Backend-issued sessions and committed checkpoints control mutation; published generations bind query cursors. A bounded blocking worker rejects oversized requests before copying/queueing, allows two pending batches, and observes a shared cancellation signal before queued mutation and commit. Source removal preserves surviving observations and IDs, retires old authority and records pending maintenance durably. Memory-only identity pruning and `VACUUM` can require substantial RAM; memory/disk failure does not permit plaintext temporary storage or restoring logically removed content.
+
+One macOS credential lease protects the consolidated cached vault across Telegram and archive consumers in cooperating processes. It is acquired lazily at the explicitly bound application root, fail-fast before credential I/O, and retained until all tracked archive workers drain and secrets are cleared. Clearing permanently rejects later credential I/O. Symlinked/nonregular/shared-permission lock files fail closed. Store opening obtains its own lock before entering the vault; existing settings-first leases are reused and the vault never calls back into a store.
+
+An already-running older binary does not honor this lease: users must quit all old copies before first archive use. Archive-key creation lazily upgrades the same item to v2 without changing existing Telegram values; unknown versions fail closed and vault-format downgrades are unsupported. The lease does not defend against malicious same-user software bypassing it. SQLCipher and secure-delete provide no forensic-erasure promise for SSDs, snapshots, backups, exports or remote copies. Final-identity native Keychain prompts/ACLs and plaintext/privacy inspection remain explicit manual release gates.
+
 ## Threats and mitigations
 
 | Threat | Mitigation | Residual risk |

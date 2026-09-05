@@ -31,6 +31,8 @@ pub(crate) enum LegacyCipherFormat {
 
 #[cfg(any(target_os = "macos", test))]
 mod vault;
+#[cfg(any(target_os = "macos", test))]
+mod vault_lock;
 #[cfg(test)]
 use vault::{SecretVault, VAULT_MAGIC, decode_secret_vault, encode_secret_vault};
 #[cfg(target_os = "macos")]
@@ -229,29 +231,44 @@ pub fn clear_cached_secrets() {
 #[cfg(not(target_os = "macos"))]
 pub fn clear_cached_secrets() {}
 
+/// Setup binds one explicit application root before settings/Telegram vault I/O.
+/// This function performs no filesystem or credential operations.
+pub(crate) fn bind_application_root(root: std::path::PathBuf) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        MAC_VAULT
+            .get_or_init(VaultCache::application)
+            .bind_root(root)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn load_telegram_api_hash(
     _data_dir: &std::path::Path,
 ) -> Result<Option<Zeroizing<String>>, AppError> {
     MAC_VAULT
-        .get_or_init(VaultCache::default)
+        .get_or_init(VaultCache::application)
         .api_hash(&mut MacVaultIo)
 }
 
 #[cfg(target_os = "macos")]
 pub fn save_telegram_api_hash(_data_dir: &std::path::Path, value: &str) -> Result<(), AppError> {
     MAC_VAULT
-        .get_or_init(VaultCache::default)
+        .get_or_init(VaultCache::application)
         .save_api_hash(&mut MacVaultIo, value)
 }
 
 /// Loaded only when an archive operation first needs its independent key.
 #[cfg(target_os = "macos")]
-#[allow(dead_code)] // The archive service will consume this in a later task.
 pub(crate) fn load_archive_index_key() -> Result<crate::persistence::archive::ArchiveKey, AppError>
 {
     MAC_VAULT
-        .get_or_init(VaultCache::default)
+        .get_or_init(VaultCache::application)
         .archive_key(&mut MacVaultIo)
         .map(crate::persistence::archive::ArchiveKey::new)
 }
@@ -309,7 +326,7 @@ fn load_or_create_named_key(
     _file_name: &str,
 ) -> Result<[u8; KEY_LENGTH], AppError> {
     MAC_VAULT
-        .get_or_init(VaultCache::default)
+        .get_or_init(VaultCache::application)
         .named_key(&mut MacVaultIo, account)
 }
 
@@ -383,6 +400,9 @@ pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "secure_store/vault_lock_tests.rs"]
+pub(crate) mod vault_lock_tests;
 #[cfg(test)]
 #[path = "secure_store/vault_tests.rs"]
 mod vault_tests;

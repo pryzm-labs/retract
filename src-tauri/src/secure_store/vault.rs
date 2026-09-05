@@ -1,6 +1,7 @@
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use super::vault_lock::CredentialLease;
 use super::{KEY_LENGTH, random_bytes};
 use crate::error::AppError;
 
@@ -11,9 +12,31 @@ pub(super) trait VaultIo {
     fn write(&mut self, bytes: &[u8]) -> Result<(), AppError>;
 }
 
-#[derive(Default)]
 pub(super) struct VaultCache {
-    state: Mutex<VaultState>,
+    state: Mutex<CacheState>,
+}
+
+struct CacheState {
+    vault: VaultState,
+    root: Option<PathBuf>,
+    require_lease: bool,
+    lease: Option<CredentialLease>,
+    closed: bool,
+}
+
+#[cfg(test)]
+impl Default for VaultCache {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(CacheState {
+                vault: VaultState::Unloaded,
+                root: None,
+                require_lease: false,
+                lease: None,
+                closed: false,
+            }),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -31,10 +54,53 @@ struct ReadyVault {
 }
 
 impl VaultCache {
-    #[cfg(target_os = "macos")]
+    pub(super) fn application() -> Self {
+        Self {
+            state: Mutex::new(CacheState {
+                vault: VaultState::Unloaded,
+                root: None,
+                require_lease: true,
+                lease: None,
+                closed: false,
+            }),
+        }
+    }
+
+    /// Binding is lexical only; the first credential operation validates files.
+    pub(super) fn bind_root(&self, root: PathBuf) -> Result<(), AppError> {
+        if !root.is_absolute()
+            || root.file_name().is_none()
+            || root.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(AppError::StateUnavailable);
+        }
+        let mut state = self.state.lock().map_err(|_| AppError::StateUnavailable)?;
+        if state.closed {
+            return Err(AppError::StateUnavailable);
+        }
+        if state
+            .root
+            .as_ref()
+            .is_some_and(|existing| existing != &root)
+        {
+            return Err(AppError::StateUnavailable);
+        }
+        state.root = Some(root);
+        Ok(())
+    }
+
     pub(super) fn clear(&self) {
         if let Ok(mut state) = self.state.lock() {
-            *state = VaultState::Unloaded;
+            // Closing is permanent. Drop zeroizing cached values before the
+            // lease, with the mutex excluding late settings/credential access.
+            state.closed = true;
+            state.vault = VaultState::Unloaded;
+            drop(state.lease.take());
         }
     }
 
@@ -114,8 +180,15 @@ impl VaultCache {
         operation: impl FnOnce(&mut ReadyVault, &mut I) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
         let mut state = self.state.lock().map_err(|_| AppError::StateUnavailable)?;
-        if matches!(*state, VaultState::Unloaded) {
-            *state = match load_vault(io) {
+        if state.closed {
+            return Err(AppError::StateUnavailable);
+        }
+        if state.require_lease && state.lease.is_none() {
+            let root = state.root.as_ref().ok_or(AppError::StateUnavailable)?;
+            state.lease = Some(CredentialLease::acquire(root)?);
+        }
+        if matches!(state.vault, VaultState::Unloaded) {
+            state.vault = match load_vault(io) {
                 Ok(ready) => VaultState::Ready(ready),
                 Err(error) => VaultState::Failed(match error {
                     AppError::SecureStore(message) => message,
@@ -123,7 +196,7 @@ impl VaultCache {
                 }),
             };
         }
-        match &mut *state {
+        match &mut state.vault {
             VaultState::Ready(ready) => operation(ready, io),
             VaultState::Failed(message) => Err(AppError::SecureStore(message.clone())),
             VaultState::Unloaded => unreachable!(),

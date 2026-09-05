@@ -42,6 +42,7 @@ impl ArchiveStore {
         fingerprint: &str,
         schema_profile: &VersionedPayload,
     ) -> Result<Option<ImportCheckpoint>, ArchiveError> {
+        model::provenance_bounds(fingerprint, schema_profile)?;
         self.transaction(|tx| {
             check_provenance(&read_source(tx, scope)?, fingerprint, schema_profile)?;
             let Some(run) = load_run(tx, scope)? else {
@@ -56,6 +57,7 @@ impl ArchiveStore {
         &mut self,
         expected: &ImportCheckpoint,
     ) -> Result<ImportSession, ArchiveError> {
+        model::checkpoint_bounds(expected)?;
         self.transaction(|tx| {
             let mut run = load_run(tx, &expected.scope)?.ok_or(ArchiveError::StaleCursor)?;
             self.validate_run(tx, &run)?;

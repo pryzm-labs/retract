@@ -72,7 +72,7 @@ impl ImportSession {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ImportPhase {
     Importing,
     Ready,
@@ -81,7 +81,7 @@ pub(crate) enum ImportPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ImportProgress {
     pub phase: ImportPhase,
     pub committed_items: u64,
@@ -91,7 +91,7 @@ pub(crate) struct ImportProgress {
 
 /// Read-only checkpoint, never a deserializable mutation grant. The revision
 /// changes on every transition, including a retry with no accepted new input.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ImportCheckpoint {
     pub scope: Scope,
     pub fingerprint: String,
@@ -102,7 +102,7 @@ pub(crate) struct ImportCheckpoint {
     pub warnings: Vec<ImportWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ImportWarning {
     pub code: String,
     pub count: u64,
@@ -361,7 +361,38 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-const ENVELOPE_BYTES: usize = 64 * 1024;
+pub(super) const ENVELOPE_BYTES: usize = 64 * 1024;
+
+pub(super) fn registration_bounds(
+    account: &AccountRecord,
+    source: &SourceRecord,
+) -> Result<(), ArchiveError> {
+    if source.warnings.len() > MAX_WARNING_CODES {
+        return Err(ArchiveError::LimitExceeded);
+    }
+    validate_account_envelopes(account)?;
+    encoded_size(&source.schema_profile, ENVELOPE_BYTES)?;
+    encoded_size(&(account, source), MAX_BATCH_BYTES)?;
+    Ok(())
+}
+
+pub(super) fn provenance_bounds(
+    fingerprint: &str,
+    schema: &VersionedPayload,
+) -> Result<(), ArchiveError> {
+    encoded_size(schema, ENVELOPE_BYTES)?;
+    encoded_size(&(fingerprint, schema), MAX_BATCH_BYTES)?;
+    Ok(())
+}
+
+pub(super) fn checkpoint_bounds(checkpoint: &ImportCheckpoint) -> Result<(), ArchiveError> {
+    if checkpoint.warnings.len() > MAX_WARNING_CODES {
+        return Err(ArchiveError::LimitExceeded);
+    }
+    provenance_bounds(&checkpoint.fingerprint, &checkpoint.schema_profile)?;
+    encoded_size(checkpoint, MAX_BATCH_BYTES)?;
+    Ok(())
+}
 
 /// Counts the actual JSON encoding without retaining a serialized buffer and
 /// aborts serialization as soon as the approved byte ceiling is exceeded.

@@ -124,6 +124,7 @@ impl ArchiveStore {
         account: AccountRecord,
         source: SourceRecord,
     ) -> Result<SourceRecord, ArchiveError> {
+        model::registration_bounds(&account, &source)?;
         let validator = self
             .validators
             .get(&account.provider)

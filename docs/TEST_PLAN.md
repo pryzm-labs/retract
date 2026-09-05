@@ -22,6 +22,14 @@ The native `native-macos-package` job in [secure-build.yml](../.github/workflows
 
 An authorized native developer may additionally run `npm run check` to exercise the opt-in bundled TDLib loading smoke test. A separately authorized online `npm audit --audit-level=high` checks current advisories; it is not part of the offline Docker result. Record these outcomes separately, including unexpected network access during live testing.
 
+### Encrypted archive integration
+
+The automated archive gate uses synthetic files and disposable injected keys only. Both macOS packaging workflows run `persistence::archive::` and `secure_store::vault` test filters; these include original codec tests, store/recovery/ingestion/query/removal tests, bounded-worker lifecycle tests, and real-file/process credential-lease tests with injected I/O. No real-Keychain or Telegram test is included in these filters. Normal packaging leaves the optional benchmark feature disabled.
+
+Verify lazy construction, settings-first and archive-first credential access, fail-fast second-process contention without vault I/O, cancelled open/shutdown waiters, rejection after terminal clearing, two pending batches, cancellation while both slots are occupied, exact retry progress, wrong scopes, and surviving-source queries after removal. Use the opt-in [100,000-item benchmark](ARCHIVE_STORAGE.md#opt-in-synthetic-benchmark) once for a relevant implementation revision, recording cumulative OS peak RSS, exact phase DB/WAL lengths, sampled disk highs, elapsed phases and committed progress. It is not part of every test run.
+
+Before enabling an archive importer, an authorized native operator must quit all older Retract copies, then verify final-identity Keychain prompts/ACLs, v1-to-v2 secret preservation, denied/locked Keychain behavior, competing app/profile ownership and complete shutdown drain. Verify that database/WAL/journal/temporary files and diagnostic logs contain no plaintext canaries, and that memory/disk-pressure compaction failures leave removal durable and maintenance visibly pending. Vault downgrades and forensic-erasure claims are unsupported. Record these manual results separately from synthetic CI and rerun the Apple-silicon test/package job on the final reviewed commit.
+
 ### Telegram provider-refactor characterization
 
 The full Docker gate includes frozen v1 readers/native behavior and current v2 lifecycle tests. For focused synthetic iteration:
