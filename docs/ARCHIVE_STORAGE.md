@@ -62,9 +62,7 @@ Linux checks run offline and non-root in the existing Docker build on both arm64
 
 The initial dependency gate passed on 2026-09-05 in [Secure build run 33979891484](https://github.com/pryzm-labs/retract/actions/runs/33979891484), at commit `cdcc083e8c604fba58b13ecb85e883276e3ec40a`. Both Linux architectures passed their checks; Apple silicon passed all 12 codec tests and the unsigned app's bundle, signature, architecture, checksum and runtime-dependency validation. This verifies the native dependency foundation, not archive functionality or real Keychain prompt behavior. The final integrated archive implementation must run the gates again.
 
-The repository and recovery-preservation changes were independently reviewed through `6616087`. At that revision, Docker arm64 passed 45 focused archive tests, formatting and strict Clippy. These synthetic tests include rejected WAL/hot-journal byte preservation, supported crash recovery, private staging, partial-copy failure and retained-account validation. Native verification of these later changes remains part of the final integration gate.
-
-Import and query changes were independently reviewed through `a4ca66a`. The full Docker arm64 gate passed 272 application tests plus the frontend/domain suites, formatting, strict Clippy and bundle/public-metadata checks. A separately executed 100,000-item synchronous ingestion fixture demonstrated bounded batch processing; it does not replace the pending full-worker import/query/removal benchmark or final native verification.
+The integrated synthetic suites cover rejected WAL/hot-journal byte preservation, supported crash recovery, private staging, partial-copy failure, retained-account validation, bounded imports and queries, source removal, process contention, cancellation and terminal shutdown. The same-worker resource benchmark below is separate from the ordinary suite. See [the test plan](TEST_PLAN.md) for final automated and manual acceptance gates.
 
 ## Opt-in synthetic benchmark
 
@@ -78,17 +76,17 @@ The example accepts only an exclusively owned, empty, canonical private disposab
 
 Reported Linux `VmHWM` is the OS's cumulative whole-process peak RSS, not a separate peak for each phase. Exact quiescent phase DB/WAL lengths are reported separately from 10 ms sampled disk high values; sampling can miss short-lived peaks. The measured process includes the worker, runtime, bounded input/page buffers and sampler. This synthetic workload does not establish resource usage for maximum-size records or the million-item/two-GiB source caps.
 
-The pre-rework task-7 Linux arm64 Docker run on 2026-09-06 used the unoptimized dev profile with debug info disabled. It committed 100,000 items / 85,701,212 encoded input bytes in 101.889 s (202 batches), verified all records and 1,000 search hits in 3.032 s, and removed 50,000 items with 50,000 survivors in 23.225 s. Maintenance completed and all survivors plus 500 surviving search hits were rechecked. Worker admission and request-bound logic were subsequently reimplemented from failing tests; these measurements remain historical evidence until the controller runs the final benchmark after review.
+The Linux arm64 Docker run at reviewed code commit `ac97082f48a5f61980d192ae208684dce647aff6` used the unoptimized dev profile with debug info disabled. It committed 100,000 items / 85,701,212 encoded input bytes in 102.571 s (202 batches), verified all records and 1,000 search hits in 3.036 s, and removed 50,000 items with 50,000 survivors in 22.867 s. Maintenance completed and all survivors plus 500 surviving search hits were rechecked. This run followed the worker/lifecycle rework and independently reviewed shutdown fixes; it replaces the earlier preliminary measurements.
 
 | Measurement | Observed bytes |
 | --- | ---: |
-| Cumulative OS peak RSS after import | 67,047,424 |
-| Cumulative OS peak RSS after query | 67,252,224 |
-| Cumulative OS peak RSS after removal / final | 227,934,208 |
+| Cumulative OS peak RSS after import | 66,908,160 |
+| Cumulative OS peak RSS after query | 67,043,328 |
+| Cumulative OS peak RSS after removal / final | 227,872,768 |
 | Exact DB after import | 314,785,792 |
 | Exact DB after removal / shutdown | 149,889,024 |
 | Exact WAL at phase boundaries | 0 |
 | Sampled DB high | 314,785,792 |
 | Sampled total disk high, including rollback journal | 498,715,848 |
 
-This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The benchmark was run once and is not part of standard packaging or recurring gates. Native/manual verification remains separate.
+This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The final benchmark was run once after review, following one preliminary run before rework; it is not part of standard packaging or recurring gates. Native/manual verification remains separate.
