@@ -216,6 +216,45 @@ fn wrong_key_unsupported_version_binding_and_corrupt_files_are_preserved() {
 }
 
 #[test]
+fn self_consistent_older_development_schema_is_rejected_without_mutation() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    drop(fixture.open());
+    let db = open_keyed(&fixture.path, &key(), false).unwrap();
+    db.execute_batch("DROP TABLE import_batch_receipts")
+        .unwrap();
+    let mut digest = Sha256::new();
+    {
+        let mut query = db.prepare("SELECT type, name, tbl_name, coalesce(sql, '') FROM sqlite_schema ORDER BY type, name").unwrap();
+        let mut rows = query.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for column in 0..4 {
+                let value: String = row.get(column).unwrap();
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
+    }
+    let hash: String = digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    db.execute("UPDATE schema_migrations SET schema_hash=?", [hash])
+        .unwrap();
+    drop(db);
+    let before = super::test_support::snapshot_recovery_files(&fixture.path);
+    assert!(matches!(
+        ArchiveStore::open(fixture.path.clone(), key(), validators()),
+        Err(ArchiveError::UnsupportedSchema)
+    ));
+    assert_eq!(
+        super::test_support::snapshot_recovery_files(&fixture.path),
+        before
+    );
+}
+
+#[test]
 fn existing_empty_or_unrelated_keyed_files_are_not_initialized() {
     let fixture = Fixture::new();
     fs::write(&fixture.path, []).unwrap();

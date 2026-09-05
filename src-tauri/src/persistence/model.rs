@@ -24,6 +24,12 @@ impl TryFrom<String> for ProviderValidationPolicyKey {
     }
 }
 
+impl ProviderValidationPolicyKey {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VerifiedNativeAccountIdentity(String);
 
@@ -67,6 +73,30 @@ pub trait ProviderPayloadValidator: Send + Sync {
     ) -> Result<(), AppError>;
 
     fn validate_resource(&self, resource: &ProviderResourceRef) -> Result<(), AppError>;
+
+    /// Archive ingestion requires explicit adapter support for every nested
+    /// metadata/avatar/attachment envelope, in addition to neutral validation.
+    /// Existing foundation-store paths deliberately do not invoke these hooks.
+    fn validate_archive_conversation(
+        &self,
+        _record: &retract_domain::ConversationRecord,
+    ) -> Result<(), AppError> {
+        Err(invalid_state("archive record validator is required"))
+    }
+
+    fn validate_archive_actor(
+        &self,
+        _record: &retract_domain::ActorRecord,
+    ) -> Result<(), AppError> {
+        Err(invalid_state("archive record validator is required"))
+    }
+
+    fn validate_archive_content(
+        &self,
+        _record: &retract_domain::ContentRecord,
+    ) -> Result<(), AppError> {
+        Err(invalid_state("archive record validator is required"))
+    }
 
     fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError>;
 

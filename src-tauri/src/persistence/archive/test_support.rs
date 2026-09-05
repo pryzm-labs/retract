@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 use retract_domain::{
-    AccountRecord, ProviderKey, ProviderResourceRef, RemediationPlan, SourceRecord,
+    AccountRecord, ActorRecord, ContentRecord, ConversationRecord, ProviderKey,
+    ProviderResourceRef, RemediationPlan, ResourceKind, SourceRecord,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -13,6 +14,7 @@ use crate::{
     },
 };
 
+use super::super::model::ImportBatch;
 use super::{ArchiveKey, ArchiveStore};
 
 pub(in crate::persistence::archive) struct Fixture {
@@ -159,7 +161,7 @@ fn invalid() -> AppError {
 
 impl ProviderPayloadValidator for SyntheticValidator {
     fn validation_policy_key(&self) -> ProviderValidationPolicyKey {
-        "synthetic-archive-v1".to_owned().try_into().unwrap()
+        "synthetic-archive-v2".to_owned().try_into().unwrap()
     }
 
     fn validate_account(
@@ -217,4 +219,178 @@ impl ProviderPayloadValidator for SyntheticValidator {
     fn validate_recipe(&self, _: &RemediationPlan) -> Result<(), AppError> {
         Err(invalid())
     }
+
+    fn validate_archive_actor(&self, record: &retract_domain::ActorRecord) -> Result<(), AppError> {
+        self.validate_resource(&record.resource)?;
+        validate_metadata(record.avatar.as_ref())
+    }
+
+    fn validate_archive_conversation(
+        &self,
+        record: &retract_domain::ConversationRecord,
+    ) -> Result<(), AppError> {
+        self.validate_resource(&record.resource)?;
+        validate_metadata(record.provider_metadata.as_ref())?;
+        for actor in &record.participants {
+            self.validate_archive_actor(actor)?;
+        }
+        Ok(())
+    }
+
+    fn validate_archive_content(
+        &self,
+        record: &retract_domain::ContentRecord,
+    ) -> Result<(), AppError> {
+        self.validate_resource(&record.resource)?;
+        validate_metadata(record.provider_metadata.as_ref())?;
+        for attachment in &record.attachments {
+            validate_metadata(Some(&attachment.locator))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_metadata(envelope: Option<&retract_domain::VersionedPayload>) -> Result<(), AppError> {
+    if let Some(envelope) = envelope {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Metadata {
+            note: String,
+        }
+        if envelope.schema != "synthetic.metadata" || envelope.version != 1 {
+            return Err(invalid());
+        }
+        let metadata: Metadata =
+            serde_json::from_value(envelope.payload.clone()).map_err(|_| invalid())?;
+        let _ = metadata.note;
+    }
+    Ok(())
+}
+
+pub(in crate::persistence::archive) fn batch(native: &str, text: &str) -> ImportBatch {
+    let scope = source().scope();
+    let mut actor_ref = resource("author");
+    actor_ref.resource_kind = ResourceKind::Actor;
+    let mut conversation_ref = resource("room");
+    conversation_ref.resource_kind = ResourceKind::Conversation;
+    let actor: ActorRecord = serde_json::from_value(json!({
+        "id": actor_ref.resource_id().unwrap(), "scope": scope, "resource": actor_ref,
+        "displayName": "Synthetic actor", "username": null, "avatar": null,
+        "evidence": "archive", "observedAt": "2026-09-05T00:00:00Z"
+    }))
+    .unwrap();
+    let conversation: ConversationRecord = serde_json::from_value(json!({
+        "id": conversation_ref.resource_id().unwrap(), "scope": scope, "resource": conversation_ref,
+        "kind": "group", "title": "Synthetic room", "parentId": null, "participantCount": 1,
+        "participants": [], "evidence": "archive", "observedAt": "2026-09-05T00:00:00Z", "providerMetadata": null
+    })).unwrap();
+    let content_ref = resource(native);
+    let content: ContentRecord = serde_json::from_value(json!({
+        "id": content_ref.resource_id().unwrap(), "scope": scope, "resource": content_ref,
+        "conversationId": conversation.id, "authorId": actor.id,
+        "timestamp": "2026-09-05T00:00:00Z", "editedAt": null, "kind": "text",
+        "searchableText": text, "attachments": [], "replyTo": null, "threadParent": null,
+        "externalLocation": "unavailable", "evidence": "archive", "observedAt": "2026-09-05T00:00:00Z",
+        "privacyFindings": [], "detectorVersion": null, "providerMetadata": null
+    })).unwrap();
+    ImportBatch {
+        actors: vec![actor],
+        conversations: vec![conversation],
+        contents: vec![content],
+    }
+}
+
+pub(in crate::persistence::archive) fn registered(fixture: &Fixture) -> ArchiveStore {
+    let store = fixture.open();
+    store.register_source(account(), source()).unwrap();
+    store
+}
+
+pub(in crate::persistence::archive) fn stored_texts(store: &ArchiveStore) -> Vec<String> {
+    store
+        .transaction(|tx| {
+            Ok(tx
+                .prepare("SELECT searchable_text FROM content_observations ORDER BY resource_id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap())
+        })
+        .unwrap()
+}
+
+pub(in crate::persistence::archive) fn checkpoint(
+    store: &ArchiveStore,
+) -> super::super::model::ImportCheckpoint {
+    store
+        .import_status(
+            &source().scope(),
+            source().archive_fingerprint.as_deref().unwrap(),
+            &source().schema_profile,
+        )
+        .unwrap()
+        .unwrap()
+}
+
+pub(in crate::persistence::archive) fn sql_snapshot(
+    store: &ArchiveStore,
+) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    store
+        .transaction(|tx| {
+            Ok([
+                "resource_identities",
+                "conversation_observations",
+                "actor_observations",
+                "content_observations",
+                "attachments",
+                "privacy_findings",
+                "import_runs",
+                "import_batch_receipts",
+                "import_warnings",
+            ]
+            .into_iter()
+            .map(|table| {
+                let mut query = tx
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                    .unwrap();
+                let columns = query.column_count();
+                query
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            })
+            .collect())
+        })
+        .unwrap()
+}
+
+pub(in crate::persistence::archive) fn fts_count(store: &ArchiveStore, query: &str) -> i64 {
+    store
+        .transaction(|tx| {
+            Ok(tx
+                .query_row(
+                    "SELECT count(*) FROM content_fts WHERE content_fts MATCH ?",
+                    [query],
+                    |row| row.get(0),
+                )
+                .unwrap())
+        })
+        .unwrap()
+}
+
+pub(in crate::persistence::archive) fn envelope(note: String) -> retract_domain::VersionedPayload {
+    serde_json::from_value(
+        json!({"schema": "synthetic.metadata", "version": 1, "payload": {"note": note}}),
+    )
+    .unwrap()
+}
+
+pub(in crate::persistence::archive) fn attachment(name: &str) -> retract_domain::AttachmentRecord {
+    serde_json::from_value(json!({"kind": "document", "safeDisplayName": name, "sizeBytes": 5, "mimeType": "application/octet-stream", "locator": envelope("inert".into())})).unwrap()
 }

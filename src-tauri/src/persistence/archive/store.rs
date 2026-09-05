@@ -25,7 +25,10 @@ pub(crate) struct ArchiveStore {
     connection: Mutex<Connection>,
     pub(super) key: ArchiveKey,
     pub(super) path: PathBuf,
-    validators: BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>>,
+    pub(super) validators: BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>>,
+    pub(super) import_limits: model::ImportLimits,
+    #[cfg(test)]
+    pub(super) before_commit: Option<Box<dyn Fn() + Send + Sync>>,
     _process_lock: ProcessLock,
 }
 
@@ -79,7 +82,8 @@ impl ArchiveStore {
         if !is_new {
             preflight::validate_existing(&path, &key, |connection| {
                 schema::validate(connection)?;
-                validate_registrations(connection, &validators)
+                validate_registrations(connection, &validators)?;
+                super::ingest_state::validate_runs(connection, &validators)
             })?;
         }
         let mut connection = open_keyed(&path, &key, false)?;
@@ -91,11 +95,18 @@ impl ArchiveStore {
         }
         schema::validate(&connection)?;
         validate_registrations(&connection, &validators)?;
+        super::ingest_state::validate_runs(&connection, &validators)?;
+        // Interrupted marking is the first mutation of an accepted original.
+        // Staged preflight, schema and every registration/run must pass first.
+        super::ingest_state::interrupt_runs(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             key,
             path,
             validators,
+            import_limits: model::ImportLimits::default(),
+            #[cfg(test)]
+            before_commit: None,
             _process_lock: process_lock,
         })
     }
@@ -172,6 +183,14 @@ impl ArchiveStore {
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, ArchiveError>,
     ) -> Result<T, ArchiveError> {
+        self.transaction_checked(operation, || Ok(()))
+    }
+
+    pub(super) fn transaction_checked<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T, ArchiveError>,
+        before_commit: impl FnOnce() -> Result<(), ArchiveError>,
+    ) -> Result<T, ArchiveError> {
         let mut connection = self
             .connection
             .lock()
@@ -181,6 +200,11 @@ impl ArchiveStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ArchiveError::StorageFailure)?;
         let result = operation(&transaction)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.before_commit {
+            hook();
+        }
+        before_commit()?;
         transaction
             .commit()
             .map_err(|_| ArchiveError::StorageFailure)?;
