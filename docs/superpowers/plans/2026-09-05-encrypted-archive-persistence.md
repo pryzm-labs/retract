@@ -85,7 +85,7 @@ fn keyed_connection_reopens_encrypted_fts_and_rejects_wrong_key() {
 - [ ] Add separate tests for canary-free main/WAL/journal bytes, tampered encrypted pages, plaintext input preservation, missing-codec rejection, unsupported temp-store configuration, and error redaction. Assert bytes of rejected existing files are unchanged.
 - [ ] Bundle the required license notices and provenance as explicitly allowed app contents; update real release-validator fixture tests to accept exactly these new files and still reject unrelated files. Add the focused codec tests to the native macOS job before the existing unsigned packaging step in both workflows. Verify the executable links only expected system/runtime dependencies, not a developer-machine OpenSSL path.
 - [ ] Run focused RED/GREEN then all existing Linux gates on both architectures. Controller runs the feature branch's read-only secure-build workflow only if push/dispatch authority is granted. Record macOS test and packaging outcome against the exact commit. No release workflow dispatch or tag creation.
-- [ ] Commit the dependency gate and its evidence. **Do not proceed to Task 2 or schema work until the required native gate is green.** A missing runner/authority is an explicitly reported gate, not permission to weaken it.
+- [ ] Commit the dependency gate and its evidence. **Do not proceed to Task 3 or any schema work until the required native gate is green.** Task 2's independent vault codec/tests may proceed after Task 1's local implementation review while runner authority is pending; neither actual user vault migration nor schema creation occurs. A missing runner/authority is an explicitly reported gate, not permission to weaken it.
 
 ### Task 2: Add the lazy versioned vault key without prompt regressions
 
@@ -121,6 +121,8 @@ All named helpers here belong solely in the test module; production code owns a 
 - [ ] Test denied/unavailable vault, concurrent requests, unknown v2 input preservation, all existing legacy-key migration paths and a late API-hash edit retaining the content key. Run focused vault tests and the full container gate, then commit. Native prompt/permission behavior remains a named manual gate; no real Keychain test is authorized.
 
 ### Task 3: Add the encrypted scoped schema and store lifecycle
+
+**Prerequisite:** Task 1's Linux arm64/amd64 and native macOS codec/link/package gate has passed on the committed dependency implementation. No schema implementation while that gate is pending.
 
 **Files:**
 - Create: `src-tauri/src/persistence/archive/{model,schema,store,store_tests,test_support}.rs`.
