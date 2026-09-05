@@ -14,15 +14,25 @@ Archive keys are independent 32-byte backend secrets held in zeroizing memory. T
 
 Existing symlinks, nonregular files, plaintext databases, wrong-key databases, and tampered stores are rejected without replacement. Opening a missing path with creation disabled does not create a file. Public errors are fixed content-free codes and do not expose paths, SQL, keys, or native database messages.
 
-SQLCipher protects database and rollback/WAL pages, but encryption alone is not a forensic-erasure guarantee. SSD behavior, filesystem snapshots, backups, and original archive exports can retain data. Import limits, schema migration, indexed queries, source removal, maintenance recovery, and OS-vault integration belong to later reviewed tasks.
+SQLCipher protects database and rollback/WAL pages, but encryption alone is not a forensic-erasure guarantee. SSD behavior, filesystem snapshots, backups, and original archive exports can retain data. Production service activation, source removal, maintenance/migration recovery, and app-wide credential ownership remain integration work; the internal import and query contracts below are implemented and tested with synthetic data.
 
 ## Repository and interrupted-file safety
 
-The internal repository holds an exclusive process lock for its connection lifetime. Account identities are adapter-validated and provider-scoped; source observations remain separate from shared resource identities. New sources are incomplete until a later import finalizer publishes readiness. Registering another source does not implicitly replace stored account metadata.
+The internal repository holds an exclusive process lock for its connection lifetime. Account identities are adapter-validated and provider-scoped; source observations remain separate from shared resource identities. New sources are incomplete until the import finalizer publishes readiness. Registering another source does not implicitly replace stored account metadata.
 
 Existing databases are validated before they are opened for writes. Clean databases use a keyed immutable probe. Databases with recovery files are first copied as ciphertext into a private, temporary staging directory, where recovery and full schema/registration validation occur. Only an accepted original is then opened for normal recovery. An unsupported original and its recovery files remain unchanged; the staged copy never replaces it or becomes a fallback.
 
 Recovery preflight temporarily requires disk space for the database and its recovery files, plus possible recovery growth. Copies use bounded buffers, but this extra disk use is outside the normalized-import quota. A failed or interrupted cleanup can leave private encrypted staging files; they are never used to restore older content. This does not claim protection against a malicious same-user process that bypasses the application lock.
+
+## Internal import and query contracts
+
+Imports use backend-issued sessions and explicitly numbered batches. Observations, FTS entries, findings, counters and replay receipts commit together. Exact replay of an accepted batch returns its original checkpoint without charging it twice. Reopening an interrupted import does not resume it automatically; explicit retry validates its persisted provenance and rotates its mutation authority. Incomplete sources cannot be searched or resolved.
+
+Each batch is limited to 500 records and 4 MiB of normalized encoded input, including embedded participants. A source is limited to one million distinct content items and 2 GiB of cumulative accepted encoded input; database/index overhead is additional. Item text, provider envelopes and attachments have separate bounds. Provider adapters must explicitly validate their normalized records and inert locators; registering an adapter does not automatically enable archive ingestion for it.
+
+Internal queries select one provider/account/source and return that source's complete observation, even if another export contains a newer version of the same resource. Search uses literal FTS phrases rather than raw MATCH operators, with author, content-kind and exclusive date filters. Attachment display names are searchable and use the shared privacy detector; attachment contents and remote locators are not fetched. Queries accept at most 4 KiB of text and return at most 200 records per page; resolution is also limited to 200 references.
+
+Pagination preserves exact timestamp ordering and binds its cursor to scope, filters and the completed import generation. A missing or replaced generation rejects old cursors. These are backend interfaces, not a newly enabled archive search screen or importer.
 
 ## Verification gates
 
@@ -33,3 +43,5 @@ Linux checks run offline and non-root in the existing Docker build on both arm64
 The initial dependency gate passed on 2026-09-05 in [Secure build run 33979891484](https://github.com/pryzm-labs/retract/actions/runs/33979891484), at commit `cdcc083e8c604fba58b13ecb85e883276e3ec40a`. Both Linux architectures passed their checks; Apple silicon passed all 12 codec tests and the unsigned app's bundle, signature, architecture, checksum and runtime-dependency validation. This verifies the native dependency foundation, not archive functionality or real Keychain prompt behavior. The final integrated archive implementation must run the gates again.
 
 The repository and recovery-preservation changes were independently reviewed through `6616087`. At that revision, Docker arm64 passed 45 focused archive tests, formatting and strict Clippy. These synthetic tests include rejected WAL/hot-journal byte preservation, supported crash recovery, private staging, partial-copy failure and retained-account validation. Native verification of these later changes remains part of the final integration gate.
+
+Import and query changes were independently reviewed through `a4ca66a`. The full Docker arm64 gate passed 272 application tests plus the frontend/domain suites, formatting, strict Clippy and bundle/public-metadata checks. A separately executed 100,000-item synchronous ingestion fixture demonstrated bounded batch processing; it does not replace the pending full-worker import/query/removal benchmark or final native verification.
