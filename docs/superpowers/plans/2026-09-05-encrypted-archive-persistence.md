@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-05-encrypted-archive-persistence-design.md`.
 
+## Implementation checkpoint — 2026-09-05
+
+Tasks 1 and 2 have locally committed implementations and independent code reviews: SQLCipher dependency/runtime gate (`aeaceda`) and lazy verified vault key (`18b8dad`). The full Linux arm64 and amd64 Docker gates pass 406 tests at the latter code revision, with formatting, Clippy, production-bundle and repository checks passing.
+
+The stage is **not complete**. The Apple-silicon codec/link/package gate awaits permission to push the feature branch and run Secure build; no schema work may begin before it passes. Tasks 3–7 remain unimplemented. Task 7's app-wide credential lease is also mandatory before production archive activation. Native Keychain prompt/permission testing is a separate manual gate; no real credentials or Telegram data were used in these tests, and no production archive caller or importer is enabled.
+
 ## Global Constraints
 
 - Archive-only SQLCipher storage; never copy live Telegram bodies into the archive database or migrate existing jobs/session files.
