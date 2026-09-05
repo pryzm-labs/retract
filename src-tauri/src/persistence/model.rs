@@ -27,6 +27,13 @@ impl TryFrom<String> for ProviderValidationPolicyKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VerifiedNativeAccountIdentity(String);
 
+impl VerifiedNativeAccountIdentity {
+    /// Canonical adapter-verified identity for internal persistence uniqueness.
+    pub(crate) fn as_canonical_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl TryFrom<String> for VerifiedNativeAccountIdentity {
     type Error = AppError;
 
