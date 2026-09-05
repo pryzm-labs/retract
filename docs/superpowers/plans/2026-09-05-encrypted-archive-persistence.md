@@ -203,16 +203,18 @@ All named helpers here belong solely in the test module; production code owns a 
 ### Task 6: Remove exact local sources and recover cleanup/migrations
 
 **Files:**
-- Create: `src-tauri/src/persistence/archive/{remove,remove_tests,migration_tests}.rs`.
+- Create: `src-tauri/src/persistence/archive/{remove,remove_tests,migration,migration_tests}.rs`. Keep guarded encrypted candidate preparation/validation/switching in migration.rs rather than adding an unrelated lifecycle to store.rs.
 - Modify: `src-tauri/src/persistence/archive/{model,schema,store,mod}.rs`.
 
 **Interfaces:**
 - `RemovalOutcome { removed_items: u64, maintenance_pending: bool }`.
 - Internal `remove_source(&mut self, scope: &Scope) -> Result<RemovalOutcome, ArchiveError>` and `retry_cleanup(&mut self, scope: &Scope) -> Result<RemovalOutcome, ArchiveError>`; backend infrastructure only, not a new native command.
+- Retain a content-free, full-scope removal receipt with the original removed-item count and typed pending/completed maintenance state. A removed source UUID is retired: registration must reject reuse of a UUID named by a removal receipt, including after maintenance completes. Reimport requires a fresh source UUID. This makes scope-only retries stable and prevents delayed cleanup from addressing a different snapshot. Test pending/completed restart outcomes, wrong-scope calls and rejected reuse without altering another source or its receipt.
 
 - [ ] Write RED tests where two sources share resource identities but have different observations. Remove A, reopen, and verify B's full records and IDs plus a neighboring export-file sentinel are unchanged. Inject failure after logical removal but before vacuum and prove search cannot restore A.
 - [ ] Atomically mark removing, invalidate generation, remove scoped observations/FTS/attachments/findings/checkpoints, and retain only shared identities. Persist content-free cleanup work before committing logical removal. Use both core and FTS secure-delete.
 - [ ] Close/drain readers under the store worker lock, checkpoint/truncate WAL and vacuum. Clear pending status only after verified maintenance success. Retry is idempotent and never rereads the original archive or reconstructs deleted content. Missing/already-removed scope returns a truthful stable outcome without changing other sources.
+- [ ] Preserve temp_store=MEMORY during maintenance. Ordinary VACUUM can require substantial temporary memory and disk space; do not switch to plaintext-capable file-based temporary stores to finish it. Keep logical removal committed and maintenance pending on resource/I/O failure, and carry its memory/disk cost into Task 7's same-worker removal benchmark and documentation.
 - [ ] Test a real encrypted candidate migration using a test-only old schema fixture: authenticate old, build and validate encrypted candidate, close/checkpoint, atomic switch. Failure before switch preserves original; ambiguous/interrupted artifacts fail closed; valid active plus obsolete candidate does not resurrect older content. Do not invent a production schema upgrade with no predecessor—ship reusable guarded migration plumbing and fixture-verified behavior.
 - [ ] Test disk-full/permission/commit failures, pending cleanup restart, canary-free artifacts and FTS term erasure through actual SQL inspection. Run focused tests and full gate; commit.
 
@@ -221,6 +223,7 @@ All named helpers here belong solely in the test module; production code owns a 
 **Files:**
 - Create: `src-tauri/src/persistence/archive/{worker,worker_tests,lifecycle_tests}.rs`, `src-tauri/src/secure_store/{vault_lock,vault_lock_tests}.rs`, and `src-tauri/examples/archive_storage_bench.rs`.
 - Modify: `src-tauri/src/persistence/archive/mod.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/secure_store.rs`, `docs/ARCHIVE_STORAGE.md`, `docs/TEST_PLAN.md`, `docs/THREAT_MODEL.md`, `README.md`, `CHANGELOG.md`.
+- Modify narrowly: `src-tauri/src/secure_store/{vault,vault_tests}.rs` so the shared cache owns the credential lease across every cached read/write and releases it only after secrets are cleared. Preserve the tested v1/v2 codec, staged-write/readback and failure-isolation behavior; lease tests use injected I/O.
 - Modify narrowly: `.github/workflows/secure-build.yml` and `.github/workflows/release.yml` to expand the native pre-package test filter from the initial codec-only gate to the complete synthetic archive suite and injected vault/lease tests. Do not run real-Keychain tests or change publication triggers/permissions.
 - Modify narrowly: `src-tauri/Cargo.toml` and add an opt-in benchmark support module/export if needed. Cargo examples are separate crates (`retract_lib`); use an explicit non-default feature with a required-feature example declaration, not public raw-key production constructors or duplicated archive modules. Synthetic fixtures/support must remain absent from ordinary production builds.
 
