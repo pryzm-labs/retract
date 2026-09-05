@@ -14,7 +14,7 @@
 
 Tasks 1 and 2 have locally committed implementations and independent code reviews: SQLCipher dependency/runtime gate (`aeaceda`) and lazy verified vault key (`18b8dad`). The full Linux arm64 and amd64 Docker gates pass 406 tests at the latter code revision, with formatting, Clippy, production-bundle and repository checks passing.
 
-The stage is **not complete**. The Apple-silicon codec/link/package gate awaits permission to push the feature branch and run Secure build; no schema work may begin before it passes. Tasks 3–7 remain unimplemented. Task 7's app-wide credential lease is also mandatory before production archive activation. Native Keychain prompt/permission testing is a separate manual gate; no real credentials or Telegram data were used in these tests, and no production archive caller or importer is enabled.
+The stage is **not complete**. Feature-branch push and Secure build dispatch are now authorized. The first native run compiled successfully but failed six codec fixtures before packaging; a reviewed test-only temporary-root normalization fix is committed at `cdcc083`, with all 12 codec tests passing on both Linux architectures. [Secure build rerun 33979891484](https://github.com/pryzm-labs/retract/actions/runs/33979891484) is pending at that exact fix commit. No schema work may begin before the native codec/link/package gate passes. Tasks 3–7 remain unimplemented. Task 7's app-wide credential lease is also mandatory before production archive activation. Native Keychain prompt/permission testing is a separate manual gate; no real credentials or Telegram data were used in these tests, and no production archive caller or importer is enabled.
 
 ## Global Constraints
 
@@ -134,11 +134,13 @@ All named helpers here belong solely in the test module; production code owns a 
 **Files:**
 - Create: `src-tauri/src/persistence/archive/{model,schema,store,store_tests,test_support}.rs`.
 - Modify: `src-tauri/src/persistence/archive/mod.rs`.
+- Modify narrowly: `src-tauri/src/persistence/model.rs` for a crate-internal borrowed canonical-string accessor on `VerifiedNativeAccountIdentity`; preserve existing validation and avoid public serialization.
 
 **Interfaces:**
 - `ArchiveStore::open(path: PathBuf, key: ArchiveKey, validators: BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>>) -> Result<Self, ArchiveError>`.
 - Internal production variant `ArchiveStore::open_with_key_loader(path, validators, load: impl FnOnce() -> Result<ArchiveKey, ArchiveError>) -> Result<Self, ArchiveError>` acquires the process lock before invoking the loader. The explicit-key entry point delegates through the same lock path. This prevents two app processes from creating competing index keys before either owns the store.
 - `ArchiveStore::register_source(account: AccountRecord, source: SourceRecord) -> Result<SourceRecord, ArchiveError>`; archive-only validated source, stable persisted identity, duplicate native identity with conflicting UUID rejected.
+- Persist the adapter-verified canonical account identity through that internal accessor, never by formatting `Debug` or treating raw provider payload JSON as canonical identity. Cover semantically equal native identities with distinct payload encodings in duplicate-account tests.
 - `ArchiveStore::source(scope: &Scope) -> Result<SourceRecord, ArchiveError>` and internal transactional access used only by adjacent modules.
 - Test support creates complete literal synthetic provider/account/source/locator records, including native IDs `9007199254740992`, `9007199254740993` and `message:part/0007`.
 
@@ -154,12 +156,14 @@ All named helpers here belong solely in the test module; production code owns a 
 **Files:**
 - Create: `src-tauri/src/persistence/archive/{ingest,ingest_tests}.rs`.
 - Modify: `src-tauri/src/persistence/archive/{model,mod,store}.rs` and test support.
+- Modify narrowly: `src-tauri/src/persistence/model.rs` to extend `ProviderPayloadValidator` with adapter-owned normalized conversation, actor and content validation hooks, including nested provider metadata and attachment locator envelopes. Defaults reject archive ingestion for providers that have not implemented the hooks; preserve existing foundation-store validation paths.
 
 **Interfaces:**
 - `ImportBatch { conversations: Vec<ConversationRecord>, actors: Vec<ActorRecord>, contents: Vec<ContentRecord> }`.
 - `ImportSession { id: Uuid, scope: Scope, fingerprint: String, schema_profile: VersionedPayload }` is backend-issued, private mutation authority, not a frontend-deserializable grant.
 - `ImportProgress { phase: ImportPhase, committed_items: u64, committed_bytes: u64 }`; phases `Importing`, `Ready`, `Interrupted`, `Cancelled`, `Failed`.
 - `begin_import(&mut self, scope: &Scope) -> Result<ImportSession, ArchiveError>`; `append_batch(&mut self, session: &ImportSession, batch: ImportBatch) -> Result<ImportProgress, ArchiveError>`; `finish_import`, `cancel_import`, and `retry_import` all require the matching scope/session/fingerprint/schema and return durable progress.
+- Existing payload-envelope checks establish structure, not provider semantics. Ingestion must call the new typed-record adapter hooks as well as neutral validation, without interpreting opaque provider payloads in SQL code. Test rejection by a validator with no archive hook support and rejection of unknown nested metadata/attachment locator versions; synthetic supported adapters own those interpretations and use a matching validation policy key.
 
 - [ ] Write RED synthetic tests proving incomplete sources are unavailable to normal queries, identical replay does not duplicate records, and a failed second batch preserves first-batch content/counters/checkpoint exactly. Use failpoints at database/I/O boundaries in tests only.
 - [ ] Implement shared limits copied from Global Constraints. Count all record types toward batch record size, use bounded encoded-size counting before queue/copy, check text/metadata/attachment limits and checked arithmetic. Source item count counts distinct content observations, while cumulative committed encoded bytes charge each accepted non-replay batch; exact retry replay uses a persisted batch sequence/digest to return the original checkpoint without charging twice.
