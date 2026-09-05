@@ -16,6 +16,18 @@ use crate::persistence::{ProviderPayloadValidator, VerifiedNativeAccountIdentity
 
 use super::ArchiveError;
 
+#[derive(Clone)]
+pub(crate) struct ArchiveSearch {
+    pub scope: Scope,
+    pub text: String,
+    pub kinds: Vec<retract_domain::ContentKind>,
+    pub author: Option<retract_domain::ActorId>,
+    pub before: Option<chrono::DateTime<chrono::Utc>>,
+    pub after: Option<chrono::DateTime<chrono::Utc>>,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct ImportBatch {
     pub conversations: Vec<retract_domain::ConversationRecord>,
@@ -233,7 +245,7 @@ impl ImportBatch {
     }
 }
 
-fn validate_resource(
+pub(super) fn validate_resource(
     resource: &ProviderResourceRef,
     validator: &dyn ProviderPayloadValidator,
 ) -> Result<(), ArchiveError> {

@@ -221,7 +221,7 @@ fn self_consistent_older_development_schema_is_rejected_without_mutation() {
     let fixture = Fixture::new();
     drop(fixture.open());
     let db = open_keyed(&fixture.path, &key(), false).unwrap();
-    db.execute_batch("DROP TABLE import_batch_receipts")
+    db.execute_batch("DROP INDEX content_scope_author_order; DROP INDEX content_scope_kind_order;")
         .unwrap();
     let mut digest = Sha256::new();
     {

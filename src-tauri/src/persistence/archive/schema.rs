@@ -9,7 +9,7 @@ const VERSION: i64 = 1;
 const APPLICATION: &str = "retract.archive-index";
 // Intentional DDL edits require an explicit reviewed fingerprint update.
 const EXPECTED_SCHEMA_HASH: &str =
-    "180bad4ac87c6b682347c94689969cb6aad6179985f781ae13f2482005aaac1f";
+    "4f9beb21d45b587327d82902bbd9a1783c1677bce8093ed5d0700c16706023aa";
 
 const TABLES: &str = "
 CREATE TABLE schema_migrations (
@@ -75,6 +75,8 @@ CREATE TABLE content_observations (
     FOREIGN KEY(provider, account_id, resource_id, resource_kind) REFERENCES resource_identities(provider, account_id, resource_id, kind)
 ) STRICT;
 CREATE INDEX content_scope_order ON content_observations(provider, account_id, source_id, timestamp_seconds, timestamp_nanos, resource_id);
+CREATE INDEX content_scope_author_order ON content_observations(provider, account_id, source_id, author_id, timestamp_seconds, timestamp_nanos, resource_id);
+CREATE INDEX content_scope_kind_order ON content_observations(provider, account_id, source_id, json_extract(record_json, '$.kind'), timestamp_seconds, timestamp_nanos, resource_id);
 CREATE INDEX content_conversation_reference ON content_observations(conversation_id);
 CREATE INDEX content_author_reference ON content_observations(author_id);
 CREATE INDEX content_reply_reference ON content_observations(reply_to_id);
