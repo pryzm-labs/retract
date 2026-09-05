@@ -1,4 +1,8 @@
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::unix::fs::symlink,
+    path::{Path, PathBuf},
+};
 
 use rusqlite::Connection;
 
@@ -8,9 +12,34 @@ use super::{
 };
 
 #[test]
+fn database_fixture_path_resolves_a_symlinked_temporary_root() {
+    let outer = tempfile::tempdir().unwrap();
+    let real_root = outer.path().join("real");
+    let symlinked_root = outer.path().join("alias");
+    fs::create_dir(&real_root).unwrap();
+    symlink(&real_root, &symlinked_root).unwrap();
+
+    let path = database_fixture_path(&symlinked_root, "synthetic.db");
+    let result = open_keyed(&path, &ArchiveKey::new([0x42; 32]), true);
+    assert!(
+        result.is_ok(),
+        "trusted fixture path did not open: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        path.parent().unwrap(),
+        fs::canonicalize(symlinked_root).unwrap()
+    );
+}
+
+fn database_fixture_path(root: &Path, name: &str) -> PathBuf {
+    fs::canonicalize(root).unwrap().join(name)
+}
+
+#[test]
 fn keyed_connection_reopens_encrypted_fts_and_rejects_wrong_key() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("synthetic.db");
+    let path = database_fixture_path(dir.path(), "synthetic.db");
     let key = ArchiveKey::new([0x42; 32]);
     let db = open_keyed(&path, &key, true).expect("SQLCipher gate must open");
     db.execute_batch(
@@ -46,7 +75,7 @@ fn keyed_connection_reopens_encrypted_fts_and_rejects_wrong_key() {
 #[test]
 fn rejected_plaintext_store_is_preserved_byte_for_byte() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("plaintext.db");
+    let path = database_fixture_path(dir.path(), "plaintext.db");
     let plaintext = Connection::open(&path).unwrap();
     plaintext
         .execute_batch("CREATE TABLE visible(value TEXT); INSERT INTO visible VALUES('canary');")
@@ -64,7 +93,7 @@ fn rejected_plaintext_store_is_preserved_byte_for_byte() {
 #[test]
 fn encrypted_database_wal_and_journal_do_not_contain_plaintext_canaries() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("artifacts.db");
+    let path = database_fixture_path(dir.path(), "artifacts.db");
     let db = open_keyed(&path, &ArchiveKey::new([0x42; 32]), true).unwrap();
     db.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -92,7 +121,7 @@ fn encrypted_database_wal_and_journal_do_not_contain_plaintext_canaries() {
 #[test]
 fn tampered_encrypted_page_is_rejected_without_further_mutation() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tampered.db");
+    let path = database_fixture_path(dir.path(), "tampered.db");
     let key = ArchiveKey::new([0x42; 32]);
     let db = open_keyed(&path, &key, true).unwrap();
     db.execute_batch("CREATE TABLE data(value TEXT); INSERT INTO data VALUES('canary');")
@@ -114,7 +143,7 @@ fn tampered_encrypted_page_is_rejected_without_further_mutation() {
 #[test]
 fn wrong_key_rejection_preserves_existing_ciphertext() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("wrong-key.db");
+    let path = database_fixture_path(dir.path(), "wrong-key.db");
     let db = open_keyed(&path, &ArchiveKey::new([0x42; 32]), true).unwrap();
     db.execute_batch("CREATE TABLE data(value TEXT); INSERT INTO data VALUES('canary');")
         .unwrap();
@@ -155,7 +184,7 @@ fn absent_or_unexpected_codec_metadata_is_rejected() {
 #[test]
 fn file_backed_temp_store_configuration_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("temp-store.db");
+    let path = database_fixture_path(dir.path(), "temp-store.db");
     let db = open_keyed(&path, &ArchiveKey::new([0x42; 32]), true).unwrap();
     db.execute_batch("PRAGMA temp_store = FILE").unwrap();
     assert_eq!(
@@ -167,7 +196,7 @@ fn file_backed_temp_store_configuration_is_rejected() {
 #[test]
 fn extension_loading_is_disabled() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("extensions.db");
+    let path = database_fixture_path(dir.path(), "extensions.db");
     let db = open_keyed(&path, &ArchiveKey::new([0x42; 32]), true).unwrap();
     assert!(
         db.query_row("SELECT load_extension('untrusted')", [], |_| Ok(()))
@@ -178,7 +207,7 @@ fn extension_loading_is_disabled() {
 #[test]
 fn missing_noncreating_path_is_rejected_without_creating_a_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("missing.db");
+    let path = database_fixture_path(dir.path(), "missing.db");
     assert_eq!(
         open_keyed(&path, &ArchiveKey::new([0x42; 32]), false).unwrap_err(),
         ArchiveError::InvalidStore
@@ -189,8 +218,8 @@ fn missing_noncreating_path_is_rejected_without_creating_a_file() {
 #[test]
 fn symlink_and_nonregular_paths_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("target.db");
-    let link = dir.path().join("link.db");
+    let target = database_fixture_path(dir.path(), "target.db");
+    let link = database_fixture_path(dir.path(), "link.db");
     fs::write(&target, b"sentinel").unwrap();
     symlink(&target, &link).unwrap();
 
