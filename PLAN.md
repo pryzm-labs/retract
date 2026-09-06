@@ -1,6 +1,6 @@
 # Chat History Cleaner — Product and Engineering Plan
 
-Status: provider foundation and the direct Telegram provider migration were implemented by 2026-09-06. Runtime acceptance is green on Linux `arm64` and `amd64`; independent whole-branch review, native macOS CI, Keychain/LocalAuthentication, VoiceOver, and disposable test-DC gates remain tracked separately. The real Telegram UI uses scoped v2 IPC and authenticated v3 encrypted state through independent query, connection, and reviewed-cleanup owners. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is available.
+Status: provider foundation and the direct Telegram provider migration were implemented by 2026-09-06. Both full Linux `arm64` and `amd64` gates passed on reviewed commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`; independent whole-branch review of `0d799b0..c7f2f5f` found no Critical or Important issues, and its two documentation findings are addressed in a documentation-only closure awaiting scoped re-review. Native macOS CI, Keychain/LocalAuthentication, VoiceOver, and disposable test-DC gates remain tracked separately. The real Telegram UI uses scoped v2 IPC and authenticated v3 encrypted state through independent query, connection, and reviewed-cleanup owners. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is available.
 
 ## 1. Product direction
 
@@ -223,7 +223,7 @@ Telegram native boundary
   └─ LiveGateway → pinned native tdjson library → Telegram
 ```
 
-Pure Telegram recipe, normalization and diagnostic modules translate between the provider lifecycle and native DTOs without owning state. `TelegramQuery` cannot retain cleanup state, mutation authority or the encrypted store. `TelegramCleanup` owns reviewed planning, authorization, durable job transitions and execution once, and registration returns clones of that same owner; raw remediation and raw batch entry points remain unavailable. `FoundationStore` is shared by `Arc`, holds the cooperative profile lock for its full lifetime, and explicitly unlocks when its final owner drops. The frontend receives purpose-built DTOs such as `ChatCapabilityView` and `DeletionPlanView`, not raw TDLib JSON, and the backend independently validates every UI command.
+Pure Telegram recipe, normalization and diagnostic modules translate between the provider lifecycle and native DTOs without owning state. `TelegramQuery` has no direct cleanup/store access or mutation authority: it owns only an `EngineContext` and a `TelegramRead` port. Production shares the `LiveGateway` behind that read port with connection/cleanup components, and that gateway retains the `FoundationStore` used for identity persistence, so a retained query may indirectly extend the store and profile-lock lifetime. It does not own cleanup state or expose store/mutation operations. `TelegramCleanup` owns reviewed planning, authorization, durable job transitions and execution once, and registration returns clones of that same owner; raw remediation and raw batch entry points remain unavailable. `FoundationStore` is shared by `Arc`, holds the cooperative profile lock for its full lifetime, and explicitly unlocks when its final owner drops. The frontend receives purpose-built DTOs such as `ChatCapabilityView` and `DeletionPlanView`, not raw TDLib JSON, and the backend independently validates every UI command.
 
 ### Current core repository layout
 
@@ -312,7 +312,9 @@ Avoid features that create hidden or automatic behavior: silent background delet
 - [x] Place TDLib implementation behind provider-owned session/read/mutation/connection ports and enforce the boundary with controlled-input and real-tree architecture checks.
 - [x] Register an independent read-only `TelegramQuery` and one direct `TelegramCleanup` reviewed-lifecycle owner; remove the production compatibility facade, combined gateway and legacy cleanup service without adding a second executor.
 - [x] Pass the runtime-only Linux `arm64` and `amd64` container gates for the clean migrated source tree. These gates do not establish native macOS, real Keychain/LocalAuthentication, rendered VoiceOver, or live Telegram parity.
-- [ ] Complete independent whole-branch review, publish an authorized branch/PR for native macOS CI, and execute the separately authorized disposable test-DC matrix before destructive release approval.
+- [x] Complete independent whole-branch review of the local migration through `c7f2f5f`; no Critical or Important findings remained. The documentation-only closure for its two Minor findings requires scoped re-review and does not add runtime acceptance beyond that reviewed baseline.
+- [ ] Publish an authorized branch/PR and run native macOS CI on the exact published revision.
+- [ ] Execute the separately authorized disposable test-DC matrix before destructive release approval.
 
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 

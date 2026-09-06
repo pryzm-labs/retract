@@ -180,16 +180,16 @@ assert_eq!(observed.native_mutation_count(), 0);
 
 **Interfaces:** No new runtime interfaces; consume the fully migrated query/connection/cleanup components and Task 2 artifact manifest.
 
-- [ ] Run the final architecture lint and controlled-input tests, all frozen codec/ciphertext comparisons, existing Rust/TypeScript contracts, and full container gates on both architectures:
+- [x] Run the final architecture lint and controlled-input tests, all frozen codec/ciphertext comparisons, existing Rust/TypeScript contracts, and full container gates on both architectures:
 
 ```sh
 docker buildx build --platform linux/arm64 --target checks --output type=cacheonly --progress plain .
 docker buildx build --platform linux/amd64 --target checks --output type=cacheonly --progress plain .
 ```
 
-- [ ] Record exact head, commands, counts, skipped/manual gates and any initial failures. A cached gate only proves its input tree; record when a gate is reused. Do not run the archive corpus benchmark for this non-indexing refactor.
-- [ ] Update docs to reflect direct Telegram provider ownership and explicit foundation lock release, retaining historical evidence and manual live/native limits. Do not mark manual test-DC parity complete.
-- [ ] Commit documentation, obtain whole-branch review of all task commits, and run covering tests for reviewed fixes. Leave the branch ready for the user's push/PR or merge decision; native macOS CI runs when a branch/PR is authorized and published, unless already accessible for the exact final head. Report it pending rather than claiming a local Linux build validates macOS.
+- [x] Record exact head, commands, counts, skipped/manual gates and any initial failures. A cached gate only proves its input tree; record when a gate is reused. Do not run the archive corpus benchmark for this non-indexing refactor.
+- [x] Update docs to reflect direct Telegram provider ownership and explicit foundation lock release, retaining historical evidence and manual live/native limits. Do not mark manual test-DC parity complete.
+- [x] Commit documentation, obtain whole-branch review of all task commits, and run covering tests for reviewed fixes. Leave the branch ready for the user's push/PR or merge decision; native macOS CI runs when a branch/PR is authorized and published, unless already accessible for the exact final head. Report it pending rather than claiming a local Linux build validates macOS.
 
 ## Progress
 
@@ -198,6 +198,6 @@ docker buildx build --platform linux/amd64 --target checks --output type=cacheon
 - [x] Task 3: Native port boundaries.
 - [x] Task 4: Independent query and connection.
 - [x] Task 5: Reviewed cleanup cutover.
-- [ ] Task 6: Full acceptance and documentation — both runtime-only Linux architecture gates and documentation are complete; independent whole-branch review and any covering checks for its findings remain pending.
+- [x] Task 6: Full acceptance and documentation — implementation, full Linux acceptance, documentation and independent whole-branch review are complete; its documentation-only finding closure is recorded separately and awaits scoped re-review.
 
-Acceptance source: clean runtime commit `3a78bd207d89be3d3bc93b8cfac6930ce04017e6`. Linux `arm64` and `amd64` checks passed with 329 backend tests (one existing opt-in archive corpus test ignored), 158 frontend tests, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled provider-boundary tests plus the real-tree lint, production-bundle/public-repository checks, formatting and strict Clippy. The `arm64` rerun reused BuildKit cache for that exact input; the `amd64` gate executed project checks for the same input. The archive corpus benchmark was not run. Native macOS CI, real Keychain/LocalAuthentication, VoiceOver/rendered viewport checks and disposable Telegram test-DC parity are pending and are not implied by the Linux result.
+Reviewed and tested acceptance source: commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`. Full Linux `arm64` and `amd64` checks copied that exact committed tree and executed the project checks, passing 329 backend tests (one existing opt-in archive corpus test ignored), 158 frontend tests, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled provider-boundary tests plus the real-tree lint, production-bundle/public-repository checks, formatting and strict Clippy. BuildKit results were `yafbi07vc0a8p6gv3hjryumwt` (`arm64`) and `ado6le3q5vvow7wk1pojcyq9u` (`amd64`). Independent whole-branch review covered `0d799b0..c7f2f5f`, found no Critical or Important issues, and requested this documentation-only closure for two Minor findings. The earlier clean runtime commit `3a78bd207d89be3d3bc93b8cfac6930ce04017e6` remains historical acceptance evidence. The archive corpus benchmark was not run. Native macOS CI, real Keychain/LocalAuthentication, VoiceOver/rendered viewport checks and disposable Telegram test-DC parity are pending and are not implied by the Linux result. The later documentation-only closure receives a focused public-repository check and controller-owned scoped re-review; no future check or review is claimed here.
