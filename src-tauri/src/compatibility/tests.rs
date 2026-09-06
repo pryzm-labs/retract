@@ -14,7 +14,8 @@ fn compatibility_v2_content_supplies_the_exact_scoped_actor_for_sender_review() 
     let message: cleaner_domain::MessageSnapshot =
         serde_json::from_value(fixture["searchResponse"]["messages"][0].clone()).unwrap();
     let scope = super::fixtures::context("context").scope;
-    let record = crate::providers::telegram::compat::normalize_content(&scope, &message).unwrap();
+    let record =
+        crate::providers::telegram::normalize::normalize_content(&scope, &message).unwrap();
     let metadata = record.provider_metadata.unwrap().payload;
     let actor = &metadata["actor"];
     assert_eq!(actor["scope"], serde_json::to_value(&scope).unwrap());
@@ -507,7 +508,7 @@ fn final_review_own_message_intents_respect_known_kind_and_membership() {
         ] {
             let chat = gateway.chat_by_id(chat_id).await.unwrap().unwrap();
             let record =
-                crate::providers::telegram::compat::normalize_conversation(&active.scope, &chat)
+                crate::providers::telegram::normalize::normalize_conversation(&active.scope, &chat)
                     .unwrap();
             let reference = retract_domain::ScopedResourceRef {
                 scope: active.scope.clone(),
@@ -553,9 +554,9 @@ fn compatibility_v2_blocked_foreign_history_does_not_lock_settings() {
         let (first, _) = telegram(directory.path(), active.clone()).await;
         let plan = first.prepare(&active, vec![fixture()["messages"][0]["ref"].clone()]);
         let native =
-            crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(&plan)
+            crate::providers::telegram::recipe::TelegramExecutionRecipe::validate_envelope(&plan)
                 .unwrap();
-        let job = crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
+        let job = crate::providers::telegram::normalize::normalize_job(
             &active.scope,
             &native,
             &crate::model::JobRecord::new(&native),

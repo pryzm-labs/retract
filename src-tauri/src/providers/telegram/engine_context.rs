@@ -5,11 +5,10 @@ use retract_domain::{ActiveContext, RemediationPlan, Scope};
 use std::sync::{Arc, Mutex};
 
 use super::{
-    compat::{
-        TelegramCompatibilityProvider, TelegramExecutionRecipe, invalid_recipe,
-        legacy_diagnostic_code,
-    },
+    diagnostics::{invalid_recipe, legacy_diagnostic_code},
     identity::{SessionBinding, VerifiedTelegramIdentity},
+    normalize::normalize_job,
+    recipe::{TelegramExecutionRecipe, bind_plan},
 };
 #[cfg(test)]
 use crate::secure_store::SecureJobStore;
@@ -74,7 +73,7 @@ impl EngineContext {
         self.binding
             .validate(&self.active)
             .map_err(|_| stale_context())?;
-        TelegramCompatibilityProvider::bind_plan(&self.active.scope, plan)
+        bind_plan(&self.active.scope, plan)
     }
     pub async fn authenticate(&self, reason: &str, live: bool) -> Result<(), AppError> {
         #[cfg(test)]
@@ -237,8 +236,7 @@ impl TelegramStateRepository for FoundationTelegramRepository {
         let mut plans = Vec::new();
         for legacy in &state.plans {
             let mut rebound = legacy.clone();
-            let envelope =
-                TelegramCompatibilityProvider::bind_plan(self.shared.scope(), &mut rebound)?;
+            let envelope = bind_plan(self.shared.scope(), &mut rebound)?;
             if rebound != *legacy {
                 return Err(invalid_recipe());
             }
@@ -258,12 +256,7 @@ impl TelegramStateRepository for FoundationTelegramRepository {
                 .ok_or_else(invalid_recipe)?;
             let previous = expected.1.iter().find(|j| j.id == job.id);
             let authorized = previous.is_none_or(|j| j.started_authorized);
-            let normalized = TelegramCompatibilityProvider::normalize_job(
-                self.shared.scope(),
-                legacy,
-                job,
-                authorized,
-            )?;
+            let normalized = normalize_job(self.shared.scope(), legacy, job, authorized)?;
             if let Some(previous) = previous
                 && (normalized.next_batch < previous.next_batch
                     || normalized.counters.deleted < previous.counters.deleted

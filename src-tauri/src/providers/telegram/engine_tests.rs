@@ -13,10 +13,12 @@ use crate::{
 };
 
 use super::{
-    compat::{TelegramCompatibilityProvider, TelegramExecutionRecipe},
+    compat::TelegramCompatibilityProvider,
     engine_context::{EngineContext, FoundationTelegramRepository, TelegramStateRepository},
     identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
     locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
+    normalize::{conversation_ref, normalize_job},
+    recipe::{TelegramExecutionRecipe, bind_plan},
 };
 
 struct ObservedGateway {
@@ -257,8 +259,7 @@ fn leave_intent_catalog_describes_ordered_cleanup_matching_the_reviewed_plan() {
                 f.service.clone(),
             )
             .unwrap();
-            let target =
-                super::compat::conversation_ref(&f.context.active().scope, chat_id).unwrap();
+            let target = conversation_ref(&f.context.active().scope, chat_id).unwrap();
             let intents = provider
                 .intents(f.context.active(), vec![target.clone()])
                 .await
@@ -336,7 +337,7 @@ fn leave_intent_catalog_marks_empty_cleanup_conditional_and_unavailable_leave_di
             f.service.clone(),
         )
         .unwrap();
-        let target = super::compat::conversation_ref(&f.context.active().scope, -1004).unwrap();
+        let target = conversation_ref(&f.context.active().scope, -1004).unwrap();
         let intents = provider
             .intents(f.context.active(), vec![target.clone()])
             .await
@@ -367,7 +368,7 @@ fn leave_intent_catalog_marks_empty_cleanup_conditional_and_unavailable_leave_di
                 ActionKind::RemoveForCurrentAccount
             ]
         );
-        let owner = super::compat::conversation_ref(&f.context.active().scope, -1001).unwrap();
+        let owner = conversation_ref(&f.context.active().scope, -1001).unwrap();
         let intents = provider
             .intents(f.context.active(), vec![owner])
             .await
@@ -419,7 +420,7 @@ fn validated_store_rejects_skipping_unprocessed_batches_and_foreign_dirty_target
         let f = fixture();
         let view = selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
             &crate::model::JobRecord::new(&legacy),
@@ -436,7 +437,7 @@ fn validated_store_rejects_skipping_unprocessed_batches_and_foreign_dirty_target
                 .is_err()
         );
         job.next_batch = 0;
-        job.dirty_refs = vec![super::compat::conversation_ref(&job.scope, -999).unwrap()];
+        job.dirty_refs = vec![conversation_ref(&job.scope, -999).unwrap()];
         assert!(
             f.store
                 .transaction(|state| {
@@ -478,7 +479,7 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
             })
             .unwrap();
         assert_eq!(photo.kind, retract_domain::ContentKind::Image);
-        let metadata: super::compat::TelegramContentMetadata =
+        let metadata: super::normalize::TelegramContentMetadata =
             serde_json::from_value(photo.provider_metadata.as_ref().unwrap().payload.clone())
                 .unwrap();
         assert_eq!(metadata.original_kind, cleaner_domain::ContentKind::Photo);
@@ -538,7 +539,7 @@ fn scoped_plan_installs_one_fingerprint_before_review_and_persistence() {
         let mut foreign = legacy;
         let mut other_scope = plan.scope.clone();
         other_scope.source_id = Uuid::new_v4().try_into().unwrap();
-        let other = TelegramCompatibilityProvider::bind_plan(&other_scope, &mut foreign).unwrap();
+        let other = bind_plan(&other_scope, &mut foreign).unwrap();
         assert_ne!(other.fingerprint, plan.fingerprint);
         let mut changed = plan.clone();
         changed.steps[0].descriptor.effect = ExpectedEffect::RemovedForCurrentAccountOnly;
@@ -604,8 +605,7 @@ fn compound_cleanup_maps_each_ordered_effect_and_critical_destruction_separately
         let f = fixture();
         let chat = f.gateway.chat_by_id(-1002).await.unwrap().unwrap();
         let mut legacy = DeletionPlan::leave_chat(&chat, vec![]).unwrap();
-        let plan = TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy)
-            .unwrap();
+        let plan = bind_plan(&f.context.active().scope, &mut legacy).unwrap();
         assert_eq!(
             plan.steps
                 .iter()
@@ -620,9 +620,7 @@ fn compound_cleanup_maps_each_ordered_effect_and_critical_destruction_separately
         assert_eq!(plan.restart_policy, RestartPolicy::RequiresNewReview);
         let chat = f.gateway.chat_by_id(-1001).await.unwrap().unwrap();
         let mut destroy = DeletionPlan::chat_wide(PlanOperation::DeleteGroup, &chat).unwrap();
-        let plan =
-            TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut destroy)
-                .unwrap();
+        let plan = bind_plan(&f.context.active().scope, &mut destroy).unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(
             plan.steps[0].descriptor.effect,
@@ -645,17 +643,11 @@ fn normalized_counts_preserve_unavailable_selections_outside_eligible_total() {
         protected.deletion_reach = DeletionReach::SelfOnly;
         messages.push(protected);
         let mut legacy = DeletionPlan::selected_messages(messages).unwrap();
-        TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy).unwrap();
+        bind_plan(&f.context.active().scope, &mut legacy).unwrap();
         let mut job = crate::model::JobRecord::new(&legacy);
         job.deleted = 1;
         job.status = crate::model::JobStatus::Completed;
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &job,
-            true,
-        )
-        .unwrap();
+        let normalized = normalize_job(&f.context.active().scope, &legacy, &job, true).unwrap();
         assert_eq!(normalized.counters.selected, 2);
         assert_eq!(normalized.counters.eligible, 1);
         assert_eq!(normalized.counters.deleted, 1);
@@ -971,7 +963,7 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let f = fixture();
         let plan = selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let queued = TelegramCompatibilityProvider::normalize_job(
+        let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
             &crate::model::JobRecord::new(&legacy),
@@ -1002,7 +994,7 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let queued = TelegramCompatibilityProvider::normalize_job(
+        let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
             &crate::model::JobRecord::new(&legacy),
@@ -1100,19 +1092,13 @@ fn uncertain_results_do_not_reclassify_earlier_confirmed_failures() {
                 .unwrap(),
         )
         .unwrap();
-        TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy).unwrap();
+        bind_plan(&f.context.active().scope, &mut legacy).unwrap();
         let mut job = crate::model::JobRecord::new(&legacy);
         job.status = crate::model::JobStatus::Partial;
         job.failed = 2;
         job.uncertain = 1;
         job.error_codes.push("ambiguous_outcome".into());
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &job,
-            true,
-        )
-        .unwrap();
+        let normalized = normalize_job(&f.context.active().scope, &legacy, &job, true).unwrap();
         assert_eq!(normalized.counters.failed, 2);
         assert_eq!(normalized.counters.uncertain, 1);
     });
@@ -1261,7 +1247,7 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
             let f = fixture();
             selection(&f).await;
             let legacy = f.repository.load().unwrap().plans.remove(0);
-            let mut queued = TelegramCompatibilityProvider::normalize_job(
+            let mut queued = normalize_job(
                 &f.context.active().scope,
                 &legacy,
                 &crate::model::JobRecord::new(&legacy),
@@ -1337,7 +1323,7 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
             &crate::model::JobRecord::new(&legacy),
@@ -1395,13 +1381,8 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
             "not_found".into(),
             "private provider text".into(),
         ];
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &legacy_job,
-            true,
-        )
-        .unwrap();
+        let normalized =
+            normalize_job(&f.context.active().scope, &legacy, &legacy_job, true).unwrap();
         assert_eq!(
             normalized
                 .diagnostics
@@ -1435,7 +1416,7 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
                 selection(&f).await;
             }
             let legacy = f.repository.load().unwrap().plans.remove(0);
-            let job = TelegramCompatibilityProvider::normalize_job(
+            let job = normalize_job(
                 &f.context.active().scope,
                 &legacy,
                 &crate::model::JobRecord::new(&legacy),
@@ -1496,7 +1477,7 @@ fn switching_account_does_not_label_potentially_inflight_work_safely_blocked() {
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
             &crate::model::JobRecord::new(&legacy),

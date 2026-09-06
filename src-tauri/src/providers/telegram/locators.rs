@@ -409,8 +409,8 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
     }
 
     fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError> {
-        if plan.recipe.schema == super::compat::EXECUTION_SCHEMA {
-            return super::compat::TelegramExecutionRecipe::validate_envelope(plan).map(|_| ());
+        if plan.recipe.schema == super::recipe::EXECUTION_SCHEMA {
+            return super::recipe::TelegramExecutionRecipe::validate_envelope(plan).map(|_| ());
         }
         if plan.recipe.schema != TELEGRAM_RECIPE_SCHEMA
             || plan.recipe.version != TELEGRAM_SCHEMA_VERSION
@@ -443,9 +443,9 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
         plan: &RemediationPlan,
         job: &retract_domain::ScopedJobRecord,
     ) -> Result<(), AppError> {
-        let legacy = super::compat::TelegramExecutionRecipe::validate_envelope(plan)?;
+        let legacy = super::recipe::TelegramExecutionRecipe::validate_envelope(plan)?;
         let initial = crate::model::JobRecord::new(&legacy);
-        let expected = super::compat::TelegramCompatibilityProvider::normalize_job(
+        let expected = super::normalize::normalize_job(
             &plan.scope,
             &legacy,
             &initial,

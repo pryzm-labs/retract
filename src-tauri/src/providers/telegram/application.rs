@@ -1,13 +1,15 @@
 //! Production composition and typed application operations for the Telegram bridge.
 use super::{
     LiveGateway, TelegramGateway,
-    compat::{TelegramCompatibilityProvider, TelegramExecutionRecipe, normalize_conversation},
+    compat::TelegramCompatibilityProvider,
     engine_context::{EngineContext, FoundationTelegramRepository},
     identity::IdentityVerificationStatus,
     locators::{
         TelegramActorLocator, TelegramConversationLocator, TelegramMessageLocator,
         TelegramPayloadValidator,
     },
+    normalize::{descriptor, normalize_conversation, normalize_job},
+    recipe::TelegramExecutionRecipe,
 };
 use crate::{
     compatibility::model_v2 as wire,
@@ -41,7 +43,7 @@ impl TelegramCompatibilityProvider {
             .map_err(boundary_error)?;
         let legacy =
             TelegramExecutionRecipe::validate_envelope(&envelope).map_err(boundary_error)?;
-        Self::normalize_job(&envelope.scope, &legacy, job, true).map_err(boundary_error)
+        normalize_job(&envelope.scope, &legacy, job, true).map_err(boundary_error)
     }
 }
 
@@ -266,7 +268,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
             ]
             .into_iter()
             .map(|(kind, effect)| {
-                let mut action = super::compat::descriptor(kind, effect, ConfirmationTier::High);
+                let mut action = descriptor(kind, effect, ConfirmationTier::High);
                 if !c.can_leave_chat {
                     action.availability = retract_domain::Availability::Unavailable;
                     action.unavailable_reason = Some(safe(ErrorCode::PermissionChanged));
@@ -326,7 +328,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                     _ => unreachable!("closed intent catalog"),
                 };
                 let descriptors = if *id == "delete_my_messages" {
-                    let mut descriptor = super::compat::descriptor(
+                    let mut descriptor = descriptor(
                         kind,
                         ExpectedEffect::RemovedForAllParticipants,
                         ConfirmationTier::High,
