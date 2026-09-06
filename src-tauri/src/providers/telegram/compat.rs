@@ -10,7 +10,7 @@ use super::{
     diagnostics::{invalid_recipe, safe_diagnostic},
     locators::{TelegramConversationLocator, TelegramMessageLocator},
     model::JobRecord,
-    normalize::{descriptor, normalize_content, normalize_conversation},
+    normalize::descriptor,
 };
 use crate::error::AppError;
 
@@ -47,20 +47,6 @@ impl TelegramCompatibilityProvider {
             return Err(super::engine_context::stale_context());
         }
         self.context.check(self.gateway.as_ref())
-    }
-
-    pub async fn search_filtered(
-        &self,
-        request: super::model::SearchRequest,
-    ) -> Result<Vec<retract_domain::ContentRecord>, AppError> {
-        self.check_scope(&self.context.active().scope)?;
-        let result = self.engine.search(request).await?;
-        self.check_scope(&self.context.active().scope)?;
-        result
-            .messages
-            .iter()
-            .map(|m| normalize_content(&self.context.active().scope, m))
-            .collect()
     }
 
     pub async fn actions_for(
@@ -194,123 +180,5 @@ impl TelegramCompatibilityProvider {
         started_authorized: bool,
     ) -> Result<ScopedJobRecord, AppError> {
         super::normalize::normalize_job(scope, plan, job, started_authorized)
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::providers::ports::QuerySource for TelegramCompatibilityProvider {
-    async fn list_conversations(
-        &self,
-        request: crate::providers::ports::ConversationQuery,
-    ) -> Result<
-        crate::providers::ports::Page<retract_domain::ConversationRecord>,
-        retract_domain::ProviderError,
-    > {
-        self.check_scope(&request.scope).map_err(provider_error)?;
-        if request.cursor.is_some() || request.limit == 0 || request.limit > 100_000 {
-            return Err(provider_error(invalid_recipe()));
-        }
-        let chats = self.gateway.chats().await.map_err(provider_error)?;
-        self.check_scope(&request.scope).map_err(provider_error)?;
-        if chats.len() > request.limit as usize {
-            return Err(provider_error(invalid_recipe()));
-        }
-        Ok(crate::providers::ports::Page {
-            items: chats
-                .iter()
-                .map(|chat| normalize_conversation(&request.scope, chat))
-                .collect::<Result<_, _>>()
-                .map_err(provider_error)?,
-            next_cursor: None,
-        })
-    }
-    async fn search(
-        &self,
-        request: crate::providers::ports::ContentQuery,
-    ) -> Result<
-        crate::providers::ports::Page<retract_domain::ContentRecord>,
-        retract_domain::ProviderError,
-    > {
-        self.check_scope(&request.scope).map_err(provider_error)?;
-        if request.cursor.is_some() {
-            return Err(provider_error(invalid_recipe()));
-        }
-        let items = self
-            .search_filtered(super::model::SearchRequest {
-                query: request.query,
-                chat_ids: Vec::new(),
-                chat_kinds: Vec::new(),
-                content_kinds: Vec::new(),
-                direction: super::model::MessageDirection::Any,
-                min_date: None,
-                max_date: None,
-                exclude_pinned: false,
-                privacy_scan: false,
-                limit: request.limit as usize,
-            })
-            .await
-            .map_err(provider_error)?;
-        Ok(crate::providers::ports::Page {
-            items,
-            next_cursor: None,
-        })
-    }
-    async fn resolve(
-        &self,
-        request: crate::providers::ports::ResolveRequest,
-    ) -> Result<Vec<retract_domain::ContentRecord>, retract_domain::ProviderError> {
-        self.check_scope(&request.scope).map_err(provider_error)?;
-        if request.refs.len() > 100_000 {
-            return Err(provider_error(invalid_recipe()));
-        }
-        let mut ids = Vec::new();
-        for target in request.refs {
-            target
-                .validate(&request.scope)
-                .map_err(|_| provider_error(invalid_recipe()))?;
-            crate::persistence::ProviderPayloadValidator::validate_resource(
-                &super::locators::TelegramPayloadValidator,
-                &target.resource,
-            )
-            .map_err(provider_error)?;
-            if target.resource.resource_kind != retract_domain::ResourceKind::Content {
-                return Err(provider_error(invalid_recipe()));
-            }
-            let locator: TelegramMessageLocator =
-                serde_json::from_value(target.resource.locator_payload)
-                    .map_err(|_| provider_error(invalid_recipe()))?;
-            ids.push((
-                locator
-                    .chat_id
-                    .parse()
-                    .map_err(|_| provider_error(invalid_recipe()))?,
-                locator
-                    .message_id
-                    .parse()
-                    .map_err(|_| provider_error(invalid_recipe()))?,
-            ));
-        }
-        let messages = self
-            .gateway
-            .messages_by_ids(&ids)
-            .await
-            .map_err(provider_error)?;
-        self.check_scope(&request.scope).map_err(provider_error)?;
-        messages
-            .iter()
-            .map(|message| normalize_content(&request.scope, message).map_err(provider_error))
-            .collect()
-    }
-}
-
-fn provider_error(error: AppError) -> retract_domain::ProviderError {
-    retract_domain::ProviderError {
-        code: match error {
-            AppError::NotFound => retract_domain::ProviderErrorKind::NotFound,
-            AppError::Gateway(_) => retract_domain::ProviderErrorKind::PermissionChanged,
-            AppError::Timeout(_) => retract_domain::ProviderErrorKind::Transient,
-            _ => retract_domain::ProviderErrorKind::AuthenticationRequired,
-        },
-        retry_at: None,
     }
 }

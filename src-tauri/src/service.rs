@@ -9,12 +9,10 @@ use std::{
 
 use chrono::Utc;
 use cleaner_domain::{ChatSummary, ConfirmationProof, DeletionPlan, DeletionReach, PlanOperation};
-use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 const DIRECT_CHAT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-const DIRECT_CHAT_LOOKUP_CONCURRENCY: usize = 8;
 
 use crate::{
     error::AppError,
@@ -24,7 +22,7 @@ use crate::{
         model::{
             AppSnapshot, AuthSnapshot, AuthorizePlanRequest, CatalogProgress, ExecuteRequest,
             JobRecord, JobStatus, MessageRef, PersistedState, PlanView, PrepareChatActionRequest,
-            PrepareSelectionRequest, PrepareSenderActionRequest, SearchRequest, SearchResponse,
+            PrepareSelectionRequest, PrepareSenderActionRequest,
         },
     },
 };
@@ -266,47 +264,6 @@ impl CleanerService {
 
     pub fn catalog_progress(&self) -> CatalogProgress {
         self.gateway.catalog_progress()
-    }
-
-    pub async fn search(&self, mut request: SearchRequest) -> Result<SearchResponse, AppError> {
-        request.validate()?;
-        let requested_limit = request.limit;
-        let messages = self.gateway.search(&request).await?;
-        let returned = messages.len();
-        Ok(SearchResponse {
-            messages,
-            returned,
-            truncated: returned == requested_limit,
-        })
-    }
-
-    /// Refresh only the chats affected by a completed operation. Missing chats
-    /// are intentionally omitted so the caller can remove them from its local
-    /// list without rebuilding the complete Telegram catalog.
-    pub async fn refresh_chats(
-        &self,
-        mut chat_ids: Vec<i64>,
-    ) -> Result<Vec<ChatSummary>, AppError> {
-        if chat_ids.len() > 1_000 || chat_ids.contains(&0) {
-            return Err(AppError::InvalidRequest(
-                "refresh up to 1,000 valid chats at a time".into(),
-            ));
-        }
-        chat_ids.sort_unstable();
-        chat_ids.dedup();
-        let mut chats =
-            stream::iter(chat_ids)
-                .map(|chat_id| async move {
-                    self.lookup_chat_with_timeout(chat_id, "chat refresh").await
-                })
-                .buffer_unordered(DIRECT_CHAT_LOOKUP_CONCURRENCY)
-                .try_collect::<Vec<_>>()
-                .await?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-        chats.sort_by_key(|chat| chat.title.to_lowercase());
-        Ok(chats)
     }
 
     pub async fn prepare_selection(
@@ -2375,76 +2332,6 @@ mod tests {
             assert_eq!(own_plan.summary.delete_for_everyone, 1);
 
             assert_eq!(gateway.chat_read_counts(), (0, 3));
-        });
-    }
-
-    #[test]
-    fn targeted_refresh_deduplicates_sorts_and_omits_missing_chats() {
-        tauri::async_runtime::block_on(async {
-            let directory = tempfile::tempdir().unwrap();
-            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [27; 32]);
-            let gateway = Arc::new(DemoGateway::new());
-            let service = CleanerService::new(gateway.clone(), store).unwrap();
-
-            let snapshot = service.snapshot().await.unwrap();
-            assert_eq!(snapshot.chats.len(), 8);
-            let progress = service.catalog_progress();
-            assert_eq!(progress.phase, "ready");
-            assert_eq!((progress.processed, progress.total), (8, 8));
-            let reads_after_snapshot = gateway.chat_read_counts();
-            assert_eq!(reads_after_snapshot, (1, 0));
-
-            let refreshed = service
-                .refresh_chats(vec![-1001, -1001, 304])
-                .await
-                .unwrap();
-            assert_eq!(
-                refreshed
-                    .iter()
-                    .map(|chat| (chat.id, chat.title.as_str()))
-                    .collect::<Vec<_>>(),
-                vec![(-1001, "Design Team"), (304, "Empty invite")]
-            );
-            assert_eq!(
-                gateway.chat_read_counts(),
-                (reads_after_snapshot.0, reads_after_snapshot.1 + 2)
-            );
-
-            gateway.remove_chat_for_self(304).await.unwrap();
-            let missing = service.refresh_chats(vec![304]).await.unwrap();
-            assert!(missing.is_empty());
-            assert_eq!(gateway.chat_read_counts(), (reads_after_snapshot.0, 3));
-            let progress = service.catalog_progress();
-            assert_eq!((progress.processed, progress.total), (7, 7));
-        });
-    }
-
-    #[test]
-    fn search_response_truncation_is_conservative_for_full_page() {
-        tauri::async_runtime::block_on(async {
-            let directory = tempfile::tempdir().unwrap();
-            let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [28; 32]);
-            let gateway: Arc<dyn TelegramGateway> = Arc::new(DemoGateway::new());
-            let service = CleanerService::new(gateway, store).unwrap();
-            let response = service
-                .search(SearchRequest {
-                    query: String::new(),
-                    chat_ids: Vec::new(),
-                    chat_kinds: Vec::new(),
-                    content_kinds: Vec::new(),
-                    direction: crate::providers::telegram::model::MessageDirection::Any,
-                    min_date: None,
-                    max_date: None,
-                    exclude_pinned: false,
-                    privacy_scan: false,
-                    limit: 1,
-                })
-                .await
-                .unwrap();
-
-            assert_eq!(response.returned, 1);
-            assert_eq!(response.messages.len(), 1);
-            assert!(response.truncated);
         });
     }
 

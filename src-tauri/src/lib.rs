@@ -93,7 +93,7 @@ fn create_service<R: tauri::Runtime>(
         store.clone(),
     )?;
     Ok(ProviderService::new(
-        providers::telegram::application::TelegramConnection::new(gateway, store),
+        providers::telegram::connection::TelegramConnection::new(gateway, store),
     ))
 }
 

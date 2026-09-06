@@ -474,7 +474,8 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
             f.service.clone(),
         )
         .unwrap();
-        let result = provider
+        let query = super::query::TelegramQuery::new(f.gateway.clone(), f.context.clone()).unwrap();
+        let result = query
             .search(ContentQuery {
                 scope: f.context.active().scope.clone(),
                 query: String::new(),
@@ -517,7 +518,7 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
         let mut foreign = f.context.active().scope.clone();
         foreign.source_id = Uuid::new_v4().try_into().unwrap();
         assert!(
-            provider
+            query
                 .search(ContentQuery {
                     scope: foreign,
                     query: String::new(),

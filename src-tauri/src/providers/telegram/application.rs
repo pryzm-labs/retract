@@ -1,30 +1,21 @@
-//! Production composition and typed application operations for the Telegram bridge.
+//! Reviewed application cleanup operations for the Telegram bridge.
 use super::{
-    LiveGateway,
     compat::TelegramCompatibilityProvider,
     diagnostics::boundary_error,
-    engine_context::{EngineContext, FoundationTelegramRepository},
-    identity::IdentityVerificationStatus,
     locators::{
         TelegramActorLocator, TelegramConversationLocator, TelegramMessageLocator,
         TelegramPayloadValidator,
     },
     model,
-    native::ports::{TelegramConnectionIo, TelegramSession},
-    normalize::{descriptor, normalize_conversation, normalize_job},
+    normalize::{descriptor, normalize_job},
     recipe::TelegramExecutionRecipe,
 };
 use crate::{
-    compatibility::model_v2 as wire,
-    persistence::{FoundationStore, ProviderPayloadValidator},
     provider_service::{safe, validate_refs},
-    providers::{ports::*, registry::ProviderRegistryError},
-    service::CleanerService,
+    providers::ports::*,
 };
 use async_trait::async_trait;
 use retract_domain::{ActiveContext, ErrorCode, ResourceKind, SafeError, ScopedResourceRef};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 impl TelegramCompatibilityProvider {
     fn check_active(&self, context: &ActiveContext) -> Result<(), SafeError> {
@@ -49,53 +40,6 @@ impl TelegramCompatibilityProvider {
     }
 }
 
-impl ProviderRegistration for TelegramCompatibilityProvider {
-    fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor {
-            key: super::locators::telegram_provider_key(),
-            display_name: "Telegram".into(),
-            capabilities: [
-                ProviderCapability::ConversationListing,
-                ProviderCapability::ContentSearch,
-                ProviderCapability::MediaMetadata,
-            ]
-            .into_iter()
-            .collect(),
-        }
-    }
-    fn query_source(&self) -> Result<Arc<dyn QuerySource>, ProviderRegistryError> {
-        Ok(Arc::new(self.clone()))
-    }
-    fn application_query(&self) -> Result<Arc<dyn ApplicationQuery>, ProviderRegistryError> {
-        Ok(Arc::new(self.clone()))
-    }
-    fn reviewed_lifecycle(&self) -> Result<Arc<dyn ReviewedLifecycle>, ProviderRegistryError> {
-        Ok(Arc::new(self.clone()))
-    }
-    fn payload_validator(
-        &self,
-    ) -> Result<Arc<dyn ProviderPayloadValidator>, ProviderRegistryError> {
-        Ok(Arc::new(TelegramPayloadValidator))
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelegramSearchFilters {
-    #[serde(default)]
-    pub chat_kinds: Vec<cleaner_domain::ChatKind>,
-    #[serde(default)]
-    pub content_kinds: Vec<cleaner_domain::ContentKind>,
-    #[serde(default)]
-    pub direction: model::MessageDirection,
-    pub min_date: Option<chrono::DateTime<chrono::Utc>>,
-    pub max_date: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub exclude_pinned: bool,
-    #[serde(default)]
-    pub privacy_scan: bool,
-}
-
 fn chat_id(reference: &ScopedResourceRef) -> Result<i64, SafeError> {
     if reference.resource.resource_kind != ResourceKind::Conversation {
         return Err(safe(ErrorCode::ScopeMismatch));
@@ -107,91 +51,6 @@ fn chat_id(reference: &ScopedResourceRef) -> Result<i64, SafeError> {
         .chat_id
         .parse()
         .map_err(|_| safe(ErrorCode::UnsupportedSchema))
-}
-
-#[async_trait]
-impl ApplicationQuery for TelegramCompatibilityProvider {
-    async fn conversations(
-        &self,
-        context: &ActiveContext,
-    ) -> Result<Vec<retract_domain::ConversationRecord>, SafeError> {
-        self.check_active(context)?;
-        let chats = self.gateway.chats().await.map_err(boundary_error)?;
-        self.check_active(context)?;
-        chats
-            .iter()
-            .map(|c| normalize_conversation(&context.scope, c).map_err(boundary_error))
-            .collect()
-    }
-    async fn search_filtered(
-        &self,
-        context: &ActiveContext,
-        request: wire::SearchRequest,
-    ) -> Result<Page<retract_domain::ContentRecord>, SafeError> {
-        self.check_active(context)?;
-        validate_refs(
-            context,
-            &request.conversations,
-            &TelegramPayloadValidator,
-            Some(ResourceKind::Conversation),
-        )?;
-        let filters = if let Some(filters) = request.filters {
-            if filters.schema != "telegram.search_filters" || filters.version != 1 {
-                return Err(safe(ErrorCode::UnsupportedSchema));
-            }
-            serde_json::from_value::<TelegramSearchFilters>(filters.payload)
-                .map_err(|_| safe(ErrorCode::UnsupportedSchema))?
-        } else {
-            TelegramSearchFilters::default()
-        };
-        let items = self
-            .search_filtered(model::SearchRequest {
-                query: request.query,
-                chat_ids: request
-                    .conversations
-                    .iter()
-                    .map(chat_id)
-                    .collect::<Result<_, _>>()?,
-                chat_kinds: filters.chat_kinds,
-                content_kinds: filters.content_kinds,
-                direction: filters.direction,
-                min_date: filters.min_date,
-                max_date: filters.max_date,
-                exclude_pinned: filters.exclude_pinned,
-                privacy_scan: filters.privacy_scan,
-                limit: request.limit as usize,
-            })
-            .await
-            .map_err(boundary_error)?;
-        self.check_active(context)?;
-        Ok(Page {
-            items,
-            next_cursor: None,
-        })
-    }
-    async fn refresh(
-        &self,
-        context: &ActiveContext,
-        refs: Vec<ScopedResourceRef>,
-    ) -> Result<Vec<retract_domain::ConversationRecord>, SafeError> {
-        self.check_active(context)?;
-        validate_refs(
-            context,
-            &refs,
-            &TelegramPayloadValidator,
-            Some(ResourceKind::Conversation),
-        )?;
-        let chats = self
-            .engine
-            .refresh_chats(refs.iter().map(chat_id).collect::<Result<_, _>>()?)
-            .await
-            .map_err(boundary_error)?;
-        self.check_active(context)?;
-        chats
-            .iter()
-            .map(|c| normalize_conversation(&context.scope, c).map_err(boundary_error))
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -513,112 +372,5 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
     }
     async fn stop(&self) {
         self.engine.stop_workers().await;
-    }
-}
-
-pub struct TelegramConnection {
-    gateway: Arc<LiveGateway>,
-    store: Arc<FoundationStore>,
-}
-impl TelegramConnection {
-    pub fn new(gateway: Arc<LiveGateway>, store: Arc<FoundationStore>) -> Arc<Self> {
-        Arc::new(Self { gateway, store })
-    }
-}
-#[async_trait]
-impl ApplicationConnection for TelegramConnection {
-    fn context(&self) -> Option<ActiveContext> {
-        self.gateway.active_context()
-    }
-    fn store(&self) -> Option<Arc<FoundationStore>> {
-        Some(self.store.clone())
-    }
-    fn bootstrap(&self) -> Result<wire::BootstrapSnapshot, SafeError> {
-        let identity = match self.gateway.identity_verification_status() {
-            IdentityVerificationStatus::Unavailable => wire::IdentityStatus::Unavailable,
-            IdentityVerificationStatus::Pending => wire::IdentityStatus::Pending,
-            IdentityVerificationStatus::Ready => wire::IdentityStatus::Ready,
-            IdentityVerificationStatus::Failed { diagnostic } => {
-                wire::IdentityStatus::Failed { diagnostic }
-            }
-        };
-        let progress = self.gateway.catalog_progress();
-        let mut auth = self.gateway.auth();
-        // The legacy auth error may include provider text; v2 exposes predefined copy.
-        if matches!(auth.stage, model::AuthStage::Error) {
-            auth.hint = Some("Telegram could not continue. Check settings and retry.".into());
-        }
-        Ok(wire::BootstrapSnapshot {
-            identity,
-            auth: Some(retract_domain::VersionedPayload {
-                schema: "telegram.auth".into(),
-                version: 1,
-                payload: serde_json::to_value(auth)
-                    .map_err(|_| safe(ErrorCode::UnsupportedSchema))?,
-            }),
-            catalog: wire::CatalogProgress {
-                phase: match progress.phase {
-                    "idle" => wire::CatalogPhase::Idle,
-                    "discovering" => wire::CatalogPhase::Discovering,
-                    "loading" => wire::CatalogPhase::Loading,
-                    "ready" => wire::CatalogPhase::Ready,
-                    _ => return Err(safe(ErrorCode::UnsupportedSchema)),
-                },
-                total: progress.total,
-                processed: progress.processed,
-            },
-            chats: vec![],
-            recent_jobs: vec![],
-            legacy_history: self
-                .store
-                .snapshot()
-                .map_err(boundary_error)?
-                .legacy_history
-                .into_iter()
-                .map(|r| r.record)
-                .collect(),
-        })
-    }
-    async fn registration(&self) -> Result<Arc<dyn ProviderRegistration>, SafeError> {
-        let active = self
-            .context()
-            .ok_or_else(|| safe(ErrorCode::IdentityUnavailable))?;
-        let identity = self
-            .gateway
-            .verified_identity()
-            .ok_or_else(|| safe(ErrorCode::IdentityUnavailable))?;
-        let context = Arc::new(
-            EngineContext::new(active.clone(), identity, self.gateway.session_binding())
-                .map_err(boundary_error)?,
-        );
-        let repository = Arc::new(
-            FoundationTelegramRepository::new(self.store.clone(), active.scope)
-                .map_err(boundary_error)?,
-        );
-        let engine = CleanerService::new_scoped(self.gateway.clone(), context.clone(), repository)
-            .map_err(boundary_error)?;
-        Ok(Arc::new(
-            TelegramCompatibilityProvider::new(self.gateway.clone(), context, engine)
-                .map_err(boundary_error)?,
-        ))
-    }
-    async fn auth(&self, request: wire::AuthRequest) -> Result<(), SafeError> {
-        let value = request.value.as_deref().unwrap_or("");
-        match request.operation.as_str() {
-            "request_qr_auth" if request.value.is_none() => self.gateway.request_qr_auth().await,
-            "submit_phone" => self.gateway.submit_phone(value).await,
-            "submit_email_address" => self.gateway.submit_email_address(value).await,
-            "submit_email_code" => self.gateway.submit_email_code(value).await,
-            "submit_code" => self.gateway.submit_code(value).await,
-            "submit_password" => self.gateway.submit_password(value).await,
-            _ => return Err(safe(ErrorCode::UnsupportedSchema)),
-        }
-        .map_err(boundary_error)
-    }
-    async fn retry_identity(&self) -> Result<(), SafeError> {
-        self.gateway.retry_identity_verification()
-    }
-    async fn shutdown(&self) {
-        let _ = self.gateway.close().await;
     }
 }

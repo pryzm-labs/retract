@@ -15,6 +15,8 @@ use crate::{
             engine_context::{EngineContext, FoundationTelegramRepository},
             identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
             locators::*,
+            query::TelegramQuery,
+            registration::TelegramProvider,
         },
     },
     service::CleanerService,
@@ -344,9 +346,11 @@ impl ApplicationConnection for PendingTelegram {
             Arc::new(FoundationTelegramRepository::new(self.store.clone(), active.scope).unwrap());
         let engine =
             CleanerService::new_scoped(self.gateway.clone(), context.clone(), repository).unwrap();
-        Ok(Arc::new(
+        let query = Arc::new(TelegramQuery::new(self.gateway.clone(), context.clone()).unwrap());
+        let lifecycle = Arc::new(
             TelegramCompatibilityProvider::new(self.gateway.clone(), context, engine).unwrap(),
-        ))
+        );
+        Ok(Arc::new(TelegramProvider::new(query, lifecycle)))
     }
     async fn auth(&self, _: AuthRequest) -> Result<(), SafeError> {
         Err(safe(ErrorCode::UnsupportedSchema))
@@ -398,8 +402,10 @@ pub async fn telegram(path: &Path, active: ActiveContext) -> (Harness, Arc<DemoG
     let repository =
         Arc::new(FoundationTelegramRepository::new(store.clone(), active.scope.clone()).unwrap());
     let engine = CleanerService::new_scoped(gateway.clone(), context.clone(), repository).unwrap();
-    let provider =
+    let query = Arc::new(TelegramQuery::new(gateway.clone(), context.clone()).unwrap());
+    let lifecycle =
         Arc::new(TelegramCompatibilityProvider::new(gateway.clone(), context, engine).unwrap());
+    let provider = Arc::new(TelegramProvider::new(query, lifecycle));
     (
         Harness::new(Arc::new(Connection {
             active: Arc::new(RwLock::new(Some(active))),
