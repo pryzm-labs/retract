@@ -1,4 +1,6 @@
-use retract_domain::{ContentRecord, EvidenceState};
+use retract_domain::{
+    AccountId, ContentRecord, EvidenceState, ProviderResourceRef, ResourceKind, SourceRecord,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -10,6 +12,116 @@ use super::{
         source, sql_snapshot, stored_texts,
     },
 };
+
+#[derive(Clone, Copy)]
+enum ReferenceField {
+    ConversationParent,
+    ContentConversation,
+    ContentAuthor,
+    ContentReply,
+    ContentThread,
+}
+
+fn alternate_source(account_id: AccountId, id: &str) -> SourceRecord {
+    let mut alternate = source();
+    alternate.id = Uuid::parse_str(id).unwrap().try_into().unwrap();
+    alternate.account_id = account_id;
+    alternate
+}
+
+fn batch_for(import_source: &SourceRecord, native: &str) -> ImportBatch {
+    let mut input = batch(native, "body");
+    let scope = import_source.scope();
+    let account_id = import_source.account_id;
+    let actor = &mut input.actors[0];
+    actor.scope = scope.clone();
+    actor.resource.account_id = account_id;
+    actor.id = actor.resource.resource_id().unwrap().try_into().unwrap();
+    let conversation = &mut input.conversations[0];
+    conversation.scope = scope.clone();
+    conversation.resource.account_id = account_id;
+    conversation.id = conversation
+        .resource
+        .resource_id()
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let content = &mut input.contents[0];
+    content.scope = scope;
+    content.resource.account_id = account_id;
+    content.id = content.resource.resource_id().unwrap().try_into().unwrap();
+    content.author_id = actor.id;
+    content.conversation_id = conversation.id;
+    input
+}
+
+fn target_resource(account_id: AccountId, native: &str, kind: ResourceKind) -> ProviderResourceRef {
+    let mut target = resource(native);
+    target.account_id = account_id;
+    target.resource_kind = kind;
+    target
+}
+
+fn set_reference(input: &mut ImportBatch, field: ReferenceField, target: Uuid) {
+    match field {
+        ReferenceField::ConversationParent => {
+            input.conversations[0].parent_id = Some(target.try_into().unwrap());
+        }
+        ReferenceField::ContentConversation => {
+            input.contents[0].conversation_id = target.try_into().unwrap();
+        }
+        ReferenceField::ContentAuthor => {
+            input.contents[0].author_id = target.try_into().unwrap();
+        }
+        ReferenceField::ContentReply => {
+            input.contents[0].reply_to = Some(target.try_into().unwrap());
+        }
+        ReferenceField::ContentThread => {
+            input.contents[0].thread_parent = Some(target.try_into().unwrap());
+        }
+    }
+}
+
+fn target_batch(import_source: &SourceRecord, target: ProviderResourceRef) -> ImportBatch {
+    let mut input = batch_for(import_source, "later-target");
+    match target.resource_kind {
+        ResourceKind::Actor => {
+            input.actors[0].resource = target;
+            input.actors[0].id = input.actors[0]
+                .resource
+                .resource_id()
+                .unwrap()
+                .try_into()
+                .unwrap();
+            input.conversations.clear();
+            input.contents.clear();
+        }
+        ResourceKind::Conversation => {
+            input.conversations[0].resource = target;
+            input.conversations[0].id = input.conversations[0]
+                .resource
+                .resource_id()
+                .unwrap()
+                .try_into()
+                .unwrap();
+            input.actors.clear();
+            input.contents.clear();
+        }
+        ResourceKind::Content => {
+            input.contents[0].resource = target;
+            input.contents[0].id = input.contents[0]
+                .resource
+                .resource_id()
+                .unwrap()
+                .try_into()
+                .unwrap();
+            input.actors.clear();
+            input.conversations.clear();
+        }
+        ResourceKind::Grouping => unreachable!("grouping is not a valid archive relationship"),
+    }
+    input
+}
 
 #[test]
 fn incomplete_sources_remain_unavailable_until_final_validation() {
@@ -66,6 +178,197 @@ fn rejected_second_batch_preserves_first_content_and_checkpoint() {
     );
     assert_eq!(stored_texts(&store), vec!["firstbody"]);
     assert_eq!(store.append_batch(&session, 0, input).unwrap(), first);
+}
+
+#[test]
+fn ready_conversation_parent_cannot_resolve_to_a_foreign_account() {
+    let fixture = Fixture::new();
+    let mut store = fixture.open();
+    let primary_source = source();
+    store
+        .register_source(account(), primary_source.clone())
+        .unwrap();
+
+    let mut foreign_account = account();
+    foreign_account.id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    foreign_account.native_identity.payload["nativeId"] = json!("9007199254740993");
+    let foreign_source =
+        alternate_source(foreign_account.id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    store
+        .register_source(foreign_account, foreign_source.clone())
+        .unwrap();
+
+    let foreign_batch = batch_for(&foreign_source, "foreign-parent");
+    let foreign_parent = *foreign_batch.conversations[0].id.as_uuid();
+    let primary_session = store.begin_import(&primary_source.scope()).unwrap();
+    let mut child = batch_for(&primary_source, "child");
+    set_reference(
+        &mut child,
+        ReferenceField::ConversationParent,
+        foreign_parent,
+    );
+    store.append_batch(&primary_session, 0, child).unwrap();
+    assert_eq!(
+        store.finish_import(&primary_session).unwrap().phase,
+        ImportPhase::Ready
+    );
+
+    let foreign_session = store.begin_import(&foreign_source.scope()).unwrap();
+    store
+        .append_batch(
+            &foreign_session,
+            0,
+            target_batch(
+                &foreign_source,
+                target_resource(
+                    foreign_source.account_id,
+                    "committed-before-rejection",
+                    ResourceKind::Actor,
+                ),
+            ),
+        )
+        .unwrap();
+    let before = sql_snapshot(&store);
+    let progress = store
+        .import_status(
+            &foreign_source.scope(),
+            foreign_source.archive_fingerprint.as_deref().unwrap(),
+            &foreign_source.schema_profile,
+        )
+        .unwrap();
+    assert_eq!(
+        store.append_batch(&foreign_session, 1, foreign_batch),
+        Err(ArchiveError::InvalidRecord)
+    );
+    assert_eq!(sql_snapshot(&store), before);
+    assert_eq!(
+        store
+            .import_status(
+                &foreign_source.scope(),
+                foreign_source.archive_fingerprint.as_deref().unwrap(),
+                &foreign_source.schema_profile,
+            )
+            .unwrap(),
+        progress
+    );
+    assert_eq!(store.require_ready(&primary_source.scope()), Ok(()));
+}
+
+#[test]
+fn later_identities_enforce_kind_for_every_reference_and_allow_valid_resolution() {
+    for (name, field, expected, wrong, ready_before_resolution) in [
+        (
+            "conversation-parent",
+            ReferenceField::ConversationParent,
+            ResourceKind::Conversation,
+            ResourceKind::Actor,
+            true,
+        ),
+        (
+            "content-conversation",
+            ReferenceField::ContentConversation,
+            ResourceKind::Conversation,
+            ResourceKind::Actor,
+            false,
+        ),
+        (
+            "content-author",
+            ReferenceField::ContentAuthor,
+            ResourceKind::Actor,
+            ResourceKind::Conversation,
+            false,
+        ),
+        (
+            "content-reply",
+            ReferenceField::ContentReply,
+            ResourceKind::Content,
+            ResourceKind::Actor,
+            true,
+        ),
+        (
+            "content-thread",
+            ReferenceField::ContentThread,
+            ResourceKind::Conversation,
+            ResourceKind::Actor,
+            true,
+        ),
+    ] {
+        for actual in [expected, wrong] {
+            let fixture = Fixture::new();
+            let mut store = fixture.open();
+            let primary_source = source();
+            let later_source = alternate_source(
+                primary_source.account_id,
+                "33333333-3333-4333-8333-333333333333",
+            );
+            store
+                .register_source(account(), primary_source.clone())
+                .unwrap();
+            store
+                .register_source(account(), later_source.clone())
+                .unwrap();
+
+            let target = target_resource(primary_source.account_id, name, actual);
+            let target_id = target.resource_id().unwrap();
+            let primary_session = store.begin_import(&primary_source.scope()).unwrap();
+            let mut referring = batch_for(&primary_source, "referring");
+            set_reference(&mut referring, field, target_id);
+            store.append_batch(&primary_session, 0, referring).unwrap();
+            if ready_before_resolution {
+                assert_eq!(
+                    store.finish_import(&primary_session).unwrap().phase,
+                    ImportPhase::Ready
+                );
+            }
+
+            let later_session = store.begin_import(&later_source.scope()).unwrap();
+            store
+                .append_batch(
+                    &later_session,
+                    0,
+                    batch_for(&later_source, "committed-before-kind-resolution"),
+                )
+                .unwrap();
+            let before = sql_snapshot(&store);
+            let progress = store
+                .import_status(
+                    &later_source.scope(),
+                    later_source.archive_fingerprint.as_deref().unwrap(),
+                    &later_source.schema_profile,
+                )
+                .unwrap();
+            let result = store.append_batch(&later_session, 1, target_batch(&later_source, target));
+            if actual == expected {
+                assert!(
+                    result.is_ok(),
+                    "valid later {name} resolution failed: {result:?}"
+                );
+                if ready_before_resolution {
+                    assert_eq!(store.require_ready(&primary_source.scope()), Ok(()));
+                }
+            } else {
+                assert_eq!(result, Err(ArchiveError::InvalidRecord), "{name}");
+                assert_eq!(sql_snapshot(&store), before, "{name}");
+                assert_eq!(
+                    store
+                        .import_status(
+                            &later_source.scope(),
+                            later_source.archive_fingerprint.as_deref().unwrap(),
+                            &later_source.schema_profile,
+                        )
+                        .unwrap(),
+                    progress,
+                    "{name}"
+                );
+                if ready_before_resolution {
+                    assert_eq!(store.require_ready(&primary_source.scope()), Ok(()));
+                }
+            }
+        }
+    }
 }
 
 #[test]

@@ -152,7 +152,45 @@ impl ImportBatch {
         if count > MAX_BATCH_RECORDS {
             return Err(ArchiveError::LimitExceeded);
         }
+        self.item_bounds()?;
         encoded_size(self, MAX_BATCH_BYTES)
+    }
+
+    fn item_bounds(&self) -> Result<(), ArchiveError> {
+        for actor in self
+            .actors
+            .iter()
+            .chain(self.conversations.iter().flat_map(|c| &c.participants))
+        {
+            resource_bounds(&actor.resource)?;
+            envelope_bounds(actor.avatar.as_ref())?;
+        }
+        for conversation in &self.conversations {
+            resource_bounds(&conversation.resource)?;
+            envelope_bounds(conversation.provider_metadata.as_ref())?;
+        }
+        for content in &self.contents {
+            if content.attachments.len() > MAX_ATTACHMENTS {
+                return Err(ArchiveError::LimitExceeded);
+            }
+            let searchable_bytes = content.attachments.iter().try_fold(
+                content.searchable_text.len(),
+                |bytes, attachment| {
+                    bytes
+                        .checked_add(attachment.safe_display_name.as_ref().map_or(0, String::len))
+                        .ok_or(ArchiveError::LimitExceeded)
+                },
+            )?;
+            if searchable_bytes > MAX_SEARCHABLE_BYTES {
+                return Err(ArchiveError::LimitExceeded);
+            }
+            resource_bounds(&content.resource)?;
+            envelope_bounds(content.provider_metadata.as_ref())?;
+            for attachment in &content.attachments {
+                envelope_bounds(Some(&attachment.locator))?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn digest(&self) -> Result<String, ArchiveError> {
@@ -215,20 +253,6 @@ impl ImportBatch {
             if content.evidence != EvidenceState::Archive {
                 return Err(ArchiveError::InvalidRecord);
             }
-            if content.attachments.len() > MAX_ATTACHMENTS {
-                return Err(ArchiveError::LimitExceeded);
-            }
-            let searchable_bytes = content.attachments.iter().try_fold(
-                content.searchable_text.len(),
-                |bytes, attachment| {
-                    bytes
-                        .checked_add(attachment.safe_display_name.as_ref().map_or(0, String::len))
-                        .ok_or(ArchiveError::LimitExceeded)
-                },
-            )?;
-            if searchable_bytes > MAX_SEARCHABLE_BYTES {
-                return Err(ArchiveError::LimitExceeded);
-            }
             validate_resource(&content.resource, validator)?;
             validate_envelope(content.provider_metadata.as_ref())?;
             for attachment in &content.attachments {
@@ -255,7 +279,7 @@ pub(super) fn validate_resource(
     resource: &ProviderResourceRef,
     validator: &dyn ProviderPayloadValidator,
 ) -> Result<(), ArchiveError> {
-    encoded_size(resource, ENVELOPE_BYTES)?;
+    resource_bounds(resource)?;
     resource
         .validate()
         .map_err(|_| ArchiveError::InvalidRecord)?;
@@ -289,11 +313,22 @@ fn validate_actor(
 }
 
 fn validate_envelope(envelope: Option<&VersionedPayload>) -> Result<(), ArchiveError> {
+    envelope_bounds(envelope)?;
     if let Some(envelope) = envelope {
-        encoded_size(envelope, ENVELOPE_BYTES)?;
         envelope
             .validate()
             .map_err(|_| ArchiveError::InvalidRecord)?;
+    }
+    Ok(())
+}
+
+fn resource_bounds(resource: &ProviderResourceRef) -> Result<(), ArchiveError> {
+    encoded_size(resource, ENVELOPE_BYTES).map(|_| ())
+}
+
+fn envelope_bounds(envelope: Option<&VersionedPayload>) -> Result<(), ArchiveError> {
+    if let Some(envelope) = envelope {
+        encoded_size(envelope, ENVELOPE_BYTES)?;
     }
     Ok(())
 }

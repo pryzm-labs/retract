@@ -9,7 +9,7 @@ const VERSION: i64 = 1;
 const APPLICATION: &str = "retract.archive-index";
 // Intentional DDL edits require an explicit reviewed fingerprint update.
 const EXPECTED_SCHEMA_HASH: &str =
-    "65ffc843284679b08831ff2a54d8693cdeda9afc683af8f818b332fd4794560a";
+    "323d5ed46b977547f54c4fae614e0804d0210ce84d6606d6a73645e8d06d9c8b";
 
 const TABLES: &str = "
 CREATE TABLE schema_migrations (
@@ -84,6 +84,7 @@ CREATE INDEX content_conversation_reference ON content_observations(conversation
 CREATE INDEX content_author_reference ON content_observations(author_id);
 CREATE INDEX content_reply_reference ON content_observations(reply_to_id);
 CREATE INDEX content_thread_reference ON content_observations(thread_parent_id);
+CREATE INDEX conversation_parent_reference ON conversation_observations(json_extract(record_json, '$.parentId'));
 CREATE TABLE attachments (
     provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL,
     resource_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0), record_json TEXT NOT NULL,
@@ -170,23 +171,49 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<(), ArchiveError
     tx.execute_batch(TABLES)
         .map_err(|_| ArchiveError::StorageFailure)?;
     // References may arrive before their observations. Reject known foreign owners
-    // both when adding the reference and when resolving an earlier unknown UUID.
+    // and wrong resource kinds both when adding the reference and when resolving
+    // an earlier unknown UUID.
     for operation in ["INSERT", "UPDATE"] {
         let suffix = operation.to_ascii_lowercase();
         tx.execute_batch(&format!("
 CREATE TRIGGER content_reference_scope_{suffix} BEFORE {operation} ON content_observations BEGIN
     SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
         SELECT 1 FROM resource_identities r
-        WHERE r.resource_id IN (new.conversation_id, new.author_id, new.reply_to_id, new.thread_parent_id)
-        AND (r.provider != new.provider OR r.account_id != new.account_id)
+        WHERE (r.resource_id = new.conversation_id AND (r.provider != new.provider
+                OR r.account_id != new.account_id OR r.kind != 'conversation'))
+            OR (r.resource_id = new.author_id AND (r.provider != new.provider
+                OR r.account_id != new.account_id OR r.kind != 'actor'))
+            OR (r.resource_id = new.reply_to_id AND (r.provider != new.provider
+                OR r.account_id != new.account_id OR r.kind != 'content'))
+            OR (r.resource_id = new.thread_parent_id AND (r.provider != new.provider
+                OR r.account_id != new.account_id OR r.kind != 'conversation'))
+    );
+END;
+CREATE TRIGGER conversation_parent_scope_{suffix} BEFORE {operation} ON conversation_observations BEGIN
+    SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
+        SELECT 1 FROM resource_identities r
+        WHERE r.resource_id = json_extract(new.record_json, '$.parentId')
+        AND (r.provider != new.provider OR r.account_id != new.account_id
+            OR r.kind != 'conversation')
     );
 END;
 CREATE TRIGGER resource_reference_scope_{suffix} BEFORE {operation} ON resource_identities BEGIN
     SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
         SELECT 1 FROM content_observations c
-        WHERE (new.resource_id = c.conversation_id OR new.resource_id = c.author_id
-            OR new.resource_id = c.reply_to_id OR new.resource_id = c.thread_parent_id)
-        AND (c.provider != new.provider OR c.account_id != new.account_id)
+        WHERE (new.resource_id = c.conversation_id AND (c.provider != new.provider
+                OR c.account_id != new.account_id OR new.kind != 'conversation'))
+            OR (new.resource_id = c.author_id AND (c.provider != new.provider
+                OR c.account_id != new.account_id OR new.kind != 'actor'))
+            OR (new.resource_id = c.reply_to_id AND (c.provider != new.provider
+                OR c.account_id != new.account_id OR new.kind != 'content'))
+            OR (new.resource_id = c.thread_parent_id AND (c.provider != new.provider
+                OR c.account_id != new.account_id OR new.kind != 'conversation'))
+    );
+    SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
+        SELECT 1 FROM conversation_observations c
+        WHERE json_extract(c.record_json, '$.parentId') = new.resource_id
+        AND (c.provider != new.provider OR c.account_id != new.account_id
+            OR new.kind != 'conversation')
     );
 END;
 ")).map_err(|_| ArchiveError::StorageFailure)?;

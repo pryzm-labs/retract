@@ -4,7 +4,7 @@ use super::{
 };
 use super::{
     ArchiveSearch, ImportBatch, ImportPhase,
-    test_support::{account, batch, source},
+    test_support::{account, attachment, batch, envelope, source},
 };
 use std::sync::{Condvar, Mutex};
 use std::{
@@ -58,6 +58,82 @@ pub(super) fn runtime() -> tokio::runtime::Runtime {
         .enable_time()
         .build()
         .unwrap()
+}
+
+fn oversized_envelope() -> retract_domain::VersionedPayload {
+    let overhead = serde_json::to_vec(&envelope(String::new())).unwrap().len();
+    let value = envelope("x".repeat(super::model::ENVELOPE_BYTES + 1 - overhead));
+    assert_eq!(
+        serde_json::to_vec(&value).unwrap().len(),
+        super::model::ENVELOPE_BYTES + 1
+    );
+    value
+}
+
+fn make_resource_oversized(resource: &mut retract_domain::ProviderResourceRef) {
+    resource.locator_payload = serde_json::json!({"padding": ""});
+    let overhead = serde_json::to_vec(resource).unwrap().len();
+    resource.locator_payload = serde_json::json!({
+        "padding": "x".repeat(super::model::ENVELOPE_BYTES + 1 - overhead)
+    });
+    assert_eq!(
+        serde_json::to_vec(resource).unwrap().len(),
+        super::model::ENVELOPE_BYTES + 1
+    );
+}
+
+fn oversized_item_batches() -> Vec<(&'static str, ImportBatch)> {
+    let mut text_and_names = batch("oversized-text-and-names", "");
+    text_and_names.contents[0].searchable_text = "x".repeat(super::model::MAX_SEARCHABLE_BYTES);
+    text_and_names.contents[0].attachments.push(attachment("x"));
+
+    let mut attachment_count = batch("oversized-attachment-count", "body");
+    attachment_count.contents[0].attachments =
+        vec![attachment("name"); super::model::MAX_ATTACHMENTS + 1];
+
+    let mut content_resource = batch("oversized-content-resource", "body");
+    make_resource_oversized(&mut content_resource.contents[0].resource);
+    let mut content_metadata = batch("oversized-content-metadata", "body");
+    content_metadata.contents[0].provider_metadata = Some(oversized_envelope());
+    let mut attachment_locator = batch("oversized-attachment-locator", "body");
+    let mut oversized_attachment = attachment("name");
+    oversized_attachment.locator = oversized_envelope();
+    attachment_locator.contents[0]
+        .attachments
+        .push(oversized_attachment);
+
+    let mut conversation_resource = batch("oversized-conversation-resource", "body");
+    make_resource_oversized(&mut conversation_resource.conversations[0].resource);
+    let mut conversation_metadata = batch("oversized-conversation-metadata", "body");
+    conversation_metadata.conversations[0].provider_metadata = Some(oversized_envelope());
+
+    let mut actor_resource = batch("oversized-actor-resource", "body");
+    make_resource_oversized(&mut actor_resource.actors[0].resource);
+    let mut actor_avatar = batch("oversized-actor-avatar", "body");
+    actor_avatar.actors[0].avatar = Some(oversized_envelope());
+
+    let mut nested_resource = batch("oversized-nested-resource", "body");
+    let mut nested = nested_resource.actors[0].clone();
+    make_resource_oversized(&mut nested.resource);
+    nested_resource.conversations[0].participants.push(nested);
+    let mut nested_avatar = batch("oversized-nested-avatar", "body");
+    let mut nested = nested_avatar.actors[0].clone();
+    nested.avatar = Some(oversized_envelope());
+    nested_avatar.conversations[0].participants.push(nested);
+
+    vec![
+        ("searchable text plus attachment names", text_and_names),
+        ("attachment count", attachment_count),
+        ("content resource locator", content_resource),
+        ("content provider metadata", content_metadata),
+        ("attachment locator", attachment_locator),
+        ("conversation resource locator", conversation_resource),
+        ("conversation provider metadata", conversation_metadata),
+        ("actor resource locator", actor_resource),
+        ("actor avatar", actor_avatar),
+        ("nested actor resource locator", nested_resource),
+        ("nested actor avatar", nested_avatar),
+    ]
 }
 
 #[test]
@@ -230,6 +306,87 @@ fn worker_full_queue_backpressures_and_cancellation_preempts_queued_mutations() 
         assert_eq!(checkpoint.progress, progress);
         let retry = reopened.retry_import(&checkpoint).unwrap();
         assert_eq!(reopened.finish_import(&retry).unwrap().committed_items, 1);
+    });
+}
+
+#[test]
+fn worker_rejects_every_per_item_limit_synchronously_with_free_capacity() {
+    let fixture = Fixture::new();
+    let path = fixture.path.clone();
+    runtime().block_on(async {
+        let service = ArchiveService::open(move || ArchiveStore::open(path, key(), validators()))
+            .await
+            .unwrap();
+        service
+            .register_source(&account(), &source())
+            .await
+            .unwrap();
+        let session = service.begin_import(&source().scope()).await.unwrap();
+        for (name, input) in oversized_item_batches() {
+            assert!(
+                serde_json::to_vec(&input).unwrap().len() < super::model::MAX_BATCH_BYTES,
+                "{name} must stay below the total batch cap"
+            );
+            match service.append_batch(&session, 0, &input) {
+                Err(error) => assert_eq!(error, ArchiveError::LimitExceeded, "{name}"),
+                Ok(result) => {
+                    assert_eq!(result.await.unwrap(), Err(ArchiveError::LimitExceeded));
+                    panic!("{name} was accepted into the worker queue");
+                }
+            }
+        }
+        service.shutdown().await;
+    });
+}
+
+#[test]
+fn worker_rejects_every_per_item_limit_before_a_deterministically_full_queue() {
+    let fixture = Fixture::new();
+    let path = fixture.path.clone();
+    runtime().block_on(async {
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        let blocking = gate.clone();
+        let service = ArchiveService::open(move || {
+            let mut store = ArchiveStore::open(path, key(), validators())?;
+            store.before_commit = Some(Box::new(move || blocking.wait()));
+            Ok(store)
+        })
+        .await
+        .unwrap();
+        service
+            .register_source(&account(), &source())
+            .await
+            .unwrap();
+        let session = service.begin_import(&source().scope()).await.unwrap();
+        gate.armed.store(true, Ordering::Release);
+        let active = service
+            .append_batch(&session, 0, &batch("full-0", "active"))
+            .unwrap();
+        gate.entered().await;
+        let queued_one = service
+            .append_batch(&session, 1, &batch("full-1", "queued"))
+            .unwrap();
+        let queued_two = service
+            .append_batch(&session, 2, &batch("full-2", "queued"))
+            .unwrap();
+
+        for (name, input) in oversized_item_batches() {
+            assert!(
+                serde_json::to_vec(&input).unwrap().len() < super::model::MAX_BATCH_BYTES,
+                "{name} must stay below the total batch cap"
+            );
+            assert_eq!(
+                service.append_batch(&session, 3, &input).err(),
+                Some(ArchiveError::LimitExceeded),
+                "{name}"
+            );
+        }
+        gate.release();
+        active.await.unwrap().unwrap();
+        queued_one.await.unwrap().unwrap();
+        queued_two.await.unwrap().unwrap();
+        service.shutdown().await;
     });
 }
 

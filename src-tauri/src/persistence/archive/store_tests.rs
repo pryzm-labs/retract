@@ -216,29 +216,37 @@ fn wrong_key_unsupported_version_binding_and_corrupt_files_are_preserved() {
 }
 
 #[test]
-fn self_consistent_older_development_schema_is_rejected_without_mutation() {
+fn self_consistent_prior_development_schema_is_rejected_without_mutation() {
     use sha2::{Digest, Sha256};
     let fixture = Fixture::new();
     drop(fixture.open());
     let db = open_keyed(&fixture.path, &key(), false).unwrap();
-    db.execute_batch("DROP INDEX conversation_identity_reference; DROP INDEX actor_identity_reference; DROP INDEX content_identity_reference;
-DROP TRIGGER source_retired_insert; DROP TRIGGER cleanup_scope_insert; DROP TRIGGER cleanup_scope_update; DROP TABLE cleanup_tasks;
-CREATE TABLE cleanup_tasks (
-    task_id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL,
-    state TEXT NOT NULL
-) STRICT;
-CREATE TRIGGER cleanup_scope_insert BEFORE INSERT ON cleanup_tasks BEGIN
-    SELECT RAISE(ABORT, 'archive cleanup scope') WHERE NOT EXISTS (
-        SELECT 1 FROM sources s WHERE s.provider = new.provider
-        AND s.account_id = new.account_id AND s.source_id = new.source_id
+    db.execute_batch("DROP INDEX conversation_parent_reference;")
+        .unwrap();
+    for operation in ["INSERT", "UPDATE"] {
+        let suffix = operation.to_ascii_lowercase();
+        db.execute_batch(&format!("
+DROP TRIGGER conversation_parent_scope_{suffix};
+DROP TRIGGER content_reference_scope_{suffix};
+DROP TRIGGER resource_reference_scope_{suffix};
+CREATE TRIGGER content_reference_scope_{suffix} BEFORE {operation} ON content_observations BEGIN
+    SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
+        SELECT 1 FROM resource_identities r
+        WHERE r.resource_id IN (new.conversation_id, new.author_id, new.reply_to_id, new.thread_parent_id)
+        AND (r.provider != new.provider OR r.account_id != new.account_id)
     );
 END;
-CREATE TRIGGER cleanup_scope_update BEFORE UPDATE ON cleanup_tasks
-WHEN old.provider != new.provider OR old.account_id != new.account_id OR old.source_id != new.source_id BEGIN
-    SELECT RAISE(ABORT, 'archive cleanup scope');
-END;")
+CREATE TRIGGER resource_reference_scope_{suffix} BEFORE {operation} ON resource_identities BEGIN
+    SELECT RAISE(ABORT, 'archive reference scope') WHERE EXISTS (
+        SELECT 1 FROM content_observations c
+        WHERE (new.resource_id = c.conversation_id OR new.resource_id = c.author_id
+            OR new.resource_id = c.reply_to_id OR new.resource_id = c.thread_parent_id)
+        AND (c.provider != new.provider OR c.account_id != new.account_id)
+    );
+END;
+"))
         .unwrap();
+    }
     let mut digest = Sha256::new();
     {
         let mut query = db.prepare("SELECT type, name, tbl_name, coalesce(sql, '') FROM sqlite_schema ORDER BY type, name").unwrap();
@@ -258,7 +266,7 @@ END;")
         .collect();
     assert_eq!(
         hash,
-        "4f9beb21d45b587327d82902bbd9a1783c1677bce8093ed5d0700c16706023aa"
+        "65ffc843284679b08831ff2a54d8693cdeda9afc683af8f818b332fd4794560a"
     );
     db.execute("UPDATE schema_migrations SET schema_hash=?", [hash])
         .unwrap();
@@ -272,6 +280,32 @@ END;")
         super::test_support::snapshot_recovery_files(&fixture.path),
         before
     );
+}
+
+#[test]
+fn reverse_conversation_parent_lookup_uses_the_expression_index() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    store
+        .transaction(|tx| {
+            let plan = tx
+                .prepare("EXPLAIN QUERY PLAN SELECT 1 FROM conversation_observations WHERE json_extract(record_json, '$.parentId') = ?1")
+                .unwrap()
+                .query_map(["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            println!("conversation-parent reverse-reference plan:\n{}", plan.join("\n"));
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.contains("conversation_parent_reference")),
+                "reverse lookup must not scan all conversation observations: {plan:?}"
+            );
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]
