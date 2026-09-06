@@ -4,9 +4,9 @@ Retract preview releases are Apple-silicon macOS application archives with an ad
 
 ## Prepare the release
 
-1. Update the version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `crates/cleaner-domain/Cargo.toml`. All four values must match exactly.
+1. Update the version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `crates/cleaner-domain/Cargo.toml`, and `crates/retract-domain/Cargo.toml`. All five values must match exactly; update the corresponding lockfiles with the pinned toolchains.
 2. Update `CHANGELOG.md`, commit the release changes, and ensure the working tree is clean.
-3. Run `npm run container:check` and `npm run verify:production-bundle`.
+3. Run `npm run container:check` and both Linux architecture gates in [TEST_PLAN.md](TEST_PLAN.md). They include production-bundle, version/license and release-metadata checks; retain the separate native/live/manual outcomes.
 4. On an Apple-silicon Mac, run `npm run package:unsigned`.
 
 The packaging command builds the normal production app, requires an arm64-only executable, verifies the hardened ad-hoc signature, checks the pinned TDLib checksum and runtime dependencies, expands the archive into a fresh directory, and verifies the expanded copy again.

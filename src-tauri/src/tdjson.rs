@@ -52,7 +52,13 @@ struct ScriptedState {
 #[cfg(test)]
 struct ScriptedExchange {
     request: Value,
-    response: Value,
+    response: ScriptedResponse,
+}
+
+#[cfg(test)]
+enum ScriptedResponse {
+    Immediate(Value),
+    Delayed(oneshot::Receiver<Value>),
 }
 
 #[cfg(test)]
@@ -69,6 +75,11 @@ pub(crate) struct ScriptedRequestTrace {
 #[derive(Clone)]
 pub(crate) struct ScriptedTdJson {
     state: Arc<ScriptedState>,
+}
+
+#[cfg(test)]
+pub(crate) struct ScriptedDelayedResponse {
+    sender: Option<oneshot::Sender<Value>>,
 }
 
 struct Inner {
@@ -165,7 +176,7 @@ impl TdJsonClient {
         match &self.backend {
             ClientBackend::Native(inner) => native_request(Arc::clone(inner), request).await,
             #[cfg(test)]
-            ClientBackend::Scripted(state) => scripted_request(state, request),
+            ClientBackend::Scripted(state) => scripted_request(state, request).await,
         }
     }
 
@@ -236,27 +247,36 @@ fn checked_response(response: Value) -> Result<Value, AppError> {
 }
 
 #[cfg(test)]
-fn scripted_request(state: &ScriptedState, request: Value) -> Result<Value, AppError> {
+async fn scripted_request(state: &ScriptedState, request: Value) -> Result<Value, AppError> {
     let trace = scripted_trace(&request);
     state
         .traces
         .lock()
         .map_err(|_| AppError::StateUnavailable)?
         .push(trace.clone());
-    let mut exchanges = state
-        .exchanges
-        .lock()
-        .map_err(|_| AppError::StateUnavailable)?;
-    let Some(index) = exchanges
-        .iter()
-        .position(|exchange| exchange.request == request)
-    else {
-        return Err(AppError::Gateway(format!(
-            "SCRIPTED_TDJSON_UNEXPECTED_REQUEST:{}",
-            trace.kind
-        )));
+    let response = {
+        let mut exchanges = state
+            .exchanges
+            .lock()
+            .map_err(|_| AppError::StateUnavailable)?;
+        let Some(index) = exchanges
+            .iter()
+            .position(|exchange| exchange.request == request)
+        else {
+            return Err(AppError::Gateway(format!(
+                "SCRIPTED_TDJSON_UNEXPECTED_REQUEST:{}",
+                trace.kind
+            )));
+        };
+        exchanges.remove(index).response
     };
-    checked_response(exchanges.remove(index).response)
+    let response = match response {
+        ScriptedResponse::Immediate(response) => response,
+        ScriptedResponse::Delayed(receiver) => receiver
+            .await
+            .map_err(|_| AppError::Gateway("SCRIPTED_TDJSON_RESPONSE_DROPPED".into()))?,
+    };
+    checked_response(response)
 }
 
 #[cfg(test)]
@@ -287,7 +307,25 @@ impl ScriptedTdJson {
             .exchanges
             .lock()
             .expect("scripted TDJSON exchange lock")
-            .push(ScriptedExchange { request, response });
+            .push(ScriptedExchange {
+                request,
+                response: ScriptedResponse::Immediate(response),
+            });
+    }
+
+    pub(crate) fn delay_response(&self, request: Value) -> ScriptedDelayedResponse {
+        let (sender, receiver) = oneshot::channel();
+        self.state
+            .exchanges
+            .lock()
+            .expect("scripted TDJSON exchange lock")
+            .push(ScriptedExchange {
+                request,
+                response: ScriptedResponse::Delayed(receiver),
+            });
+        ScriptedDelayedResponse {
+            sender: Some(sender),
+        }
     }
 
     pub(crate) fn emit_update(&self, update: Value) {
@@ -313,6 +351,17 @@ impl ScriptedTdJson {
             "{} scripted TDJSON exchanges were not consumed",
             exchanges.len()
         );
+    }
+}
+
+#[cfg(test)]
+impl ScriptedDelayedResponse {
+    pub(crate) fn respond(mut self, response: Value) {
+        self.sender
+            .take()
+            .expect("scripted delayed response is single use")
+            .send(response)
+            .expect("scripted delayed request is still pending");
     }
 }
 

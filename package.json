@@ -35,7 +35,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run tdlib:ensure && npm run test && npm run build && cargo test --manifest-path crates/cleaner-domain/Cargo.toml && RETRACT_TEST_TDLIB_PATH=$PWD/vendor/tdlib-dist/libtdjson.dylib cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "npm run tdlib:ensure && npm run test && npm run test:release && npm run build && cargo test --locked --manifest-path crates/cleaner-domain/Cargo.toml && cargo test --locked --manifest-path crates/retract-domain/Cargo.toml && RETRACT_TEST_TDLIB_PATH=$PWD/vendor/tdlib-dist/libtdjson.dylib cargo test --locked --manifest-path src-tauri/Cargo.toml",
     "tauri": "npm run tdlib:ensure && tauri"
   },
   "dependencies": {

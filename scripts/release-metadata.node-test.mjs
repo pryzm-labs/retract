@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-import { assertVersionConsistency, buildManifest, parseBuildStamp } from "./release-metadata.mjs";
+import { assertVersionConsistency, buildManifest, parseBuildStamp, readReleaseInput } from "./release-metadata.mjs";
 
 const tdlib = {
   version: "1.8.64",
@@ -21,8 +21,37 @@ const expectedBundleFiles = [
   "Contents/Resources/lib/libtdjson.dylib",
   "Contents/Resources/licenses/TDLib-LICENSE_1_0.txt",
   "Contents/Resources/licenses/TDLib-build-stamp.txt",
+  "Contents/Resources/licenses/SQLCipher-LICENSE.txt",
+  "Contents/Resources/licenses/SQLCipher-provenance.json",
+  "Contents/Resources/licenses/OpenSSL-LICENSE.txt",
   "Contents/_CodeSignature/CodeResources"
 ];
+
+test("release metadata includes the neutral crate across version updates", () => {
+  const directory = mkdtempSync(join(tmpdir(), "retract-release-input-"));
+  const previousCommit = process.env.RETRACT_SOURCE_COMMIT;
+  process.env.RETRACT_SOURCE_COMMIT = "0123456789abcdef";
+  const put = (path, text) => {
+    mkdirSync(resolve(directory, path, ".."), { recursive: true });
+    writeFileSync(join(directory, path), text);
+  };
+  const manifests = ["src-tauri/Cargo.toml", "crates/cleaner-domain/Cargo.toml", "crates/retract-domain/Cargo.toml"];
+  try {
+    put("vendor/tdlib-dist/build-stamp.txt", `tdlib=${tdlib.version} commit=${tdlib.commit} arch=arm64 macos=12.0\nsha256=${tdlib.sha256} file=libtdjson.dylib\n`);
+    for (const version of ["0.1.0", "0.2.0-preview.1"]) {
+      put("package.json", JSON.stringify({ version }));
+      put("src-tauri/tauri.conf.json", JSON.stringify({ version, productName: "Retract", bundle: { macOS: { minimumSystemVersion: "12.0" } } }));
+      for (const manifest of manifests) put(manifest, `[package]\nname = "fixture"\nversion = "${version}"\n`);
+      assert.equal(buildManifest(readReleaseInput(directory)).version, version);
+      put("crates/retract-domain/Cargo.toml", '[package]\nname = "retract-domain"\nversion = "9.9.9"\n');
+      assert.throws(() => readReleaseInput(directory), /versions must match/);
+    }
+  } finally {
+    if (previousCommit === undefined) delete process.env.RETRACT_SOURCE_COMMIT;
+    else process.env.RETRACT_SOURCE_COMMIT = previousCommit;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function createExpectedBundle(root) {
   for (const relativePath of expectedBundleFiles) {
@@ -55,7 +84,8 @@ test("rejects inconsistent application versions", () => {
     packageVersion: "0.1.0",
     tauriVersion: "0.1.1",
     rustVersion: "0.1.0",
-    domainVersion: "0.1.0"
+    domainVersion: "0.1.0",
+    neutralDomainVersion: "0.1.0"
   }), /versions must match/);
 });
 

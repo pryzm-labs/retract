@@ -49,7 +49,10 @@
     "resources": {
       "../vendor/tdlib-dist/libtdjson.dylib": "lib/libtdjson.dylib",
       "../vendor/tdlib-dist/TDLib-LICENSE_1_0.txt": "licenses/TDLib-LICENSE_1_0.txt",
-      "../vendor/tdlib-dist/build-stamp.txt": "licenses/TDLib-build-stamp.txt"
+      "../vendor/tdlib-dist/build-stamp.txt": "licenses/TDLib-build-stamp.txt",
+      "../vendor/sqlcipher/LICENSE.txt": "licenses/SQLCipher-LICENSE.txt",
+      "../vendor/sqlcipher/provenance.json": "licenses/SQLCipher-provenance.json",
+      "../vendor/sqlcipher/OPENSSL-LICENSE.txt": "licenses/OpenSSL-LICENSE.txt"
     },
     "category": "Utility",
     "shortDescription": "Local-first Telegram history cleanup",

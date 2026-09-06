@@ -1,3 +1,5 @@
+import type { ActiveContext, Scope, ScopedResourceRef, ConversationId, ContentId, ActorId, ResourceId, Uuid } from "./providers/identity";
+import type { RemediationPlan, ScopedJobRecord, IdentityStatus, LegacyHistoryRecord, IntentDescriptor } from "./providers/contract";
 export type ChatKind =
   | "direct"
   | "basic_group"
@@ -59,7 +61,10 @@ export interface ChatCapabilities {
 }
 
 export interface ChatSummary {
-  id: number;
+  id: ConversationId;
+  scope: Scope;
+  ref: ScopedResourceRef;
+  intents: IntentDescriptor[];
   title: string;
   kind: ChatKind;
   archived: boolean;
@@ -70,16 +75,19 @@ export interface ChatSummary {
 }
 
 export interface MessageSnapshot {
-  chatId: number;
-  messageId: number;
-  senderId: number;
+  scope: Scope;
+  ref: ScopedResourceRef;
+  actorRef: ScopedResourceRef | null;
+  chatId: ConversationId;
+  messageId: ContentId;
+  senderId: ActorId;
   senderName: string;
   sentAt: string;
   isOutgoing: boolean;
   contentKind: ContentKind;
   preview: string;
   privacyFindings: SensitiveDataKind[];
-  albumId?: number | null;
+  albumId?: ResourceId | null;
   isPinned: boolean;
   deletionReach: DeletionReach;
 }
@@ -104,8 +112,8 @@ export interface PlanSummary {
   cannotDelete: number;
 }
 
-export interface PlanView {
-  id: string;
+export interface PlanView extends RemediationPlan {
+  context: ActiveContext;
   operation: PlanOperation;
   chatTitle?: string | null;
   targetSenderName?: string | null;
@@ -115,33 +123,21 @@ export interface PlanView {
   createdAt: string;
 }
 
-export type JobStatus =
-  | "queued"
-  | "running"
-  | "completed"
-  | "partial"
-  | "failed"
-  | "cancelled";
-
-export interface JobRecord {
-  id: string;
-  planId: string;
-  operation: PlanOperation;
-  targetChatIds: number[];
-  status: JobStatus;
+export type JobStatus = ScopedJobRecord["status"];
+export interface JobRecord extends ScopedJobRecord {
   total: number;
   deleted: number;
   skipped: number;
   failed: number;
-  nextBatch: number;
-  retryAfterSeconds?: number | null;
+  retryAfterSeconds: number | null;
   errorCodes: string[];
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface AppSnapshot {
-  runtimeMode: "demo" | "live";
+  context: ActiveContext | null;
+  identity: IdentityStatus;
+  catalog: CatalogProgress;
+  legacyHistory: LegacyHistoryRecord[];
   accountLabel: string;
   modeReason?: string | null;
   chats: ChatSummary[];
@@ -179,7 +175,7 @@ export type MessageDirection = "any" | "mine" | "others";
 
 export interface SearchRequest {
   query: string;
-  chatIds: number[];
+  conversations: ScopedResourceRef[];
   chatKinds: ChatKind[];
   contentKinds: ContentKind[];
   direction: MessageDirection;

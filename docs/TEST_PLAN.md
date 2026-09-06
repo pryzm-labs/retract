@@ -4,36 +4,42 @@
 
 No production Telegram account may be used until every applicable test below passes against Telegram’s test data center with disposable accounts and groups. Record the Retract commit, TDLib source commit and SHA-256, macOS version, architecture, account role, request, TDLib result, and observed postcondition for each case.
 
-Set `RETRACT_TELEGRAM_TEST_DC=1`. Confirm the UI reports the intended Telegram account and TDLib 1.8.64; an unconfigured setup state is not a passing live test.
+Use the **Use Telegram's test server** setting (or the developer override `RETRACT_TELEGRAM_TEST_DC=1`). Confirm account verification completes and the UI reports the intended Telegram account and TDLib 1.8.64; auth-ready or an unconfigured setup state is not a passing live test. Live deletion and credential/Keychain checks require explicit authorization for those disposable identities; the automated gate below does not access them.
 
 ## Automated gate
 
-Run from a clean checkout:
+The preferred gate uses pinned Docker toolchains, locked dependencies, shared named caches, cache-only output, and non-root/offline project execution:
 
 ```sh
-npm ci
-npm run check
-cargo clippy --manifest-path crates/cleaner-domain/Cargo.toml --all-targets -- -D warnings
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-npm audit --audit-level=high
-npm run tauri build -- --debug
+npm run container:check
+docker buildx build --platform linux/amd64 --target checks --output type=cacheonly --progress plain .
+docker buildx build --platform linux/arm64 --target checks --output type=cacheonly --progress plain .
 ```
 
-Required: no failed tests, warnings treated as errors, no high/critical npm advisories, successful app bundle, and no unexpected network requests other than Telegram endpoints.
+These commands run unfiltered Vitest, release/public metadata tests, TypeScript/production build, fixture exclusion, and Rust tests/formatting/Clippy for `cleaner-domain`, `retract-domain` and `src-tauri`. Require no failed/ignored regression tests and Clippy warnings treated as errors. Do not export runnable images or prune Docker state for verification. The npm wrapper runs on the host only to dispatch Docker; project tests/builds run inside the container.
+
+The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) separately runs `npm ci --ignore-scripts --no-audit --no-fund` and `npm run package:unsigned` on macOS. It verifies the app, bundled TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. If that job cannot be run for the tested revision, report it as unavailable/not run; do not fabricate a package or access real Keychain/session data for automated proof.
+
+An authorized native developer may additionally run `npm run check` to exercise the opt-in bundled TDLib loading smoke test. A separately authorized online `npm audit --audit-level=high` checks current advisories; it is not part of the offline Docker result. Record these outcomes separately, including unexpected network access during live testing.
+
+### Encrypted archive integration
+
+The automated archive gate uses synthetic files and disposable injected keys only. Both macOS packaging workflows run `persistence::archive::` and `secure_store::vault` test filters; these include original codec tests, store/recovery/ingestion/query/removal tests, bounded-worker lifecycle tests, and real-file/process credential-lease tests with injected I/O. No real-Keychain or Telegram test is included in these filters. Normal packaging leaves the optional benchmark feature disabled.
+
+Verify lazy construction, settings-first and archive-first credential access, fail-fast second-process contention without vault I/O, cancelled open/shutdown waiters, rejection after terminal clearing, two pending batches, cancellation while both slots are occupied, exact retry progress, wrong scopes, and surviving-source queries after removal. Use the opt-in [100,000-item benchmark](ARCHIVE_STORAGE.md#opt-in-synthetic-benchmark) once for a relevant implementation revision, recording cumulative OS peak RSS, exact phase DB/WAL lengths, sampled disk highs, elapsed phases and committed progress. It is not part of every test run.
+
+Before enabling an archive importer, an authorized native operator must quit all older Retract copies, then verify final-identity Keychain prompts/ACLs, v1-to-v2 secret preservation, denied/locked Keychain behavior, competing app/profile ownership and complete shutdown drain. Verify that database/WAL/journal/temporary files and diagnostic logs contain no plaintext canaries, and that memory/disk-pressure compaction failures leave removal durable and maintenance visibly pending. Vault downgrades and forensic-erasure claims are unsupported. Record these manual results separately from synthetic CI and rerun the Apple-silicon test/package job on the final reviewed commit.
 
 ### Telegram provider-refactor characterization
 
-Before changing Telegram-facing domain or IPC types, run:
+The full Docker gate includes frozen v1 readers/native behavior and current v2 lifecycle tests. For focused synthetic iteration:
 
 ```sh
-npx vitest run src/ipc-contract.test.ts src/components/AuthGate.test.tsx src/App.test.tsx src/api.test.ts
-RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml wire_contract_tests
-RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml live_gateway::tests
-RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml service::tests
-RETRACT_TEST_TDLIB_PATH="$PWD/vendor/tdlib-dist/libtdjson.dylib" cargo test --manifest-path src-tauri/Cargo.toml secure_store::tests
+docker buildx build --target focused-checks --build-arg 'RETRACT_CHECK=npm test -- src/provider-lifecycle.test.tsx src/providers/contract.test.ts src/ipc-contract.test.ts' --output type=cacheonly --progress plain .
+docker buildx build --target focused-checks --build-arg 'RETRACT_CHECK=cargo test --offline --locked --manifest-path src-tauri/Cargo.toml foundation_lifecycle && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml compatibility::tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml persistence::tests' --output type=cacheonly --progress plain .
 ```
 
-These tests are compatibility gates. A provider migration may update their type names only in the same reviewed change that supplies an explicit old-to-new wire migration and proves equivalent Telegram behavior.
+These focused filters are not substitutes for the full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for the complete boundary inventory and preserved native behavior.
 
 ## Test identities
 
@@ -86,7 +92,8 @@ For every accepted operation, verify from both participating accounts after TDLi
 
 ## Confirmation and abuse cases
 
-- Alter plan ID, fingerprint, chat ID, message ID, sender ID, operation, or typed title through IPC; every mutation must fail.
+- Alter contract version, provider/account/source, session generation, plan ID/fingerprint, resource ref/locator, ordered effect, recipe or typed title through v2 IPC; every unauthorized mutation must fail.
+- Switch account or sign out while the native owner prompt is open or after approval; the stale grant must not authorize a new context.
 - Reuse a high-impact system-auth grant against another plan; fail.
 - Wait more than 60 seconds after macOS authentication; fail.
 - Reuse the same grant or execute the same plan twice; fail.
@@ -99,25 +106,32 @@ For every accepted operation, verify from both participating accounts after TDLi
 
 - Inject `FLOOD_WAIT_2`/429 for capability fetch and deletion. Job becomes queued, stays cancellable, persists its wait, rechecks permissions, and resumes.
 - Cancel while queued for flood wait. Job becomes cancelled and makes no later call.
-- Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Restart resumes only the frozen IDs and never deletes outside the reviewed plan.
+- Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Resume requires durable start authorization, supported frozen-idempotent work, a valid cursor and the same verified account/source. Ambiguous outcomes require new review and never become confirmed deletions.
 - Kill the app around whole-history, self-only history, sender-wide, and permanent group-deletion calls. An ambiguous nonterminal job must stop with `restart_requires_new_review`; it must not replay against later messages until the user creates and authorizes a new plan.
 - Copy an authenticated test-DC job store into the production profile. Startup must reject it as profile-bound ciphertext and execute nothing. A legacy unbound nonterminal store must be retained only as a stopped job requiring new review.
 - Disconnect/reconnect network during search and deletion; errors remain explicit and UI stays responsive.
 - Corrupt the encrypted job file; startup fails closed with no execution.
+- Migrate each frozen legacy store: retain exact `jobs.pre-provider.enc`, stop unfinished history for new review and never assign it an account. Older readers reject active `RTRCT03`; the backup stays historical, never automatically restored or removed.
+- Interrupt migration before/after replacement, present a conflicting backup or a missing active file with artifacts, and corrupt active v3 while retaining a valid backup. Startup must neither restore old work nor silently initialize empty history.
+- Start a second process for the same profile: it must report profile already in use before reading its key. Same-process runtime replacement reuses the single store; the last owner releasing it permits reopening.
+- Delay/fail/malform `getMe`, fail the durable identity save, rename/reconnect, and restart the same account. No usable context precedes verified durable mapping; existing mappings remain stable and production/test identities remain separate.
+- Open otherwise resumable work under another verified account: it becomes blocked, keeps its cursor, schedules no mutation and still permits connection settings. Returning to the original account does not broaden its targets.
+- Fail a required job/progress save: no candidate is published as durable and no later batch or membership/self-removal call proceeds.
 - Change/remove the Keychain key; encrypted state cannot be decrypted and no plan auto-runs.
 - Load a TDLib version other than 1.8.64; authorization stays blocked with an explicit error.
 
 ## macOS and accessibility
 
 - Apple-silicon builds on macOS 12 and the current supported macOS release.
-- Light/dark mode, reduced motion, 200% effective zoom, keyboard-only flow, visible focus, and VoiceOver labels/order.
+- Light/dark mode, reduced motion, 200% effective zoom, keyboard-only flow, visible focus, and VoiceOver labels/order. Exercise a large plan in a short viewport: every ordered effect, exact-title field, acknowledgement and final control must remain reachable. Existing jsdom CSS/DOM tests are not rendered viewport or native focus/VoiceOver evidence.
+- Open full job details: selected/eligible/deleted/skipped/failed/uncertain counters stay distinct, retry countdown and blocked/new-review reasons are safe, legacy missing counts are labeled not recorded, and no raw provider text appears.
 - For low, medium, high, and critical operations: Touch ID available, Touch ID unavailable with password fallback, cancelled password, locked-out biometrics, and app background/system-cancel cases. Confirm the native reason identifies the immutable target and plan token.
-- Code signing, hardened runtime, notarization, Gatekeeper launch, update path, Keychain ACL prompts, and uninstall/reinstall behavior.
+- Verify the unsigned preview's ad-hoc signature, hardened runtime, documented per-app Gatekeeper launch, update path, Keychain ACL prompts and uninstall/reinstall behavior. Apple Developer enrollment, paid signing and notarization are not preview prerequisites; preview manifests must truthfully state `notarized: false`.
 
 ## Production exit criteria
 
 - Two-person review of evidence for every destructive and confirmation case.
 - No unresolved critical/high security findings.
-- TDLib binary digest matches the reviewed artifact and is bundled/signed with the app.
+- TDLib binary digest matches the reviewed artifact and is bundled/ad-hoc-signed with the preview app.
 - Privacy copy and support documentation state the residual-copy limitations.
-- A rollback build exists. Rollback can stop future deletions but cannot restore Telegram-accepted deletions.
+- Preserve the prior source/build for diagnosis, but do not automatically downgrade or restore job state: an older binary cannot read active v3. The retained migration backup does not restore Telegram-accepted deletions and must not be replayed as a rollback procedure.

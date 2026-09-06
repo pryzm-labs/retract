@@ -52,6 +52,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Require an Apple-silicon host
+        run: test "$(uname -m)" = "arm64"
+
       - name: Use the pinned Node toolchain
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -60,6 +63,11 @@ jobs:
 
       - name: Install locked JavaScript dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify synthetic archive and injected vault ownership tests
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml persistence::archive::
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml secure_store::vault
 
       - name: Build and verify the unsigned preview
         run: npm run package:unsigned

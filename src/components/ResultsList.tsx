@@ -1,3 +1,4 @@
+import { avatarSeed, resourceKey } from "../providers/identity";
 import { Check, LoaderCircle, Pin, SearchX, ShieldAlert } from "lucide-react";
 import type { ChatSummary, MessageSnapshot, SensitiveDataKind } from "../types";
 import { Avatar, ContentIcon, contentLabel, formatCompactDate, plural } from "./common";
@@ -15,10 +16,10 @@ interface ResultsListProps {
   onToggleAll: () => void;
 }
 
-export const messageKey = (message: Pick<MessageSnapshot, "chatId" | "messageId">) => `${message.chatId}:${message.messageId}`;
+export const messageKey = (message: Pick<MessageSnapshot, "scope" | "messageId">) => resourceKey(message.scope, "content", message.messageId);
 
 export function ResultsList({ messages, chats, selectedKeys, loading, refreshing, query, privacyScan, truncated, onToggle, onToggleAll }: ResultsListProps) {
-  const chatMap = new Map(chats.map((chat) => [chat.id, chat]));
+  const chatMap = new Map(chats.map((chat) => [resourceKey(chat.scope, "conversation", chat.id), chat]));
   const allSelected = messages.length > 0 && messages.every((message) => selectedKeys.has(messageKey(message)));
 
   return (
@@ -48,14 +49,14 @@ export function ResultsList({ messages, chats, selectedKeys, loading, refreshing
         {messages.map((message) => {
           const key = messageKey(message);
           const checked = selectedKeys.has(key);
-          const chat = chatMap.get(message.chatId);
+          const chat = chatMap.get(resourceKey(message.scope, "conversation", message.chatId));
           return (
             <article className={`message-row ${checked ? "is-selected" : ""}`} key={key}>
               <label className="message-check" aria-label={`Select message from ${message.senderName}`}>
                 <input type="checkbox" checked={checked} onChange={() => onToggle(message)} />
                 <span className="custom-checkbox">{checked && <Check size={12} />}</span>
               </label>
-              <Avatar name={message.senderName} seed={Math.abs(message.senderId % 19)} size={35} />
+              <Avatar name={message.senderName} seed={avatarSeed(message.senderId)} size={35} />
               <button type="button" className="message-body" onClick={() => onToggle(message)}>
                 <span className="message-meta">
                   <strong>{message.senderName}</strong>

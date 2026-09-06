@@ -32,7 +32,6 @@ RELEASE_DIR="$PROJECT_ROOT/artifacts/release"
 verify_app() {
   verify_path=$1
   verify_details="$RELEASE_TMP/codesign-details.txt"
-  verify_deps="$RELEASE_TMP/tdlib-dependencies.txt"
 
   sh scripts/verify-app-contents.sh "$verify_path"
 
@@ -62,12 +61,19 @@ verify_app() {
     exit 1
   fi
 
-  otool -L "$verify_path/$TDLIB_REL" >"$verify_deps"
-  sed -n '2,$s/^[[:space:]]*\([^ ]*\).*/\1/p' "$verify_deps" | while IFS= read -r dependency; do
+  verify_native_dependencies "$verify_path/$APP_BINARY_REL" "$RELEASE_TMP/app-dependencies.txt"
+  verify_native_dependencies "$verify_path/$TDLIB_REL" "$RELEASE_TMP/tdlib-dependencies.txt"
+}
+
+verify_native_dependencies() {
+  native_path=$1
+  dependency_report=$2
+  otool -L "$native_path" >"$dependency_report"
+  sed -n '2,$s/^[[:space:]]*\([^ ]*\).*/\1/p' "$dependency_report" | while IFS= read -r dependency; do
     case "$dependency" in
       @rpath/libtdjson.dylib|/usr/lib/*|/System/Library/*) ;;
       *)
-        echo "TDLib has a non-system runtime dependency: $dependency" >&2
+        echo "Native artifact has a non-reviewed runtime dependency: $dependency" >&2
         exit 1
         ;;
     esac

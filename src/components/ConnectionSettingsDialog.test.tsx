@@ -1,4 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "../demo";
+import { testId, testJob } from "../test/v2-fixtures";
+import { uuid } from "../providers/identity";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
 import type { ConnectionSettings, SaveConnectionSettingsResult } from "../types";
@@ -36,7 +40,10 @@ describe("ConnectionSettingsDialog", () => {
     const liveResult: SaveConnectionSettingsResult = {
       connectionSettings: { ...bundledSettings, setupComplete: true },
       snapshot: {
-        runtimeMode: "live",
+        context: fixtureContext,
+        identity: { state: "ready" },
+        catalog: { phase: "ready", total: 0, processed: 0 },
+        legacyHistory: [],
         accountLabel: "Telegram account",
         modeReason: "Connected locally",
         chats: [],
@@ -57,6 +64,19 @@ describe("ConnectionSettingsDialog", () => {
       apiId: 12345678,
       apiHash: "0123456789abcdef0123456789abcdef",
       useTestDc: false
-    }));
+    }, null));
+  });
+
+  it("does not publish a delayed save after a genuine StrictMode dialog unmount", async () => {
+    const snapshot = await api.snapshot(fixtureContext);
+    let resolveSave!: (value: SaveConnectionSettingsResult) => void;
+    const save = vi.spyOn(api, "saveConnectionSettings").mockReturnValue(new Promise(resolve => { resolveSave = resolve; }));
+    const onSaved = vi.fn();
+    const view = render(<StrictMode><ConnectionSettingsDialog context={fixtureContext} settings={{ ...bundledSettings, apiId: 12345678, apiHashConfigured: true }} required onClose={vi.fn()} onSaved={onSaved} /></StrictMode>);
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    expect(save).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => resolveSave({ snapshot, connectionSettings: bundledSettings }));
+    expect(onSaved).not.toHaveBeenCalled();
   });
 });

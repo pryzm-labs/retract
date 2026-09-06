@@ -61,7 +61,7 @@ impl AuthSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageDirection {
     #[default]
@@ -156,6 +156,7 @@ pub struct PrepareSenderActionRequest {
     pub sender_id: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthValueRequest {
     pub value: String,
@@ -238,10 +239,17 @@ pub struct JobRecord {
     pub deleted: usize,
     pub skipped: usize,
     pub failed: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub uncertain: usize,
     #[serde(default)]
     pub next_batch: usize,
     #[serde(default)]
     pub retry_after_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<DateTime<Utc>>,
+    // Scoped projection metadata never extends the frozen v1 wire format.
+    #[serde(skip)]
+    pub(crate) scoped_diagnostics: Vec<retract_domain::SafeError>,
     pub error_codes: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -260,18 +268,27 @@ impl JobRecord {
             deleted: 0,
             skipped: plan.summary.self_only + plan.summary.cannot_delete,
             failed: 0,
+            uncertain: 0,
             next_batch: 0,
             retry_after_seconds: None,
+            retry_at: None,
+            scoped_diagnostics: Vec::new(),
             error_codes: Vec::new(),
             created_at: now,
             updated_at: now,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn backfill_target_chat_ids(&mut self, plan: &DeletionPlan) {
         if self.target_chat_ids.is_empty() {
             self.target_chat_ids = affected_chat_ids(plan);
         }
+    }
+
+    pub(crate) fn clear_retry(&mut self) {
+        self.retry_after_seconds = None;
+        self.retry_at = None;
     }
 }
 
@@ -289,6 +306,10 @@ fn affected_chat_ids(plan: &DeletionPlan) -> Vec<i64> {
     chat_ids.sort_unstable();
     chat_ids.dedup();
     chat_ids
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -448,8 +469,11 @@ mod wire_contract_tests {
             deleted: 1,
             skipped: 0,
             failed: 0,
+            uncertain: 0,
             next_batch: 1,
             retry_after_seconds: None,
+            retry_at: None,
+            scoped_diagnostics: Vec::new(),
             error_codes: Vec::new(),
             created_at: instant("2026-08-15T18:01:01Z"),
             updated_at: instant("2026-08-15T18:01:02Z"),

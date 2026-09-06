@@ -39,6 +39,7 @@ pub(crate) enum TestFailurePoint {
 pub struct DemoGateway {
     data: RwLock<DemoData>,
     reason: String,
+    verified_identity: Option<crate::providers::telegram::identity::VerifiedTelegramIdentity>,
     #[cfg(test)]
     chat_list_reads: AtomicUsize,
     #[cfg(test)]
@@ -72,6 +73,7 @@ impl DemoGateway {
             reason:
                 "No Telegram session is connected. Destructive actions affect demo fixtures only."
                     .into(),
+            verified_identity: None,
             #[cfg(test)]
             chat_list_reads: AtomicUsize::new(0),
             #[cfg(test)]
@@ -97,6 +99,15 @@ impl DemoGateway {
             #[cfg(test)]
             injected_failure_notify: Notify::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_verified_identity(
+        identity: crate::providers::telegram::identity::VerifiedTelegramIdentity,
+    ) -> Self {
+        let mut gateway = Self::new();
+        gateway.verified_identity = Some(identity);
+        gateway
     }
 
     #[cfg(test)]
@@ -228,6 +239,17 @@ impl DemoGateway {
         chat.capabilities.can_clear_for_everyone = allowed;
     }
 
+    pub(crate) async fn set_chat_membership(&self, chat_id: i64, role: ChatRole, can_leave: bool) {
+        let mut data = self.data.write().await;
+        let chat = data
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == chat_id)
+            .unwrap();
+        chat.capabilities.role = role;
+        chat.capabilities.can_leave_chat = can_leave;
+    }
+
     #[cfg(test)]
     pub(crate) async fn append_messages(&self, chat_id: i64, first_message_id: i64, count: usize) {
         let mut data = self.data.write().await;
@@ -283,6 +305,12 @@ impl TelegramGateway for DemoGateway {
 
     fn auth(&self) -> crate::model::AuthSnapshot {
         crate::model::AuthSnapshot::ready()
+    }
+
+    fn verified_identity(
+        &self,
+    ) -> Option<crate::providers::telegram::identity::VerifiedTelegramIdentity> {
+        self.verified_identity.clone()
     }
 
     fn catalog_progress(&self) -> CatalogProgress {

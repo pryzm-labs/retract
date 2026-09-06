@@ -1,3 +1,6 @@
+import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "./demo";
+import { testId, testJob } from "./test/v2-fixtures";
+import { uuid } from "./providers/identity";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
@@ -13,30 +16,7 @@ function expectSelectionCount(count: number) {
   expect(within(total!).getByText(count === 1 ? "message selected" : "messages selected")).toBeInTheDocument();
 }
 
-function syntheticJob(
-  id: string,
-  status: JobRecord["status"],
-  overrides: Partial<JobRecord> = {},
-): JobRecord {
-  const timestamp = "2026-01-02T03:04:05.000Z";
-  return {
-    id,
-    planId: `plan-${id}`,
-    operation: "selected_messages",
-    targetChatIds: [-2101],
-    status,
-    total: 9,
-    deleted: 0,
-    skipped: 0,
-    failed: 0,
-    nextBatch: 0,
-    retryAfterSeconds: null,
-    errorCodes: [],
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    ...overrides,
-  };
-}
+const syntheticJob = testJob;
 
 describe("Retract desktop UI", () => {
   beforeEach(async () => {
@@ -55,33 +35,44 @@ describe("Retract desktop UI", () => {
     expect(screen.queryByRole("button", { name: /Reset demo fixtures/i })).not.toBeInTheDocument();
   });
 
+  it("keeps legacy history review guidance accessible without blocking connection settings", async () => {
+    const snapshot = await api.bootstrapSnapshot();
+    const legacy = { id: testId("legacy-detail"), planId: testId("legacy-plan"), operation: "selected_messages" as const, status: "cancelled" as const,
+      total: 9, deleted: 2, skipped: 3, failed: 4, nextBatch: 1,
+      diagnostics: [{ code: "migration_requires_new_review" as const, message: "RAW_SECRET", retryAt: null }], createdAt: "2026-09-03T00:00:00Z", updatedAt: "2026-09-03T00:00:00Z" };
+    const withHistory = { ...snapshot, legacyHistory: [legacy], recentJobs: [testJob("blocked-history", "blocked", { diagnostics: [{ code: "scope_mismatch", message: "RAW_SECRET", retryAt: null }] })] };
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue(withHistory);
+    vi.spyOn(api, "snapshot").mockResolvedValue(withHistory);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: `View details for legacy cleanup ${legacy.id}` }));
+    expect(screen.getByRole("dialog", { name: "Cleanup job details" })).toHaveTextContent("A new review is required");
+    expect(document.body).not.toHaveTextContent("RAW_SECRET");
+    fireEvent.click(screen.getByRole("button", { name: "Close job details" }));
+    fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+    expect(await screen.findByRole("heading", { name: "Telegram connection" })).toBeInTheDocument();
+  });
+
   it("leaves the password gate before the full Telegram catalog finishes loading", async () => {
-    const demoSnapshot = await api.snapshot();
-    const demoSettings = await api.connectionSettings();
+    const demoSnapshot = await api.snapshot(fixtureContext);
+    const demoSettings = await api.connectionSettings(fixtureContext);
     const waiting: AppSnapshot = {
       ...demoSnapshot,
-      runtimeMode: "live",
+      context: null, identity: { state: "unavailable" },
+      catalog: { phase: "idle", total: 0, processed: 0 },
       chats: [],
       auth: { stage: "waiting_for_password", hint: "account password hint" }
     };
     const ready: AppSnapshot = {
       ...demoSnapshot,
-      runtimeMode: "live",
       auth: { stage: "ready" }
     };
     let finishCatalog!: (snapshot: AppSnapshot) => void;
     const catalog = new Promise<AppSnapshot>((resolve) => { finishCatalog = resolve; });
 
-    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValueOnce(waiting);
     vi.spyOn(api, "snapshot").mockImplementation(() => catalog);
     vi.spyOn(api, "connectionSettings").mockResolvedValue(demoSettings);
-    vi.spyOn(api, "catalogProgress").mockResolvedValue({
-      phase: "loading",
-      total: 531,
-      processed: 128
-    });
+    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({ ...ready, catalog: { phase: "loading", total: 531, processed: 128 } }).mockResolvedValueOnce(waiting);
     vi.spyOn(api, "submitAuth").mockResolvedValue();
-    vi.spyOn(api, "authSnapshot").mockResolvedValue({ stage: "ready" });
 
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Two-step verification" })).toBeInTheDocument();
@@ -95,7 +86,7 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByRole("heading", { name: "Preparing your workspace" })).toBeInTheDocument();
     expect(await screen.findByText("128 of 531 chats processed")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Two-step verification" })).not.toBeInTheDocument();
-    expect(api.submitAuth).toHaveBeenCalledWith("submit_password", "correct horse battery staple");
+    expect(api.submitAuth).toHaveBeenCalledWith("submit_password", "correct horse battery staple", null);
 
     finishCatalog(ready);
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
@@ -108,7 +99,7 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: /Design Team/ }));
     expect(await screen.findByText("CHAT AUTHORITY")).toBeInTheDocument();
     expect(screen.getAllByText("Owner").length).toBeGreaterThan(0);
-    expect(screen.getByText("Permanently delete group")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Permanently delete group" })).toBeInTheDocument();
   });
 
   it("makes admin-wide message cleanup explicit before leave-and-remove", async () => {
@@ -136,10 +127,10 @@ describe("Retract desktop UI", () => {
   it("offers self-only removal for an empty DM when full revocation is unavailable", async () => {
     const now = new Date().toISOString();
     const queuedRemoval: JobRecord = {
-      id: "queued-removal",
-      planId: "self-only-plan",
-      operation: "remove_chat_for_self",
-      targetChatIds: [304],
+      ...testJob("queued-removal", "queued"),
+      id: testId("queued-removal"),
+      planId: testId("self-only-plan"),
+      dirtyRefs: [fixtureRef("conversation", "304")],
       status: "queued",
       total: 0,
       deleted: 0,
@@ -157,8 +148,7 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Empty invite/ }));
 
-    expect(screen.getByText("Delete history and remove for me")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
 
     expect(await screen.findByRole("heading", { name: "Remove “Empty invite” from your chat list?" })).toBeInTheDocument();
     expect(screen.getByText(/other participant or group members keep their copies/i)).toBeInTheDocument();
@@ -167,18 +157,18 @@ describe("Retract desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
 
     expect(await screen.findByText("Waiting for Telegram to finish removing this chat…")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Removing chat…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove chat from my list" })).toBeDisabled();
     expect(screen.getByText("Removing…").closest("button")).toBeDisabled();
   });
 
   it("hides a completed chat removal without re-adding a stale targeted refresh", async () => {
-    const emptyChat = (await api.snapshot()).chats.find((chat) => chat.id === 304)!;
+    const emptyChat = (await api.snapshot(fixtureContext)).chats.find((chat) => chat.id === fixtureChatId("304"))!;
     const now = new Date().toISOString();
     vi.spyOn(api, "execute").mockResolvedValueOnce({
-      id: "completed-removal",
-      planId: "self-only-plan",
-      operation: "remove_chat_for_self",
-      targetChatIds: [304],
+      ...testJob("completed-removal", "completed", { total: 0 }),
+      id: testId("completed-removal"),
+      planId: testId("self-only-plan"),
+      dirtyRefs: [fixtureRef("conversation", "304")],
       status: "completed",
       total: 0,
       deleted: 0,
@@ -195,11 +185,11 @@ describe("Retract desktop UI", () => {
     render(<App />);
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Empty invite/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
     fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
 
-    await waitFor(() => expect(targetedRefresh).toHaveBeenCalledWith([304]));
+    await waitFor(() => expect(targetedRefresh).toHaveBeenCalledWith([fixtureRef("conversation", "304")], fixtureContext));
     expect(screen.queryByRole("button", { name: /Empty invite/ })).not.toBeInTheDocument();
   });
 
@@ -212,6 +202,32 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByRole("heading", { name: "Delete all your messages from “Volunteer Archive”?" })).toBeInTheDocument();
     expect(screen.getByText(/Your membership and every other participant’s messages remain/)).toBeInTheDocument();
     expect(document.querySelector(".plan-binding")?.textContent).toMatch(/is frozen to your message IDs in this chat/);
+  });
+
+  it("does not restore a pending removal when its completed poll returns a stale chat", async () => {
+    const emptyChat = (await api.snapshot(fixtureContext)).chats.find(chat => chat.id === fixtureChatId("304"))!;
+    const queued = testJob("polled-removal", "queued", { total: 0, dirtyRefs: [emptyChat.ref] });
+    vi.spyOn(api, "execute").mockResolvedValueOnce(queued);
+    vi.spyOn(api, "jobs").mockResolvedValue([{ ...queued, status: "completed", startedAuthorized: true }]);
+    const refresh = vi.spyOn(api, "refreshChats").mockResolvedValue([emptyChat]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /Empty invite/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Remove chat from my list" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /deletes only my history and chat-list entry/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove chat for me" }));
+    await screen.findByText("Waiting for Telegram to finish removing this chat…");
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith([emptyChat.ref], fixtureContext), { timeout: 2000 });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Empty invite/ })).not.toBeInTheDocument());
+  });
+
+  it("retries initial bootstrap failure including the scoped settings read", async () => {
+    vi.spyOn(api, "bootstrapSnapshot").mockRejectedValueOnce(new Error("Initial connection failed"));
+    const settings = vi.spyOn(api, "connectionSettings");
+    render(<App />);
+    await screen.findByText("Initial connection failed");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Search every chat");
+    expect(settings).toHaveBeenCalledWith(fixtureContext);
   });
 
   it("shows an impact review before any deletion call", async () => {
@@ -262,9 +278,12 @@ describe("Retract desktop UI", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const firstMessage: MessageSnapshot = {
-        chatId: -1001,
-        messageId: 9101,
-        senderId: 42,
+        scope: fixtureContext.scope,
+        ref: fixtureRef("content", "-1001", "9101"),
+        actorRef: fixtureRef("actor", "42"),
+        chatId: fixtureChatId("-1001"),
+        messageId: fixtureMessageId("-1001", "9101"),
+        senderId: uuid<"ActorId">(fixtureRef("actor", "42").id),
         senderName: "Synthetic Sender",
         sentAt: "2026-01-01T10:00:00.000Z",
         isOutgoing: true,
@@ -277,7 +296,8 @@ describe("Retract desktop UI", () => {
       };
       const secondMessage: MessageSnapshot = {
         ...firstMessage,
-        messageId: 9102,
+        ref: fixtureRef("content", "-1001", "9102"),
+        messageId: fixtureMessageId("-1001", "9102"),
         preview: "Second current result"
       };
       let resolveFirst!: (response: SearchResponse) => void;
@@ -317,10 +337,10 @@ describe("Retract desktop UI", () => {
     const prepareSelection = vi.spyOn(api, "prepareSelection");
     const authorizePlan = vi.spyOn(api, "authorizePlan");
     const execute = vi.spyOn(api, "execute").mockResolvedValue({
-      id: "synthetic-job",
-      planId: "synthetic-plan",
-      operation: "selected_messages",
-      targetChatIds: [-1001, 101],
+      ...testJob("synthetic-job", "queued"),
+      id: testId("synthetic-job"),
+      planId: testId("synthetic-plan"),
+      dirtyRefs: [fixtureRef("conversation", "-1001"), fixtureRef("conversation", "101")],
       status: "queued",
       total: 2,
       deleted: 0,
@@ -341,9 +361,9 @@ describe("Retract desktop UI", () => {
 
     expect(await screen.findByRole("heading", { name: "Delete 2 messages for everyone?" })).toBeInTheDocument();
     expect(prepareSelection).toHaveBeenCalledWith([
-      { chatId: -1001, messageId: 11 },
-      { chatId: 101, messageId: 2 }
-    ]);
+      fixtureRef("content", "-1001", "11"),
+      fixtureRef("content", "101", "2")
+    ], fixtureContext);
     expect(prepareSelection).toHaveBeenCalledTimes(1);
     expect(authorizePlan).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
@@ -390,7 +410,8 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Syncing cleanup…")).toBeInTheDocument();
     expect(nativeAuthorization).toHaveBeenCalledTimes(1);
     expect(targetedRefresh).toHaveBeenCalledTimes(1);
-    expect(globalRefresh).not.toHaveBeenCalled();
+    // The initial verified catalog is the only global read; cleanup stays targeted.
+    expect(globalRefresh).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByText("Project Cedar launch credentials moved to the vault."));
     expect(screen.getByRole("button", { name: /Review deletion/ })).toBeEnabled();
 
@@ -422,7 +443,7 @@ describe("Retract desktop UI", () => {
   });
 
   it("polls an active cleanup through its terminal state and then stops polling", async () => {
-    const initial = await api.snapshot();
+    const initial = await api.snapshot(fixtureContext);
     const running = syntheticJob("polling-job", "running", {
       deleted: 2,
       nextBatch: 1,
@@ -431,7 +452,7 @@ describe("Retract desktop UI", () => {
       deleted: 9,
       nextBatch: 3,
     });
-    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+    vi.spyOn(api, "snapshot").mockResolvedValue({
       ...initial,
       recentJobs: [running],
     });
@@ -450,13 +471,13 @@ describe("Retract desktop UI", () => {
   });
 
   it("cancels the exact active job once and renders the refreshed terminal record", async () => {
-    const initial = await api.snapshot();
+    const initial = await api.snapshot(fixtureContext);
     const queued = syntheticJob("cancel-exact-job", "queued");
     const cancelled = syntheticJob("cancel-exact-job", "cancelled", {
       skipped: 9,
       errorCodes: ["synthetic_cancelled"],
     });
-    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+    vi.spyOn(api, "snapshot").mockResolvedValue({
       ...initial,
       recentJobs: [queued],
     });
@@ -466,20 +487,20 @@ describe("Retract desktop UI", () => {
 
     render(<App />);
     const row = await screen.findByRole("group", {
-      name: "Cleanup job cancel-exact-job",
+      name: `Cleanup job ${testId("cancel-exact-job")}`,
     });
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
 
     expect(await screen.findByText("cancelled")).toBeInTheDocument();
     expect(cancelJob).toHaveBeenCalledTimes(1);
-    expect(cancelJob).toHaveBeenCalledWith("cancel-exact-job");
+    expect(cancelJob).toHaveBeenCalledWith(testId("cancel-exact-job"), fixtureContext);
     expect(jobs).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
   });
 
   it("clears the active-job polling timer when the app unmounts", async () => {
-    const initial = await api.snapshot();
-    vi.spyOn(api, "bootstrapSnapshot").mockResolvedValue({
+    const initial = await api.snapshot(fixtureContext);
+    vi.spyOn(api, "snapshot").mockResolvedValue({
       ...initial,
       recentJobs: [syntheticJob("unmounted-job", "running")],
     });

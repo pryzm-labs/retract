@@ -31,7 +31,8 @@ Retract is a local-first macOS desktop app for searching and cleaning Telegram h
 - Revoke selected messages, your own history, or the broadest history an administrator can remove before leaving a group.
 - Clear or remove a conversation from your own chat list even when there is nothing you can revoke for the other participant.
 - Permanently delete a group only when Telegram reports that the signed-in owner has that capability, through a separate critical action.
-- Resume frozen-ID cleanup batches after a flood wait or restart without expanding the reviewed target set. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion operations stop after an ambiguous restart and require a new review.
+- Resume eligible, previously authorized frozen-ID cleanup batches after a flood wait or restart only under the same verified account/source, without expanding the reviewed target set. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion operations stop after an ambiguous restart and require a new review.
+- Inspect complete cleanup outcomes on demand, including skipped, failed and uncertain results, retry timing, and safe explanations for blocked work.
 
 Text, photos, videos, documents, voice messages, albums, captions, and other attachments are deleted with their Telegram message when Telegram accepts the request.
 
@@ -82,7 +83,13 @@ On first launch, Retract opens **Connect Telegram**. There is no fixture or demo
 3. Enter both values in Retract. Enable Telegram's test server only when using disposable test-DC accounts.
 4. Save settings and complete QR, phone/code, and two-step verification as requested by Telegram.
 
-The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory, and authenticated job state is cryptographically bound to its test or production profile. Message contents are not written to Retract's job log.
+The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory. The version-3 job store is authenticated to its provider/profile; plans and jobs additionally bind the verified account and source. Telegram message bodies and private filenames are not indexed automatically or stored in Retract's job state. Exact confirmation titles remain encrypted plan data.
+
+The codebase also includes a lazy encrypted archive backend foundation, tested with synthetic data. There is no real archive importer, Discord/X support or archive source-switching UI yet. First archive use obtains an independent key and upgrades the shared vault to v2 while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the new credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [archive storage and its remaining native/manual gates](docs/ARCHIVE_STORAGE.md).
+
+When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. This job migration preserves credential values and TDLib session/profile paths; the separate archive-key upgrade is described above. See the [migration contract](docs/TELEGRAM_CHARACTERIZATION.md#current-encrypted-store-and-migration-contract).
+
+Connection failures show a safe diagnostic with verification retry and connection settings. If a profile is in use, close the other Retract process before retrying. Invalid state remains blocked: preserve the profile and backup rather than deleting or restoring files. A failed settings replacement can be corrected in the app; recovery rediscovers the current connection without automatically repeating a save or cleanup.
 
 ## Make the first deletion safely
 

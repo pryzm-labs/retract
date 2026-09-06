@@ -1,0 +1,16 @@
+[package]
+name = "retract-domain"
+version = "0.1.0"
+description = "Provider-neutral identity and remediation contracts for Retract"
+authors = ["Pryzm Labs"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Pryzm-Labs/retract"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+uuid = { version = "1", features = ["v5", "serde"] }

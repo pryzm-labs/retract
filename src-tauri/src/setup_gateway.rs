@@ -43,6 +43,12 @@ impl TelegramGateway for SetupGateway {
         }
     }
 
+    fn verified_identity(
+        &self,
+    ) -> Option<crate::providers::telegram::identity::VerifiedTelegramIdentity> {
+        None
+    }
+
     fn catalog_progress(&self) -> CatalogProgress {
         CatalogProgress {
             phase: "ready",

@@ -1,3 +1,4 @@
+import { refKey } from "../providers/identity";
 import {
   Archive,
   CircleOff,
@@ -17,13 +18,13 @@ export type ChatScope = "all" | "unanswered" | "empty" | "admin" | "archive";
 
 interface SidebarProps {
   chats: ChatSummary[];
-  selectedChatId: number | null;
+  selectedChatId: string | null;
   scope: ChatScope;
   chatQuery: string;
   accountLabel: string;
-  pendingRemovalChatIds: Set<number>;
+  pendingRemovalChatIds: Set<string>;
   onChatQueryChange: (value: string) => void;
-  onSelectChat: (id: number | null) => void;
+  onSelectChat: (id: string | null) => void;
   onScopeChange: (scope: ChatScope) => void;
   onOpenSettings: () => void;
 }
@@ -120,13 +121,13 @@ export function Sidebar({
 
       <div className="chat-list" aria-label="Chats">
         {visibleChats.map((chat) => {
-          const removalPending = pendingRemovalChatIds.has(chat.id);
+          const removalPending = pendingRemovalChatIds.has(refKey(chat.ref));
           return (
             <button
               type="button"
-              className={`chat-row ${selectedChatId === chat.id ? "is-selected" : ""} ${removalPending ? "is-pending-removal" : ""}`}
-              key={chat.id}
-              onClick={() => onSelectChat(chat.id)}
+              className={`chat-row ${selectedChatId === refKey(chat.ref) ? "is-selected" : ""} ${removalPending ? "is-pending-removal" : ""}`}
+              key={refKey(chat.ref)}
+              onClick={() => onSelectChat(refKey(chat.ref))}
               disabled={removalPending}
             >
               <Avatar name={chat.title} seed={chat.avatarSeed} size={34} />

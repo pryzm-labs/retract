@@ -1,3 +1,4 @@
+import type { ActiveContext } from "../providers/identity";
 import { CheckCircle2, KeyRound, LoaderCircle, LockKeyhole, QrCode, Settings2, Smartphone } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useState } from "react";
@@ -6,12 +7,13 @@ import type { AuthSnapshot } from "../types";
 import { BrandLogo } from "./BrandLogo";
 
 interface AuthGateProps {
+  context?: ActiveContext | null;
   auth: AuthSnapshot;
   onRefresh: () => Promise<void>;
   onOpenSettings: () => void;
 }
 
-export function AuthGate({ auth, onRefresh, onOpenSettings }: AuthGateProps) {
+export function AuthGate({ context = null, auth, onRefresh, onOpenSettings }: AuthGateProps) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +40,7 @@ export function AuthGate({ auth, onRefresh, onOpenSettings }: AuthGateProps) {
     setBusy(true);
     setError(null);
     try {
-      await api.requestQrAuth();
+      await api.requestQrAuth(context);
       await onRefresh();
     } catch (cause) {
       setError(errorMessage(cause));
@@ -53,7 +55,7 @@ export function AuthGate({ auth, onRefresh, onOpenSettings }: AuthGateProps) {
     setBusy(true);
     setError(null);
     try {
-      await api.submitAuth(field.command, value);
+      await api.submitAuth(field.command, value, context);
       setValue("");
       await onRefresh();
     } catch (cause) {

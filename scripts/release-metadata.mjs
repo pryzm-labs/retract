@@ -33,7 +33,7 @@ export function parseBuildStamp(text) {
 export function assertVersionConsistency(versions) {
   const entries = Object.entries(versions);
   const distinct = new Set(entries.map(([, version]) => version));
-  if (entries.length !== 4 || distinct.size !== 1 || !entries[0][1]) {
+  if (entries.length !== 5 || distinct.size !== 1 || !entries[0][1]) {
     throw new Error("Retract application versions must match");
   }
   return entries[0][1];
@@ -75,11 +75,16 @@ export function readReleaseInput(projectRoot = resolve(fileURLToPath(new URL("..
     readFileSync(resolve(projectRoot, "crates/cleaner-domain/Cargo.toml"), "utf8"),
     "domain crate"
   );
+  const neutralDomainVersion = cargoPackageVersion(
+    readFileSync(resolve(projectRoot, "crates/retract-domain/Cargo.toml"), "utf8"),
+    "neutral domain crate"
+  );
   const version = assertVersionConsistency({
     packageVersion: packageManifest.version,
     tauriVersion: tauriManifest.version,
     rustVersion,
-    domainVersion
+    domainVersion,
+    neutralDomainVersion
   });
   const sourceCommit = process.env.RETRACT_SOURCE_COMMIT
     || execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).trim();
