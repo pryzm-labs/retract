@@ -11,11 +11,9 @@ use super::{
         TelegramActorKind, TelegramActorLocator, TelegramConversationLocator,
         TelegramMessageLocator,
     },
-};
-use crate::{
-    error::AppError,
     model::{JobRecord, JobStatus},
 };
+use crate::error::AppError;
 
 pub(crate) fn descriptor(
     kind: ActionKind,

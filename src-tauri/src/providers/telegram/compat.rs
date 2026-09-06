@@ -9,9 +9,10 @@ use retract_domain::{
 use super::{
     diagnostics::{invalid_recipe, safe_diagnostic},
     locators::{TelegramConversationLocator, TelegramMessageLocator},
+    model::JobRecord,
     normalize::{descriptor, normalize_content, normalize_conversation},
 };
-use crate::{error::AppError, model::JobRecord};
+use crate::error::AppError;
 
 pub use super::recipe::{EXECUTION_SCHEMA, TelegramExecutionRecipe, TelegramFrozenItem};
 
@@ -50,7 +51,7 @@ impl TelegramCompatibilityProvider {
 
     pub async fn search_filtered(
         &self,
-        request: crate::model::SearchRequest,
+        request: super::model::SearchRequest,
     ) -> Result<Vec<retract_domain::ContentRecord>, AppError> {
         self.check_scope(&self.context.active().scope)?;
         let result = self.engine.search(request).await?;
@@ -235,12 +236,12 @@ impl crate::providers::ports::QuerySource for TelegramCompatibilityProvider {
             return Err(provider_error(invalid_recipe()));
         }
         let items = self
-            .search_filtered(crate::model::SearchRequest {
+            .search_filtered(super::model::SearchRequest {
                 query: request.query,
                 chat_ids: Vec::new(),
                 chat_kinds: Vec::new(),
                 content_kinds: Vec::new(),
-                direction: crate::model::MessageDirection::Any,
+                direction: super::model::MessageDirection::Any,
                 min_date: None,
                 max_date: None,
                 exclude_pinned: false,

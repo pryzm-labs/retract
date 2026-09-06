@@ -302,7 +302,7 @@ fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay
             let mut job = crate::providers::telegram::normalize::normalize_job(
                 &active.scope,
                 &legacy,
-                &crate::model::JobRecord::new(&legacy),
+                &crate::providers::telegram::model::JobRecord::new(&legacy),
                 true,
             )
             .unwrap();

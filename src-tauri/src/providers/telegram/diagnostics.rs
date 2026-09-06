@@ -2,6 +2,19 @@ use retract_domain::{ErrorCode, SafeError};
 
 use crate::error::AppError;
 
+/// Telegram-native failures are interpreted at the provider boundary. Shared
+/// storage and authentication variants retain the core mapping.
+pub(crate) fn boundary_error(error: AppError) -> SafeError {
+    match error {
+        AppError::Gateway(ref message) if message == "RETRACT_AMBIGUOUS_OUTCOME" => {
+            crate::provider_service::safe(ErrorCode::AmbiguousOutcome)
+        }
+        AppError::Gateway(_) => crate::provider_service::safe(ErrorCode::PermissionChanged),
+        AppError::Timeout(_) => crate::provider_service::safe(ErrorCode::Transient),
+        shared => crate::error::boundary_error(shared),
+    }
+}
+
 pub(crate) fn safe_diagnostic(code: &str) -> SafeError {
     SafeError {
         code: match code {

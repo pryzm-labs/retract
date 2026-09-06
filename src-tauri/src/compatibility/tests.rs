@@ -492,7 +492,7 @@ fn compatibility_v2_owned_group_cleanup_and_all_filtered_search_fields_remain_av
 fn final_review_own_message_intents_respect_known_kind_and_membership() {
     tauri::async_runtime::block_on(async {
         use super::fixtures::*;
-        use crate::gateway::TelegramGateway;
+        use crate::providers::telegram::native::ports::TelegramRead;
         let directory = tempfile::tempdir().unwrap();
         let active = context("context");
         let (harness, gateway) = telegram(directory.path(), active.clone()).await;
@@ -559,7 +559,7 @@ fn compatibility_v2_blocked_foreign_history_does_not_lock_settings() {
         let job = crate::providers::telegram::normalize::normalize_job(
             &active.scope,
             &native,
-            &crate::model::JobRecord::new(&native),
+            &crate::providers::telegram::model::JobRecord::new(&native),
             true,
         )
         .unwrap();
@@ -588,7 +588,7 @@ fn compatibility_v2_blocked_foreign_history_does_not_lock_settings() {
 
 #[test]
 fn compatibility_v2_errors_never_copy_private_native_content() {
-    use crate::error::{AppError, boundary_error};
+    use crate::{error::AppError, providers::telegram::diagnostics::boundary_error};
     for error in [
         AppError::Gateway("private attachment secret.jpg".into()),
         AppError::SecureStore("/private/auth-token".into()),
@@ -605,8 +605,38 @@ fn compatibility_v2_errors_never_copy_private_native_content() {
 }
 
 #[test]
+fn telegram_native_errors_keep_the_exact_v2_codes_at_the_provider_boundary() {
+    use crate::{error::AppError, providers::telegram::diagnostics::boundary_error};
+
+    for (error, expected) in [
+        (
+            AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()),
+            retract_domain::ErrorCode::AmbiguousOutcome,
+        ),
+        (
+            AppError::Gateway("CHAT_ADMIN_REQUIRED".into()),
+            retract_domain::ErrorCode::PermissionChanged,
+        ),
+        (
+            AppError::Timeout("synthetic timeout".into()),
+            retract_domain::ErrorCode::Transient,
+        ),
+        (
+            AppError::SecureStore("synthetic storage failure".into()),
+            retract_domain::ErrorCode::StatePersistenceFailed,
+        ),
+        (
+            AppError::SystemAuthentication("synthetic auth failure".into()),
+            retract_domain::ErrorCode::AuthenticationRequired,
+        ),
+    ] {
+        assert_eq!(boundary_error(error).code, expected);
+    }
+}
+
+#[test]
 fn historical_v1_request_and_error_types_are_compatibility_only() {
-    let request: crate::model::AuthValueRequest =
+    let request: crate::providers::telegram::model::AuthValueRequest =
         serde_json::from_value(json!({"value":"synthetic-code"})).unwrap();
     assert_eq!(request.value, "synthetic-code");
     let error = crate::error::CommandError::from(crate::error::AppError::NotFound);

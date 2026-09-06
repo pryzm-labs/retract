@@ -85,6 +85,7 @@ FROM check-base AS checks
 RUN --network=none npm test
 RUN --network=none npm run test:release
 RUN --network=none npm run check:public-repo
+RUN --network=none npm run check:provider-boundaries
 RUN --network=none npm run verify:production-bundle
 RUN --network=none cargo fmt --manifest-path crates/cleaner-domain/Cargo.toml -- --check \
     && cargo fmt --manifest-path crates/retract-domain/Cargo.toml -- --check \

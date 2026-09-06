@@ -325,7 +325,7 @@ mod wire_contract_tests {
 
     fn contract() -> Value {
         serde_json::from_str(include_str!(
-            "../../src/test/fixtures/telegram-ipc-contract.json"
+            "../../../../src/test/fixtures/telegram-ipc-contract.json"
         ))
         .expect("valid synthetic Telegram IPC contract fixture")
     }

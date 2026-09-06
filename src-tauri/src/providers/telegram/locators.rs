@@ -444,7 +444,7 @@ impl ProviderPayloadValidator for TelegramPayloadValidator {
         job: &retract_domain::ScopedJobRecord,
     ) -> Result<(), AppError> {
         let legacy = super::recipe::TelegramExecutionRecipe::validate_envelope(plan)?;
-        let initial = crate::model::JobRecord::new(&legacy);
+        let initial = super::model::JobRecord::new(&legacy);
         let expected = super::normalize::normalize_job(
             &plan.scope,
             &legacy,

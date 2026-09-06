@@ -19,12 +19,14 @@ const DIRECT_CHAT_LOOKUP_CONCURRENCY: usize = 8;
 use crate::{
     error::AppError,
     gateway::TelegramGateway,
-    model::{
-        AppSnapshot, AuthSnapshot, AuthorizePlanRequest, CatalogProgress, ExecuteRequest,
-        JobRecord, JobStatus, MessageRef, PersistedState, PlanView, PrepareChatActionRequest,
-        PrepareSelectionRequest, PrepareSenderActionRequest, SearchRequest, SearchResponse,
+    providers::telegram::{
+        engine_context::{EngineContext, SessionGateway, TelegramStateRepository},
+        model::{
+            AppSnapshot, AuthSnapshot, AuthorizePlanRequest, CatalogProgress, ExecuteRequest,
+            JobRecord, JobStatus, MessageRef, PersistedState, PlanView, PrepareChatActionRequest,
+            PrepareSelectionRequest, PrepareSenderActionRequest, SearchRequest, SearchResponse,
+        },
     },
-    providers::telegram::engine_context::{EngineContext, SessionGateway, TelegramStateRepository},
 };
 #[cfg(test)]
 use crate::{
@@ -1310,6 +1312,7 @@ mod tests {
     use super::*;
     use crate::{
         demo_gateway::{DemoGateway, TestFailurePoint},
+        providers::telegram::native::ports::{TelegramMutation, TelegramRead},
         secure_store::SecureJobStore,
     };
     use cleaner_domain::{ContentKind, MessageSnapshot, PlanOperation};
@@ -2429,7 +2432,7 @@ mod tests {
                     chat_ids: Vec::new(),
                     chat_kinds: Vec::new(),
                     content_kinds: Vec::new(),
-                    direction: crate::model::MessageDirection::Any,
+                    direction: crate::providers::telegram::model::MessageDirection::Any,
                     min_date: None,
                     max_date: None,
                     exclude_pinned: false,

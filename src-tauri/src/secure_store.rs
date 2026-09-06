@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 #[cfg(test)]
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{error::AppError, model::PersistedState};
+use crate::{error::AppError, providers::telegram::model::PersistedState};
 
 const MAGIC: &[u8; 7] = b"RTRCT02";
 const LEGACY_UNBOUND_MAGIC: &[u8; 7] = b"RTRCT01";
@@ -410,7 +410,7 @@ mod vault_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::PersistedState;
+    use crate::providers::telegram::model::PersistedState;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
     // Frozen once with Node.js crypto over hand-authored JSON, independently of

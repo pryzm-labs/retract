@@ -14,8 +14,12 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::{
     error::AppError,
-    gateway::{GatewayInfo, TelegramGateway},
-    model::{CatalogProgress, MessageDirection, SearchRequest},
+    providers::telegram::{
+        model::{AuthSnapshot, CatalogProgress, MessageDirection, SearchRequest},
+        native::ports::{
+            GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
+        },
+    },
 };
 
 #[derive(Clone)]
@@ -293,8 +297,7 @@ impl DemoGateway {
     }
 }
 
-#[async_trait]
-impl TelegramGateway for DemoGateway {
+impl TelegramSession for DemoGateway {
     fn info(&self) -> GatewayInfo {
         GatewayInfo {
             mode: "demo",
@@ -303,8 +306,8 @@ impl TelegramGateway for DemoGateway {
         }
     }
 
-    fn auth(&self) -> crate::model::AuthSnapshot {
-        crate::model::AuthSnapshot::ready()
+    fn auth(&self) -> AuthSnapshot {
+        AuthSnapshot::ready()
     }
 
     fn verified_identity(
@@ -325,7 +328,10 @@ impl TelegramGateway for DemoGateway {
             processed: count,
         }
     }
+}
 
+#[async_trait]
+impl TelegramRead for DemoGateway {
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError> {
         #[cfg(test)]
         self.chat_list_reads.fetch_add(1, Ordering::AcqRel);
@@ -492,7 +498,10 @@ impl TelegramGateway for DemoGateway {
             })
             .map(|stored| stored.snapshot.deletion_reach))
     }
+}
 
+#[async_trait]
+impl TelegramMutation for DemoGateway {
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -678,7 +687,10 @@ impl TelegramGateway for DemoGateway {
         }
         Ok(())
     }
+}
 
+#[async_trait]
+impl TelegramConnectionIo for DemoGateway {
     async fn request_qr_auth(&self) -> Result<(), AppError> {
         Err(demo_auth_error())
     }

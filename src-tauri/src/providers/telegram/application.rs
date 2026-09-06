@@ -1,19 +1,21 @@
 //! Production composition and typed application operations for the Telegram bridge.
 use super::{
-    LiveGateway, TelegramGateway,
+    LiveGateway,
     compat::TelegramCompatibilityProvider,
+    diagnostics::boundary_error,
     engine_context::{EngineContext, FoundationTelegramRepository},
     identity::IdentityVerificationStatus,
     locators::{
         TelegramActorLocator, TelegramConversationLocator, TelegramMessageLocator,
         TelegramPayloadValidator,
     },
+    model,
+    native::ports::{TelegramConnectionIo, TelegramSession},
     normalize::{descriptor, normalize_conversation, normalize_job},
     recipe::TelegramExecutionRecipe,
 };
 use crate::{
     compatibility::model_v2 as wire,
-    error::boundary_error,
     persistence::{FoundationStore, ProviderPayloadValidator},
     provider_service::{safe, validate_refs},
     providers::{ports::*, registry::ProviderRegistryError},
@@ -35,7 +37,7 @@ impl TelegramCompatibilityProvider {
     }
     fn normalize_live_job(
         &self,
-        job: &crate::model::JobRecord,
+        job: &model::JobRecord,
     ) -> Result<retract_domain::ScopedJobRecord, SafeError> {
         let envelope = self
             .engine
@@ -85,7 +87,7 @@ pub struct TelegramSearchFilters {
     #[serde(default)]
     pub content_kinds: Vec<cleaner_domain::ContentKind>,
     #[serde(default)]
-    pub direction: crate::model::MessageDirection,
+    pub direction: model::MessageDirection,
     pub min_date: Option<chrono::DateTime<chrono::Utc>>,
     pub max_date: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
@@ -143,7 +145,7 @@ impl ApplicationQuery for TelegramCompatibilityProvider {
             TelegramSearchFilters::default()
         };
         let items = self
-            .search_filtered(crate::model::SearchRequest {
+            .search_filtered(model::SearchRequest {
                 query: request.query,
                 chat_ids: request
                     .conversations
@@ -373,7 +375,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                 let locator: TelegramMessageLocator =
                     serde_json::from_value(reference.resource.locator_payload.clone())
                         .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
-                refs.push(crate::model::MessageRef {
+                refs.push(model::MessageRef {
                     chat_id: locator
                         .chat_id
                         .parse()
@@ -385,7 +387,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                 });
             }
             self.engine
-                .prepare_selection(crate::model::PrepareSelectionRequest { message_refs: refs })
+                .prepare_selection(model::PrepareSelectionRequest { message_refs: refs })
                 .await
         } else {
             if intent.targets.len() != 1 {
@@ -416,7 +418,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                     return Err(safe(ErrorCode::UnsupportedSchema));
                 }
                 self.engine
-                    .prepare_sender_action(crate::model::PrepareSenderActionRequest {
+                    .prepare_sender_action(model::PrepareSenderActionRequest {
                         chat_id: id,
                         sender_id,
                     })
@@ -433,7 +435,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
                     _ => return Err(safe(ErrorCode::UnsupportedSchema)),
                 };
                 self.engine
-                    .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                    .prepare_chat_action(model::PrepareChatActionRequest {
                         chat_id: id,
                         operation,
                     })
@@ -451,7 +453,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
     ) -> Result<(), SafeError> {
         self.check_active(context)?;
         self.engine
-            .authorize_plan(crate::model::AuthorizePlanRequest {
+            .authorize_plan(model::AuthorizePlanRequest {
                 plan_id: plan.plan_id,
                 fingerprint: plan.fingerprint,
             })
@@ -467,7 +469,7 @@ impl ReviewedLifecycle for TelegramCompatibilityProvider {
         self.check_active(context)?;
         let job = self
             .engine
-            .start_execution(crate::model::ExecuteRequest {
+            .start_execution(model::ExecuteRequest {
                 plan_id: request.plan_id,
                 fingerprint: request.fingerprint,
                 irreversible_acknowledged: request.irreversible_acknowledged,
@@ -543,7 +545,7 @@ impl ApplicationConnection for TelegramConnection {
         let progress = self.gateway.catalog_progress();
         let mut auth = self.gateway.auth();
         // The legacy auth error may include provider text; v2 exposes predefined copy.
-        if matches!(auth.stage, crate::model::AuthStage::Error) {
+        if matches!(auth.stage, model::AuthStage::Error) {
             auth.hint = Some("Telegram could not continue. Check settings and retry.".into());
         }
         Ok(wire::BootstrapSnapshot {

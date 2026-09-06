@@ -6,8 +6,6 @@ use uuid::Uuid;
 
 use crate::{
     demo_gateway::DemoGateway,
-    gateway::TelegramGateway,
-    model::{AuthorizePlanRequest, ExecuteRequest, MessageRef, PrepareSelectionRequest},
     persistence::{FoundationStore, ProviderPayloadValidator, StoreBinding},
     service::CleanerService,
 };
@@ -17,6 +15,10 @@ use super::{
     engine_context::{EngineContext, FoundationTelegramRepository, TelegramStateRepository},
     identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
     locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
+    model::{AuthorizePlanRequest, ExecuteRequest, MessageRef, PrepareSelectionRequest},
+    native::ports::{
+        GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
+    },
     normalize::{conversation_ref, normalize_job},
     recipe::{TelegramExecutionRecipe, bind_plan},
 };
@@ -29,20 +31,23 @@ struct ObservedGateway {
     preflight_error: Option<&'static str>,
     left: Arc<std::sync::atomic::AtomicBool>,
 }
-#[async_trait::async_trait]
-impl TelegramGateway for ObservedGateway {
-    fn info(&self) -> crate::gateway::GatewayInfo {
+impl TelegramSession for ObservedGateway {
+    fn info(&self) -> GatewayInfo {
         self.inner.info()
     }
-    fn auth(&self) -> crate::model::AuthSnapshot {
+    fn auth(&self) -> super::model::AuthSnapshot {
         self.inner.auth()
     }
     fn verified_identity(&self) -> Option<VerifiedTelegramIdentity> {
         self.inner.verified_identity()
     }
-    fn catalog_progress(&self) -> crate::model::CatalogProgress {
+    fn catalog_progress(&self) -> super::model::CatalogProgress {
         self.inner.catalog_progress()
     }
+}
+
+#[async_trait::async_trait]
+impl TelegramRead for ObservedGateway {
     async fn chats(&self) -> Result<Vec<cleaner_domain::ChatSummary>, crate::error::AppError> {
         self.inner.chats().await
     }
@@ -54,7 +59,7 @@ impl TelegramGateway for ObservedGateway {
     }
     async fn search(
         &self,
-        request: &crate::model::SearchRequest,
+        request: &super::model::SearchRequest,
     ) -> Result<Vec<cleaner_domain::MessageSnapshot>, crate::error::AppError> {
         self.inner.search(request).await
     }
@@ -89,6 +94,10 @@ impl TelegramGateway for ObservedGateway {
         }
         self.inner.current_reach(chat_id, message_id).await
     }
+}
+
+#[async_trait::async_trait]
+impl TelegramMutation for ObservedGateway {
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), crate::error::AppError> {
         self.inner.clear_history_for_everyone(chat_id).await
     }
@@ -119,27 +128,6 @@ impl TelegramGateway for ObservedGateway {
             .delete_messages_by_sender(chat_id, sender_id)
             .await
     }
-    async fn request_qr_auth(&self) -> Result<(), crate::error::AppError> {
-        self.inner.request_qr_auth().await
-    }
-    async fn submit_phone(&self, phone: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_phone(phone).await
-    }
-    async fn submit_email_address(&self, email: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_email_address(email).await
-    }
-    async fn submit_email_code(&self, code: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_email_code(code).await
-    }
-    async fn submit_code(&self, code: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_code(code).await
-    }
-    async fn submit_password(&self, password: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_password(password).await
-    }
-    async fn close(&self) -> Result<(), crate::error::AppError> {
-        self.inner.close().await
-    }
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -168,6 +156,31 @@ impl TelegramGateway for ObservedGateway {
         self.inner.leave_chat(chat_id).await?;
         self.left.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TelegramConnectionIo for ObservedGateway {
+    async fn request_qr_auth(&self) -> Result<(), crate::error::AppError> {
+        self.inner.request_qr_auth().await
+    }
+    async fn submit_phone(&self, phone: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_phone(phone).await
+    }
+    async fn submit_email_address(&self, email: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_email_address(email).await
+    }
+    async fn submit_email_code(&self, code: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_email_code(code).await
+    }
+    async fn submit_code(&self, code: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_code(code).await
+    }
+    async fn submit_password(&self, password: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_password(password).await
+    }
+    async fn close(&self) -> Result<(), crate::error::AppError> {
+        self.inner.close().await
     }
 }
 
@@ -227,7 +240,7 @@ fn fixture() -> Fixture {
     }
 }
 
-async fn selection(f: &Fixture) -> crate::model::PlanView {
+async fn selection(f: &Fixture) -> super::model::PlanView {
     f.service
         .prepare_selection(PrepareSelectionRequest {
             message_refs: vec![MessageRef {
@@ -423,7 +436,7 @@ fn validated_store_rejects_skipping_unprocessed_batches_and_foreign_dirty_target
         let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -644,9 +657,9 @@ fn normalized_counts_preserve_unavailable_selections_outside_eligible_total() {
         messages.push(protected);
         let mut legacy = DeletionPlan::selected_messages(messages).unwrap();
         bind_plan(&f.context.active().scope, &mut legacy).unwrap();
-        let mut job = crate::model::JobRecord::new(&legacy);
+        let mut job = super::model::JobRecord::new(&legacy);
         job.deleted = 1;
-        job.status = crate::model::JobStatus::Completed;
+        job.status = super::model::JobStatus::Completed;
         let normalized = normalize_job(&f.context.active().scope, &legacy, &job, true).unwrap();
         assert_eq!(normalized.counters.selected, 2);
         assert_eq!(normalized.counters.eligible, 1);
@@ -657,8 +670,8 @@ fn normalized_counts_preserve_unavailable_selections_outside_eligible_total() {
 
 async fn start(
     service: &Arc<CleanerService>,
-    plan: &crate::model::PlanView,
-) -> crate::model::JobRecord {
+    plan: &super::model::PlanView,
+) -> super::model::JobRecord {
     service
         .authorize_plan(AuthorizePlanRequest {
             plan_id: plan.id,
@@ -677,7 +690,7 @@ async fn start(
         .unwrap()
 }
 
-async fn terminal(service: &CleanerService, id: Uuid) -> crate::model::JobRecord {
+async fn terminal(service: &CleanerService, id: Uuid) -> super::model::JobRecord {
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             if let Some(job) = service
@@ -779,10 +792,10 @@ impl TelegramStateRepository for FailProgress {
     fn scope(&self) -> Option<&retract_domain::Scope> {
         self.inner.scope()
     }
-    fn load(&self) -> Result<crate::model::PersistedState, crate::error::AppError> {
+    fn load(&self) -> Result<super::model::PersistedState, crate::error::AppError> {
         self.inner.load()
     }
-    fn save(&self, state: &crate::model::PersistedState) -> Result<(), crate::error::AppError> {
+    fn save(&self, state: &super::model::PersistedState) -> Result<(), crate::error::AppError> {
         if state.jobs.iter().any(|job| job.next_batch > 0) {
             return Err(crate::error::AppError::StatePersistenceFailed);
         }
@@ -798,10 +811,10 @@ impl TelegramStateRepository for FailAfterLeave {
     fn scope(&self) -> Option<&retract_domain::Scope> {
         self.inner.scope()
     }
-    fn load(&self) -> Result<crate::model::PersistedState, crate::error::AppError> {
+    fn load(&self) -> Result<super::model::PersistedState, crate::error::AppError> {
         self.inner.load()
     }
-    fn save(&self, state: &crate::model::PersistedState) -> Result<(), crate::error::AppError> {
+    fn save(&self, state: &super::model::PersistedState) -> Result<(), crate::error::AppError> {
         if self.left.load(std::sync::atomic::Ordering::Acquire) {
             return Err(crate::error::AppError::StatePersistenceFailed);
         }
@@ -832,7 +845,7 @@ fn failed_membership_progress_save_prevents_following_local_removal() {
         )
         .unwrap();
         let plan = service
-            .prepare_chat_action(crate::model::PrepareChatActionRequest {
+            .prepare_chat_action(super::model::PrepareChatActionRequest {
                 chat_id: -1002,
                 operation: PlanOperation::LeaveChat,
             })
@@ -951,7 +964,7 @@ fn rate_wait_rechecks_binding_before_any_retry_call() {
         f.gateway.wait_for_injected_failure(1).await;
         f.binding.invalidate();
         let failed = terminal(&f.service, job.id).await;
-        assert_eq!(failed.status, crate::model::JobStatus::Failed);
+        assert_eq!(failed.status, super::model::JobStatus::Failed);
         assert_eq!(f.gateway.delete_calls().await.len(), 1);
         assert_eq!(f.gateway.current_reach_calls().await.len(), 1);
     });
@@ -966,7 +979,7 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -997,7 +1010,7 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -1093,8 +1106,8 @@ fn uncertain_results_do_not_reclassify_earlier_confirmed_failures() {
         )
         .unwrap();
         bind_plan(&f.context.active().scope, &mut legacy).unwrap();
-        let mut job = crate::model::JobRecord::new(&legacy);
-        job.status = crate::model::JobStatus::Partial;
+        let mut job = super::model::JobRecord::new(&legacy);
+        job.status = super::model::JobStatus::Partial;
         job.failed = 2;
         job.uncertain = 1;
         job.error_codes.push("ambiguous_outcome".into());
@@ -1149,7 +1162,7 @@ fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain()
                         .unwrap()
                 } else {
                     service
-                        .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                        .prepare_chat_action(super::model::PrepareChatActionRequest {
                             chat_id,
                             operation: PlanOperation::LeaveChat,
                         })
@@ -1250,7 +1263,7 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
             let mut queued = normalize_job(
                 &f.context.active().scope,
                 &legacy,
-                &crate::model::JobRecord::new(&legacy),
+                &super::model::JobRecord::new(&legacy),
                 true,
             )
             .unwrap();
@@ -1305,9 +1318,9 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
                 assert_eq!(
                     stopped.status,
                     if outcome == "cancel" {
-                        crate::model::JobStatus::Cancelled
+                        super::model::JobStatus::Cancelled
                     } else {
-                        crate::model::JobStatus::Failed
+                        super::model::JobStatus::Failed
                     }
                 );
             }
@@ -1326,7 +1339,7 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
         let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -1374,7 +1387,7 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
             f.store.snapshot().unwrap().jobs[0].diagnostics,
             job.diagnostics
         );
-        let mut legacy_job = crate::model::JobRecord::new(&legacy);
+        let mut legacy_job = super::model::JobRecord::new(&legacy);
         legacy_job.error_codes = vec![
             "telegram_rate_limited".into(),
             "telegram_timeout".into(),
@@ -1406,7 +1419,7 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
             let f = fixture();
             if broad {
                 f.service
-                    .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                    .prepare_chat_action(super::model::PrepareChatActionRequest {
                         chat_id: -1001,
                         operation: PlanOperation::ClearHistory,
                     })
@@ -1419,7 +1432,7 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
             let job = normalize_job(
                 &f.context.active().scope,
                 &legacy,
-                &crate::model::JobRecord::new(&legacy),
+                &super::model::JobRecord::new(&legacy),
                 broad,
             )
             .unwrap();
@@ -1480,7 +1493,7 @@ fn switching_account_does_not_label_potentially_inflight_work_safely_blocked() {
         let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();

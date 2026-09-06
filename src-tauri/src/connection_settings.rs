@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
 
-use crate::{error::AppError, live_gateway::SUPPORTED_TDLIB_VERSION, secure_store};
+use crate::{error::AppError, providers::telegram::native::SUPPORTED_TDLIB_VERSION, secure_store};
 
 const SETTINGS_FILE: &str = "connection-settings.json";
 

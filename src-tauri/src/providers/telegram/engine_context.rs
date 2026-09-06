@@ -7,17 +7,16 @@ use std::sync::{Arc, Mutex};
 use super::{
     diagnostics::{invalid_recipe, legacy_diagnostic_code},
     identity::{SessionBinding, VerifiedTelegramIdentity},
+    model::{CatalogProgress, JobRecord, JobStatus, PersistedState, SearchRequest},
+    native::ports::{
+        GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
+    },
     normalize::normalize_job,
     recipe::{TelegramExecutionRecipe, bind_plan},
 };
 #[cfg(test)]
 use crate::secure_store::SecureJobStore;
-use crate::{
-    error::AppError,
-    gateway::TelegramGateway,
-    model::{JobRecord, JobStatus, PersistedState},
-    persistence::FoundationStore,
-};
+use crate::{error::AppError, gateway::TelegramGateway, persistence::FoundationStore};
 
 pub struct EngineContext {
     active: ActiveContext,
@@ -50,7 +49,7 @@ impl EngineContext {
     pub fn active(&self) -> &ActiveContext {
         &self.active
     }
-    pub fn check(&self, gateway: &dyn TelegramGateway) -> Result<(), AppError> {
+    pub fn check(&self, gateway: &dyn TelegramSession) -> Result<(), AppError> {
         if self.quarantined.load(std::sync::atomic::Ordering::Acquire) {
             return Err(AppError::StatePersistenceFailed);
         }
@@ -301,20 +300,23 @@ impl SessionGateway {
     }
 }
 
-#[async_trait]
-impl TelegramGateway for SessionGateway {
-    fn info(&self) -> crate::gateway::GatewayInfo {
+impl TelegramSession for SessionGateway {
+    fn info(&self) -> GatewayInfo {
         self.inner.info()
     }
-    fn auth(&self) -> crate::model::AuthSnapshot {
+    fn auth(&self) -> super::model::AuthSnapshot {
         self.inner.auth()
     }
     fn verified_identity(&self) -> Option<VerifiedTelegramIdentity> {
         self.inner.verified_identity()
     }
-    fn catalog_progress(&self) -> crate::model::CatalogProgress {
+    fn catalog_progress(&self) -> CatalogProgress {
         self.inner.catalog_progress()
     }
+}
+
+#[async_trait]
+impl TelegramRead for SessionGateway {
     async fn chats(&self) -> Result<Vec<cleaner_domain::ChatSummary>, AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.chats().await;
@@ -332,7 +334,7 @@ impl TelegramGateway for SessionGateway {
     }
     async fn search(
         &self,
-        request: &crate::model::SearchRequest,
+        request: &SearchRequest,
     ) -> Result<Vec<cleaner_domain::MessageSnapshot>, AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.search(request).await;
@@ -382,6 +384,10 @@ impl TelegramGateway for SessionGateway {
         self.context.check(self.inner.as_ref())?;
         result
     }
+}
+
+#[async_trait]
+impl TelegramMutation for SessionGateway {
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -434,6 +440,10 @@ impl TelegramGateway for SessionGateway {
             .await;
         self.mutation_result(result)
     }
+}
+
+#[async_trait]
+impl TelegramConnectionIo for SessionGateway {
     async fn request_qr_auth(&self) -> Result<(), AppError> {
         self.inner.request_qr_auth().await
     }
