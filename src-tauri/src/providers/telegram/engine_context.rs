@@ -8,15 +8,13 @@ use super::{
     diagnostics::{invalid_recipe, legacy_diagnostic_code},
     identity::{SessionBinding, VerifiedTelegramIdentity},
     model::{CatalogProgress, JobRecord, JobStatus, PersistedState, SearchRequest},
-    native::ports::{
-        GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
-    },
+    native::ports::{GatewayInfo, TelegramMutation, TelegramRead, TelegramSession},
     normalize::normalize_job,
     recipe::{TelegramExecutionRecipe, bind_plan},
 };
 #[cfg(test)]
 use crate::secure_store::SecureJobStore;
-use crate::{error::AppError, gateway::TelegramGateway, persistence::FoundationStore};
+use crate::{error::AppError, persistence::FoundationStore};
 
 pub struct EngineContext {
     active: ActiveContext,
@@ -101,8 +99,8 @@ pub trait TelegramStateRepository: Send + Sync {
     }
 }
 
-// Staged only until Task 6 removes the legacy production constructor. The
-// scoped constructor cannot select or fall back to this repository.
+// Historical DTO/recovery tests use this repository with the production cleanup
+// implementation. The scoped constructor cannot select or fall back to it.
 #[cfg(test)]
 pub(crate) struct LegacyTelegramRepository(pub SecureJobStore);
 #[cfg(test)]
@@ -281,26 +279,12 @@ pub(crate) fn stale_context() -> AppError {
     AppError::InvalidRequest("stale_context".into())
 }
 
-pub(crate) struct SessionGateway {
-    pub inner: Arc<dyn TelegramGateway>,
+pub(crate) struct SessionRead {
+    pub inner: Arc<dyn TelegramRead>,
     pub context: Arc<EngineContext>,
 }
 
-impl SessionGateway {
-    fn mutation_result(&self, result: Result<(), AppError>) -> Result<(), AppError> {
-        // tdjson::request emits these exact errors only after the native send.
-        // This classification belongs only to mutation calls: a read/preflight
-        // timeout has no destructive outcome, and a TDLib rejection is known.
-        let response_lost = matches!(&result, Err(AppError::Gateway(code))
-            if matches!(code.as_str(), "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"));
-        if response_lost || self.context.check(self.inner.as_ref()).is_err() {
-            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
-        }
-        result
-    }
-}
-
-impl TelegramSession for SessionGateway {
+impl TelegramSession for SessionRead {
     fn info(&self) -> GatewayInfo {
         self.inner.info()
     }
@@ -316,7 +300,7 @@ impl TelegramSession for SessionGateway {
 }
 
 #[async_trait]
-impl TelegramRead for SessionGateway {
+impl TelegramRead for SessionRead {
     async fn chats(&self) -> Result<Vec<cleaner_domain::ChatSummary>, AppError> {
         self.context.check(self.inner.as_ref())?;
         let result = self.inner.chats().await;
@@ -386,8 +370,42 @@ impl TelegramRead for SessionGateway {
     }
 }
 
+pub(crate) struct SessionMutation {
+    pub inner: Arc<dyn TelegramMutation>,
+    pub context: Arc<EngineContext>,
+}
+
+impl SessionMutation {
+    fn mutation_result(&self, result: Result<(), AppError>) -> Result<(), AppError> {
+        // tdjson::request emits these exact errors only after the native send.
+        // This classification belongs only to mutation calls: a read/preflight
+        // timeout has no destructive outcome, and a TDLib rejection is known.
+        let response_lost = matches!(&result, Err(AppError::Gateway(code))
+            if matches!(code.as_str(), "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"));
+        if response_lost || self.context.check(self.inner.as_ref()).is_err() {
+            return Err(AppError::Gateway("RETRACT_AMBIGUOUS_OUTCOME".into()));
+        }
+        result
+    }
+}
+
+impl TelegramSession for SessionMutation {
+    fn info(&self) -> GatewayInfo {
+        self.inner.info()
+    }
+    fn auth(&self) -> super::model::AuthSnapshot {
+        self.inner.auth()
+    }
+    fn verified_identity(&self) -> Option<VerifiedTelegramIdentity> {
+        self.inner.verified_identity()
+    }
+    fn catalog_progress(&self) -> CatalogProgress {
+        self.inner.catalog_progress()
+    }
+}
+
 #[async_trait]
-impl TelegramMutation for SessionGateway {
+impl TelegramMutation for SessionMutation {
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -439,30 +457,5 @@ impl TelegramMutation for SessionGateway {
             .delete_messages_by_sender(chat_id, sender_id)
             .await;
         self.mutation_result(result)
-    }
-}
-
-#[async_trait]
-impl TelegramConnectionIo for SessionGateway {
-    async fn request_qr_auth(&self) -> Result<(), AppError> {
-        self.inner.request_qr_auth().await
-    }
-    async fn submit_phone(&self, phone: &str) -> Result<(), AppError> {
-        self.inner.submit_phone(phone).await
-    }
-    async fn submit_email_address(&self, email: &str) -> Result<(), AppError> {
-        self.inner.submit_email_address(email).await
-    }
-    async fn submit_email_code(&self, code: &str) -> Result<(), AppError> {
-        self.inner.submit_email_code(code).await
-    }
-    async fn submit_code(&self, code: &str) -> Result<(), AppError> {
-        self.inner.submit_code(code).await
-    }
-    async fn submit_password(&self, password: &str) -> Result<(), AppError> {
-        self.inner.submit_password(password).await
-    }
-    async fn close(&self) -> Result<(), AppError> {
-        self.inner.close().await
     }
 }

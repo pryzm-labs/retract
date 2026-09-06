@@ -24,7 +24,7 @@ function reject(path, expression, description) {
   if (expression.test(source)) failures.push(`${display(path)}: ${description}`);
 }
 
-for (const legacy of ["live_gateway.rs", "tdjson.rs", "model.rs"]) {
+for (const legacy of ["live_gateway.rs", "tdjson.rs", "model.rs", "service.rs", "gateway.rs", "providers/telegram/compat.rs", "providers/telegram/application.rs"]) {
   const path = resolve(sourceRoot, legacy);
   if (existsSync(path) && statSync(path).isFile()) {
     failures.push(`${legacy}: Telegram-native implementation must live under providers/telegram`);
@@ -63,30 +63,30 @@ const query = resolve(sourceRoot, "providers/telegram/query.rs");
 if (existsSync(query)) {
   reject(
     query,
-    /\b(?:TelegramMutation|TelegramStateRepository|FoundationStore|SecureJobStore|GrantBook|CleanerService)\b/,
+    /\b(?:TelegramMutation|TelegramStateRepository|FoundationStore|SecureJobStore|GrantBook|CleanerService|TelegramCleanup|ScopedRepository)\b/,
     "production Telegram query owns mutation, cleanup state, or authorization",
   );
 }
 
-// These compatibility files may depend on the temporary combined gateway/service
-// until the Task 5 cutover. The exception is deliberately file-specific.
-const combinedExceptions = new Set([
-  "gateway.rs",
-  "service.rs",
-  "providers/telegram/application.rs",
-  "providers/telegram/compat.rs",
-  "providers/telegram/engine_context.rs",
-  "providers/telegram/mod.rs",
-]);
+for (const module of ["recipe", "normalize", "diagnostics"]) {
+  const path = resolve(sourceRoot, `providers/telegram/${module}.rs`);
+  if (!existsSync(path)) continue;
+  reject(
+    path,
+    /\b(?:TelegramCleanup|TelegramRead|TelegramMutation|TelegramStateRepository|FoundationStore|GrantBook)\b/,
+    "pure Telegram codecs and diagnostics depend on runtime cleanup or native ports",
+  );
+}
+
 for (const path of rustFiles(sourceRoot)) {
   const name = display(path);
-  if (combinedExceptions.has(name) || name.endsWith("_tests.rs") || name.endsWith("/tests.rs")) {
+  if (name.endsWith("_tests.rs") || name.endsWith("/tests.rs")) {
     continue;
   }
   reject(
     path,
-    /\bTelegramGateway\b/,
-    "production code uses the temporary combined Telegram gateway outside its explicit exceptions",
+    /\b(?:TelegramGateway|CleanerService|TelegramCompatibilityProvider|SessionGateway)\b|\bcrate\s*::\s*(?:service|gateway)\s*::/,
+    "production code uses the temporary combined Telegram gateway or cleanup facade",
   );
 }
 

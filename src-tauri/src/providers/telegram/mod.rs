@@ -1,5 +1,3 @@
-pub mod application;
-pub mod compat;
 pub mod connection;
 pub mod diagnostics;
 pub mod engine_context;
@@ -11,6 +9,7 @@ pub mod normalize;
 pub mod query;
 pub mod recipe;
 pub mod registration;
+pub mod remediation;
 
 #[cfg(test)]
 mod engine_tests;
@@ -19,7 +18,4 @@ mod migration_tests;
 #[cfg(test)]
 mod query_tests;
 
-// Keep the existing Telegram gateway reachable as the compatibility boundary
-// while the neutral service takes over composition in the later task.
-pub use crate::gateway::TelegramGateway;
 pub use native::{LiveGateway, LiveGatewayConfig};

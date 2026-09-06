@@ -73,3 +73,48 @@ pub(crate) fn legacy_diagnostic_code(code: ErrorCode) -> &'static str {
 pub(crate) fn invalid_recipe() -> AppError {
     AppError::InvalidRequest("invalid Telegram execution recipe".into())
 }
+
+pub(crate) fn error_code(error: &AppError) -> &'static str {
+    match error {
+        AppError::Gateway(message) if message == "RETRACT_AMBIGUOUS_OUTCOME" => "ambiguous_outcome",
+        AppError::Gateway(message)
+            if matches!(
+                message.as_str(),
+                "TDLIB_REQUEST_TIMEOUT" | "TDLIB_RESPONSE_CHANNEL_CLOSED"
+            ) =>
+        {
+            "telegram_timeout"
+        }
+        AppError::InvalidRequest(message) if message == "stale_context" => "stale_context",
+        AppError::Gateway(_) => "telegram_rejected",
+        AppError::Timeout(_) => "telegram_timeout",
+        AppError::SecureStore(_) => "secure_store",
+        AppError::SystemAuthentication(_) => "system_authentication",
+        AppError::NotFound => "not_found",
+        AppError::JobAlreadyTerminal => "job_terminal",
+        AppError::Domain(_) | AppError::InvalidRequest(_) => "invalid_plan",
+        AppError::StateUnavailable => "state_unavailable",
+        AppError::ProfileInUse => "profile_in_use",
+        AppError::StatePersistenceFailed => "state_persistence_failed",
+    }
+}
+
+pub(crate) fn telegram_retry_after(error: &AppError) -> Option<u64> {
+    let AppError::Gateway(message) = error else {
+        return None;
+    };
+    let normalized = message.to_ascii_lowercase();
+    if !normalized.contains("flood_wait")
+        && !normalized.contains("retry after")
+        && !normalized.contains("too many requests")
+        && !normalized.contains("429")
+    {
+        return None;
+    }
+    let seconds = message
+        .split(|character: char| !character.is_ascii_digit())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .rfind(|number| *number != 429)
+        .unwrap_or(5);
+    Some(seconds.clamp(1, 86_400))
+}

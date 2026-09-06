@@ -5,13 +5,11 @@ mod demo_gateway;
 mod error;
 #[cfg(test)]
 mod foundation_lifecycle_tests;
-mod gateway;
 mod local_auth;
 pub mod persistence;
 pub mod provider_service;
 pub mod providers;
 mod secure_store;
-mod service;
 #[cfg(test)]
 mod setup_gateway;
 #[cfg(feature = "archive-bench")]

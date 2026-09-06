@@ -1,3 +1,4 @@
+use crate::providers::telegram::remediation::TelegramCleanup;
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -15,11 +16,9 @@ use crate::{
         ApplicationQuery, ContentQuery, ConversationQuery, ProviderCapability,
         ProviderRegistration, QuerySource, ResolveRequest,
     },
-    service::CleanerService,
 };
 
 use super::{
-    compat::TelegramCompatibilityProvider,
     engine_context::{EngineContext, FoundationTelegramRepository},
     identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
     locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
@@ -194,11 +193,15 @@ fn retained_query_does_not_keep_cleanup_owner_alive() {
         let gateway = Arc::new(DemoGateway::with_verified_identity(identity));
         let repository =
             Arc::new(FoundationTelegramRepository::new(store, active.scope.clone()).unwrap());
-        let engine =
-            CleanerService::new_scoped(gateway.clone(), context.clone(), repository).unwrap();
+        let engine = TelegramCleanup::new_scoped(
+            gateway.clone(),
+            gateway.clone(),
+            context.clone(),
+            repository,
+        )
+        .unwrap();
         let query = Arc::new(TelegramQuery::new(gateway.clone(), context.clone()).unwrap());
-        let lifecycle =
-            Arc::new(TelegramCompatibilityProvider::new(gateway, context, engine.clone()).unwrap());
+        let lifecycle = engine.clone();
         let registration: Arc<dyn ProviderRegistration> =
             Arc::new(TelegramProvider::new(query, lifecycle));
         assert_eq!(

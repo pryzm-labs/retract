@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::{
     locators::{TelegramPayloadValidator, telegram_provider_key},
     query::TelegramQuery,
+    remediation::TelegramCleanup,
 };
 use crate::{
     persistence::ProviderPayloadValidator,
@@ -12,11 +13,11 @@ use crate::{
 
 pub struct TelegramProvider {
     query: Arc<TelegramQuery>,
-    reviewed_lifecycle: Arc<dyn ReviewedLifecycle>,
+    reviewed_lifecycle: Arc<TelegramCleanup>,
 }
 
 impl TelegramProvider {
-    pub fn new(query: Arc<TelegramQuery>, reviewed_lifecycle: Arc<dyn ReviewedLifecycle>) -> Self {
+    pub fn new(query: Arc<TelegramQuery>, reviewed_lifecycle: Arc<TelegramCleanup>) -> Self {
         Self {
             query,
             reviewed_lifecycle,

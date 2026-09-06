@@ -1,4 +1,5 @@
 //! Telegram connection, identity bootstrap, and authenticated composition.
+use crate::providers::telegram::remediation::TelegramCleanup;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,7 +7,6 @@ use retract_domain::{ActiveContext, ErrorCode, SafeError};
 
 use super::{
     LiveGateway,
-    compat::TelegramCompatibilityProvider,
     diagnostics::boundary_error,
     engine_context::{EngineContext, FoundationTelegramRepository},
     identity::IdentityVerificationStatus,
@@ -19,8 +19,7 @@ use crate::{
     compatibility::model_v2 as wire,
     persistence::FoundationStore,
     provider_service::safe,
-    providers::ports::{ApplicationConnection, ProviderRegistration, ReviewedLifecycle},
-    service::CleanerService,
+    providers::ports::{ApplicationConnection, ProviderRegistration},
 };
 
 pub struct TelegramConnection {
@@ -107,16 +106,17 @@ impl ApplicationConnection for TelegramConnection {
             FoundationTelegramRepository::new(self.store.clone(), active.scope)
                 .map_err(boundary_error)?,
         );
-        let engine = CleanerService::new_scoped(self.gateway.clone(), context.clone(), repository)
-            .map_err(boundary_error)?;
+        let engine = TelegramCleanup::new_scoped(
+            self.gateway.clone(),
+            self.gateway.clone(),
+            context.clone(),
+            repository,
+        )
+        .map_err(boundary_error)?;
         let query = Arc::new(
             TelegramQuery::new(self.gateway.clone(), context.clone()).map_err(boundary_error)?,
         );
-        let lifecycle: Arc<dyn ReviewedLifecycle> = Arc::new(
-            TelegramCompatibilityProvider::new(self.gateway.clone(), context, engine)
-                .map_err(boundary_error)?,
-        );
-        Ok(Arc::new(TelegramProvider::new(query, lifecycle)))
+        Ok(Arc::new(TelegramProvider::new(query, engine)))
     }
 
     async fn auth(&self, request: wire::AuthRequest) -> Result<(), SafeError> {

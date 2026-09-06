@@ -61,6 +61,24 @@ test("rejects mutation and state ownership from production query", () => {
   assert.match(result.stderr, /query owns mutation, cleanup state, or authorization/);
 });
 
+test("rejects the extracted cleanup owner from production query", () => {
+  const root = fixture();
+  write(root, "providers/telegram/query.rs", "use super::remediation::TelegramCleanup;\n");
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /query owns mutation, cleanup state, or authorization/);
+});
+
+test("rejects runtime construction dependencies in pure Telegram helpers", () => {
+  for (const module of ["recipe", "normalize", "diagnostics"]) {
+    const root = fixture();
+    write(root, `providers/telegram/${module}.rs`, "use super::remediation::TelegramCleanup;\n");
+    const result = check(root);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /pure Telegram codecs and diagnostics/);
+  }
+});
+
 test("rejects the combined gateway through the Telegram relative re-export", () => {
   const root = fixture();
   write(
@@ -97,14 +115,17 @@ test("rejects the combined gateway from native files without a file exception", 
   assert.match(result.stderr, /temporary combined Telegram gateway/);
 });
 
-test("allows only the named transitional compatibility files", () => {
-  const valid = fixture();
-  write(valid, "service.rs", "use crate::gateway::TelegramGateway;\n");
-  assert.equal(check(valid).status, 0);
-
-  const invalid = fixture();
-  write(invalid, "providers/telegram/connection.rs", "use crate::gateway::TelegramGateway;\n");
-  const result = check(invalid);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /temporary combined Telegram gateway/);
+test("rejects every removed transitional file and production facade dependency", () => {
+  for (const name of ["service.rs", "gateway.rs", "providers/telegram/compat.rs", "providers/telegram/application.rs"]) {
+    const root = fixture();
+    write(root, name);
+    assert.equal(check(root).status, 1, name);
+  }
+  for (const symbol of ["CleanerService", "TelegramCompatibilityProvider", "SessionGateway"]) {
+    const root = fixture();
+    write(root, "providers/telegram/connection.rs", `use super::${symbol};\n`);
+    const result = check(root);
+    assert.equal(result.status, 1, symbol);
+    assert.match(result.stderr, /cleanup facade/);
+  }
 });
