@@ -61,6 +61,42 @@ test("rejects mutation and state ownership from production query", () => {
   assert.match(result.stderr, /query owns mutation, cleanup state, or authorization/);
 });
 
+test("rejects the combined gateway through the Telegram relative re-export", () => {
+  const root = fixture();
+  write(
+    root,
+    "providers/telegram/query.rs",
+    "use super::TelegramGateway;\nuse std::sync::Arc;\ntype QueryGateway = Arc<dyn TelegramGateway>;\n",
+  );
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /temporary combined Telegram gateway/);
+});
+
+test("rejects grouped Telegram imports from neutral production code", () => {
+  const root = fixture();
+  write(
+    root,
+    "providers/lifecycle.rs",
+    "use crate::providers::{telegram::model::SearchRequest};\n",
+  );
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /provider-neutral production code/);
+});
+
+test("rejects the combined gateway from native files without a file exception", () => {
+  const root = fixture();
+  write(
+    root,
+    "providers/telegram/native/live_gateway.rs",
+    "use crate::gateway::TelegramGateway;\n",
+  );
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /temporary combined Telegram gateway/);
+});
+
 test("allows only the named transitional compatibility files", () => {
   const valid = fixture();
   write(valid, "service.rs", "use crate::gateway::TelegramGateway;\n");

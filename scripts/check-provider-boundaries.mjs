@@ -54,7 +54,7 @@ for (const name of neutralFiles) {
   if (!existsSync(path)) continue;
   reject(
     path,
-    /(?:crate::(?:gateway|service|providers::telegram)|providers::telegram::|TelegramGateway)/,
+    /(?:crate\s*::\s*(?:gateway|service)\b|\bTelegramGateway\b|\b(?:crate|super|self)\s*::[^;]*\btelegram\b|\bproviders\s*::[^;]*\btelegram\b|\btelegram\s*::)/s,
     "provider-neutral production code depends on the Telegram compatibility boundary",
   );
 }
@@ -76,18 +76,16 @@ const combinedExceptions = new Set([
   "providers/telegram/application.rs",
   "providers/telegram/compat.rs",
   "providers/telegram/engine_context.rs",
+  "providers/telegram/mod.rs",
 ]);
 for (const path of rustFiles(sourceRoot)) {
   const name = display(path);
   if (combinedExceptions.has(name) || name.endsWith("_tests.rs") || name.endsWith("/tests.rs")) {
     continue;
   }
-  if (name.startsWith("providers/telegram/native/") || name === "providers/telegram/mod.rs") {
-    continue;
-  }
   reject(
     path,
-    /gateway::TelegramGateway/,
+    /\bTelegramGateway\b/,
     "production code uses the temporary combined Telegram gateway outside its explicit exceptions",
   );
 }
