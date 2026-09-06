@@ -76,17 +76,17 @@ The example accepts only an exclusively owned, empty, canonical private disposab
 
 Reported Linux `VmHWM` is the OS's cumulative whole-process peak RSS, not a separate peak for each phase. Exact quiescent phase DB/WAL lengths are reported separately from 10 ms sampled disk high values; sampling can miss short-lived peaks. The measured process includes the worker, runtime, bounded input/page buffers and sampler. This synthetic workload does not establish resource usage for maximum-size records or the million-item/two-GiB source caps.
 
-The Linux arm64 Docker run at reviewed code commit `ac97082f48a5f61980d192ae208684dce647aff6` used the unoptimized dev profile with debug info disabled. It committed 100,000 items / 85,701,212 encoded input bytes in 102.571 s (202 batches), verified all records and 1,000 search hits in 3.036 s, and removed 50,000 items with 50,000 survivors in 22.867 s. Maintenance completed and all survivors plus 500 surviving search hits were rechecked. This run followed the worker/lifecycle rework and independently reviewed shutdown fixes; it replaces the earlier preliminary measurements.
+The Linux arm64 Docker run at reviewed code commit `08a67cc3deb595cd6d4f27664467e550eaf636d1` used the unoptimized dev profile with debug info disabled. It committed 100,000 items / 85,701,212 encoded input bytes in 113.329 s (202 batches), verified all records and 1,000 search hits in 3.043 s, and removed 50,000 items with 50,000 survivors in 22.799 s. Maintenance completed and all survivors plus 500 surviving search hits were rechecked. This run includes the independently reviewed shutdown, reverse-reference and pre-admission fixes, including the conversation-parent reference index; it replaces the earlier development measurements.
 
 | Measurement | Observed bytes |
 | --- | ---: |
-| Cumulative OS peak RSS after import | 66,908,160 |
-| Cumulative OS peak RSS after query | 67,043,328 |
-| Cumulative OS peak RSS after removal / final | 227,872,768 |
-| Exact DB after import | 314,785,792 |
-| Exact DB after removal / shutdown | 149,889,024 |
+| Cumulative OS peak RSS after import | 67,018,752 |
+| Cumulative OS peak RSS after query | 67,215,360 |
+| Cumulative OS peak RSS after removal / final | 227,885,056 |
+| Exact DB after import | 314,793,984 |
+| Exact DB after removal / shutdown | 149,893,120 |
 | Exact WAL at phase boundaries | 0 |
-| Sampled DB high | 314,785,792 |
-| Sampled total disk high, including rollback journal | 498,715,848 |
+| Sampled DB high | 314,793,984 |
+| Sampled total disk high, including rollback journal | 498,728,136 |
 
-This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The final benchmark was run once after review, following one preliminary run before rework; it is not part of standard packaging or recurring gates. Native/manual verification remains separate.
+This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The benchmark was refreshed once after the final fix review because both admission and schema changed; it is not part of standard packaging or recurring gates. Native/manual verification remains separate.
