@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-06
 
-**Status:** Incremental migration scope approved; written specification pending review.
+**Status:** Written specification approved for implementation on 2026-09-06.
 
 **Base:** `0d799b0a272373601714fd1c0645fbe618fbb870` — merged PR #22.
 
@@ -162,5 +162,5 @@ Completion requires a production dependency graph with genuinely separate read a
 - [x] Defines native port ownership, session guards, sole state writer, and shutdown ordering.
 - [x] Preserves wire contracts, recipe schemas, fingerprints, recovery, and explicit effects.
 - [x] Names deterministic regression gates and keeps live/manual claims separate.
-- [ ] User review of this written specification.
-- [ ] Detailed implementation plan after written-spec approval.
+- [x] User review of this written specification.
+- [x] Detailed implementation plan after written-spec approval: [Implementation plan](../plans/2026-09-06-telegram-provider-migration.md).
