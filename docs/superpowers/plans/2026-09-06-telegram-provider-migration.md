@@ -193,9 +193,11 @@ docker buildx build --platform linux/amd64 --target checks --output type=cacheon
 
 ## Progress
 
-- [ ] Task 1: Foundation lock ownership.
-- [ ] Task 2: Persisted parity and pure codecs.
-- [ ] Task 3: Native port boundaries.
-- [ ] Task 4: Independent query and connection.
-- [ ] Task 5: Reviewed cleanup cutover.
-- [ ] Task 6: Full acceptance and documentation.
+- [x] Task 1: Foundation lock ownership.
+- [x] Task 2: Persisted parity and pure codecs.
+- [x] Task 3: Native port boundaries.
+- [x] Task 4: Independent query and connection.
+- [x] Task 5: Reviewed cleanup cutover.
+- [ ] Task 6: Full acceptance and documentation — both runtime-only Linux architecture gates and documentation are complete; independent whole-branch review and any covering checks for its findings remain pending.
+
+Acceptance source: clean runtime commit `3a78bd207d89be3d3bc93b8cfac6930ce04017e6`. Linux `arm64` and `amd64` checks passed with 329 backend tests (one existing opt-in archive corpus test ignored), 158 frontend tests, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled provider-boundary tests plus the real-tree lint, production-bundle/public-repository checks, formatting and strict Clippy. The `arm64` rerun reused BuildKit cache for that exact input; the `amd64` gate executed project checks for the same input. The archive corpus benchmark was not run. Native macOS CI, real Keychain/LocalAuthentication, VoiceOver/rendered viewport checks and disposable Telegram test-DC parity are pending and are not implied by the Linux result.

@@ -16,7 +16,7 @@ docker buildx build --platform linux/amd64 --target checks --output type=cacheon
 docker buildx build --platform linux/arm64 --target checks --output type=cacheonly --progress plain .
 ```
 
-These commands run unfiltered Vitest, release/public metadata tests, TypeScript/production build, fixture exclusion, and Rust tests/formatting/Clippy for `cleaner-domain`, `retract-domain` and `src-tauri`. Require no failed/ignored regression tests and Clippy warnings treated as errors. Do not export runnable images or prune Docker state for verification. The npm wrapper runs on the host only to dispatch Docker; project tests/builds run inside the container.
+These commands run unfiltered Vitest, release/public metadata tests, TypeScript/production build, fixture exclusion, provider-boundary controlled tests plus real-tree lint, and Rust tests/formatting/Clippy for `cleaner-domain`, `retract-domain` and `src-tauri`. Require no failures or unexpected ignores and treat Clippy warnings as errors. The existing explicitly ignored 100,000-item archive corpus resource gate remains opt-in and is not a failure by itself. Do not export runnable images or prune Docker state for verification. The npm wrapper runs on the host only to dispatch Docker; project tests/builds run inside the container.
 
 The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) separately runs `npm ci --ignore-scripts --no-audit --no-fund` and `npm run package:unsigned` on macOS. It verifies the app, bundled TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. If that job cannot be run for the tested revision, report it as unavailable/not run; do not fabricate a package or access real Keychain/session data for automated proof.
 
@@ -32,14 +32,19 @@ Before enabling an archive importer, an authorized native operator must quit all
 
 ### Telegram provider-refactor characterization
 
-The full Docker gate includes frozen v1 readers/native behavior and current v2 lifecycle tests. For focused synthetic iteration:
+The full Docker gate includes frozen v1 readers/native behavior, the immutable pre-extraction Telegram recipe/`RTRCT03` corpus, current v2 lifecycle tests, direct query/cleanup ownership checks and the provider architecture rule. For focused synthetic iteration on Linux `arm64`:
 
 ```sh
-docker buildx build --target focused-checks --build-arg 'RETRACT_CHECK=npm test -- src/provider-lifecycle.test.tsx src/providers/contract.test.ts src/ipc-contract.test.ts' --output type=cacheonly --progress plain .
-docker buildx build --target focused-checks --build-arg 'RETRACT_CHECK=cargo test --offline --locked --manifest-path src-tauri/Cargo.toml foundation_lifecycle && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml compatibility::tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml persistence::tests' --output type=cacheonly --progress plain .
+docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=npm test -- src/provider-lifecycle.test.tsx src/providers/contract.test.ts src/ipc-contract.test.ts' .
+docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=npm run check:provider-boundaries' .
+docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::migration_tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::query_tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::remediation::tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml foundation_lock_tests' .
 ```
 
-These focused filters are not substitutes for the full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for the complete boundary inventory and preserved native behavior.
+These focused filters are not substitutes for the full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. The separate migration corpus freezes all nine native recipes and exact authenticated v3 bytes from the pre-extraction implementation. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for its provenance, the direct provider ownership inventory and preserved native behavior.
+
+For the runtime-only migration source `3a78bd207d89be3d3bc93b8cfac6930ce04017e6`, both required Linux architecture gates passed on 2026-09-06: 158 frontend tests, 329 backend tests with one existing opt-in archive corpus test ignored, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled boundary tests plus the real-tree check, production bundle/public repository verification, all formatting checks and strict Clippy. The `arm64` acceptance rerun was fully cached for that exact input tree; the `amd64` gate ran the project checks for the same input tree. No archive corpus benchmark was run because the provider migration does not alter archive indexing. Preserve command output and cache/input-tree provenance with the acceptance report; do not transfer those claims to a later commit that changes runtime inputs.
+
+This Linux evidence does not complete native macOS packaging, TDLib loading, Keychain/LocalAuthentication, rendered VoiceOver/short-viewport behavior, or live test-DC parity. Those gates remain not run until an exact reviewed revision is authorized and, for CI, published. Independent whole-branch review is also required before merge or destructive-release approval.
 
 ## Test identities
 
