@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
-    "lucide-react": "^1.31.0",
+    "lucide-react": "^1.40.0",
     "nanoid": "file:vendor/nanoid",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
@@ -50,14 +50,14 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.4",
     "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.0",
+    "@testing-library/react": "^16.3.3",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.1.10",
-    "@types/react-dom": "^19.1.7",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
     "jsdom": "^30.0.1",
     "typescript": "~6.0.3",
-    "vite": "^8.2.1",
+    "vite": "^8.2.2",
     "vitest": "^4.1.10"
   }
 }
