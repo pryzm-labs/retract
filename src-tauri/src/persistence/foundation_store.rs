@@ -30,6 +30,10 @@ const BACKUP_FILE: &str = "jobs.pre-provider.enc";
 const CANDIDATE_FILE: &str = "jobs.enc.tmp";
 const LOCK_FILE: &str = "jobs.lock";
 
+#[cfg(test)]
+#[path = "foundation_lock_tests.rs"]
+mod foundation_lock_tests;
+
 static OPEN_STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<FoundationStore>>>> = OnceLock::new();
 
 pub(super) trait StoreIo: Send + Sync {
@@ -77,7 +81,17 @@ pub struct FoundationStore {
     payload_validator: Arc<dyn ProviderPayloadValidator>,
     state: Mutex<RuntimeState>,
     io: Arc<dyn StoreIo>,
-    _profile_lock: File,
+    _profile_lock: ProfileLock,
+}
+
+struct ProfileLock(File);
+
+impl Drop for ProfileLock {
+    fn drop(&mut self) {
+        // Explicit unlock releases this open-file-description lock even when
+        // another descriptor still refers to the same description.
+        let _ = self.0.unlock();
+    }
 }
 
 impl std::fmt::Debug for FoundationStore {
@@ -326,7 +340,7 @@ impl FoundationStore {
         io: Arc<dyn StoreIo>,
         validation_policy: ValidationPolicy,
         payload_validator: Arc<dyn ProviderPayloadValidator>,
-        profile_lock: File,
+        profile_lock: ProfileLock,
     ) -> Result<Arc<Self>, AppError> {
         let active_path = profile_dir.join(ACTIVE_FILE);
         let committed = initialize_state(
@@ -415,7 +429,7 @@ fn prepare_profile(profile: &Path) -> Result<PathBuf, AppError> {
     Ok(fs::canonicalize(profile)?)
 }
 
-fn acquire_profile_lock(profile: &Path) -> Result<File, AppError> {
+fn acquire_profile_lock(profile: &Path) -> Result<ProfileLock, AppError> {
     let path = profile.join(LOCK_FILE);
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
@@ -428,7 +442,7 @@ fn acquire_profile_lock(profile: &Path) -> Result<File, AppError> {
     #[cfg(unix)]
     file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(ProfileLock(file)),
         Err(TryLockError::WouldBlock) => Err(AppError::ProfileInUse),
         Err(TryLockError::Error(error)) => Err(AppError::SecureStore(format!(
             "profile lock failed: {error}"

@@ -1,3 +1,4 @@
+use crate::providers::telegram::remediation::TelegramCleanup;
 use std::sync::Arc;
 
 use cleaner_domain::{DeletionPlan, DeletionReach, PlanOperation};
@@ -6,17 +7,19 @@ use uuid::Uuid;
 
 use crate::{
     demo_gateway::DemoGateway,
-    gateway::TelegramGateway,
-    model::{AuthorizePlanRequest, ExecuteRequest, MessageRef, PrepareSelectionRequest},
     persistence::{FoundationStore, ProviderPayloadValidator, StoreBinding},
-    service::CleanerService,
 };
 
 use super::{
-    compat::{TelegramCompatibilityProvider, TelegramExecutionRecipe},
     engine_context::{EngineContext, FoundationTelegramRepository, TelegramStateRepository},
     identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
     locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
+    model::{AuthorizePlanRequest, ExecuteRequest, MessageRef, PrepareSelectionRequest},
+    native::ports::{
+        GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
+    },
+    normalize::{conversation_ref, normalize_job},
+    recipe::{TelegramExecutionRecipe, bind_plan},
 };
 
 struct ObservedGateway {
@@ -27,20 +30,23 @@ struct ObservedGateway {
     preflight_error: Option<&'static str>,
     left: Arc<std::sync::atomic::AtomicBool>,
 }
-#[async_trait::async_trait]
-impl TelegramGateway for ObservedGateway {
-    fn info(&self) -> crate::gateway::GatewayInfo {
+impl TelegramSession for ObservedGateway {
+    fn info(&self) -> GatewayInfo {
         self.inner.info()
     }
-    fn auth(&self) -> crate::model::AuthSnapshot {
+    fn auth(&self) -> super::model::AuthSnapshot {
         self.inner.auth()
     }
     fn verified_identity(&self) -> Option<VerifiedTelegramIdentity> {
         self.inner.verified_identity()
     }
-    fn catalog_progress(&self) -> crate::model::CatalogProgress {
+    fn catalog_progress(&self) -> super::model::CatalogProgress {
         self.inner.catalog_progress()
     }
+}
+
+#[async_trait::async_trait]
+impl TelegramRead for ObservedGateway {
     async fn chats(&self) -> Result<Vec<cleaner_domain::ChatSummary>, crate::error::AppError> {
         self.inner.chats().await
     }
@@ -52,7 +58,7 @@ impl TelegramGateway for ObservedGateway {
     }
     async fn search(
         &self,
-        request: &crate::model::SearchRequest,
+        request: &super::model::SearchRequest,
     ) -> Result<Vec<cleaner_domain::MessageSnapshot>, crate::error::AppError> {
         self.inner.search(request).await
     }
@@ -87,6 +93,10 @@ impl TelegramGateway for ObservedGateway {
         }
         self.inner.current_reach(chat_id, message_id).await
     }
+}
+
+#[async_trait::async_trait]
+impl TelegramMutation for ObservedGateway {
     async fn clear_history_for_everyone(&self, chat_id: i64) -> Result<(), crate::error::AppError> {
         self.inner.clear_history_for_everyone(chat_id).await
     }
@@ -116,27 +126,6 @@ impl TelegramGateway for ObservedGateway {
         self.inner
             .delete_messages_by_sender(chat_id, sender_id)
             .await
-    }
-    async fn request_qr_auth(&self) -> Result<(), crate::error::AppError> {
-        self.inner.request_qr_auth().await
-    }
-    async fn submit_phone(&self, phone: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_phone(phone).await
-    }
-    async fn submit_email_address(&self, email: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_email_address(email).await
-    }
-    async fn submit_email_code(&self, code: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_email_code(code).await
-    }
-    async fn submit_code(&self, code: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_code(code).await
-    }
-    async fn submit_password(&self, password: &str) -> Result<(), crate::error::AppError> {
-        self.inner.submit_password(password).await
-    }
-    async fn close(&self) -> Result<(), crate::error::AppError> {
-        self.inner.close().await
     }
     async fn delete_messages_for_everyone(
         &self,
@@ -169,6 +158,31 @@ impl TelegramGateway for ObservedGateway {
     }
 }
 
+#[async_trait::async_trait]
+impl TelegramConnectionIo for ObservedGateway {
+    async fn request_qr_auth(&self) -> Result<(), crate::error::AppError> {
+        self.inner.request_qr_auth().await
+    }
+    async fn submit_phone(&self, phone: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_phone(phone).await
+    }
+    async fn submit_email_address(&self, email: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_email_address(email).await
+    }
+    async fn submit_email_code(&self, code: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_email_code(code).await
+    }
+    async fn submit_code(&self, code: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_code(code).await
+    }
+    async fn submit_password(&self, password: &str) -> Result<(), crate::error::AppError> {
+        self.inner.submit_password(password).await
+    }
+    async fn close(&self) -> Result<(), crate::error::AppError> {
+        self.inner.close().await
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     store: Arc<FoundationStore>,
@@ -176,7 +190,7 @@ struct Fixture {
     context: Arc<EngineContext>,
     gateway: Arc<DemoGateway>,
     repository: Arc<FoundationTelegramRepository>,
-    service: Arc<CleanerService>,
+    service: Arc<TelegramCleanup>,
 }
 
 fn fixture() -> Fixture {
@@ -212,8 +226,13 @@ fn fixture() -> Fixture {
     let repository = Arc::new(
         FoundationTelegramRepository::new(store.clone(), context.active().scope.clone()).unwrap(),
     );
-    let service =
-        CleanerService::new_scoped(gateway.clone(), context.clone(), repository.clone()).unwrap();
+    let service = TelegramCleanup::new_scoped(
+        gateway.clone(),
+        gateway.clone(),
+        context.clone(),
+        repository.clone(),
+    )
+    .unwrap();
     Fixture {
         _directory: directory,
         store,
@@ -225,7 +244,7 @@ fn fixture() -> Fixture {
     }
 }
 
-async fn selection(f: &Fixture) -> crate::model::PlanView {
+async fn selection(f: &Fixture) -> super::model::PlanView {
     f.service
         .prepare_selection(PrepareSelectionRequest {
             message_refs: vec![MessageRef {
@@ -251,14 +270,8 @@ fn leave_intent_catalog_describes_ordered_cleanup_matching_the_reviewed_plan() {
             if chat_id == -1004 {
                 f.gateway.append_messages(chat_id, 500, 1).await;
             }
-            let provider = TelegramCompatibilityProvider::new(
-                f.gateway.clone(),
-                f.context.clone(),
-                f.service.clone(),
-            )
-            .unwrap();
-            let target =
-                super::compat::conversation_ref(&f.context.active().scope, chat_id).unwrap();
+            let provider = f.service.clone();
+            let target = conversation_ref(&f.context.active().scope, chat_id).unwrap();
             let intents = provider
                 .intents(f.context.active(), vec![target.clone()])
                 .await
@@ -330,13 +343,8 @@ fn leave_intent_catalog_marks_empty_cleanup_conditional_and_unavailable_leave_di
     use retract_domain::{ActionKind, Availability};
     tauri::async_runtime::block_on(async {
         let f = fixture();
-        let provider = TelegramCompatibilityProvider::new(
-            f.gateway.clone(),
-            f.context.clone(),
-            f.service.clone(),
-        )
-        .unwrap();
-        let target = super::compat::conversation_ref(&f.context.active().scope, -1004).unwrap();
+        let provider = f.service.clone();
+        let target = conversation_ref(&f.context.active().scope, -1004).unwrap();
         let intents = provider
             .intents(f.context.active(), vec![target.clone()])
             .await
@@ -367,7 +375,7 @@ fn leave_intent_catalog_marks_empty_cleanup_conditional_and_unavailable_leave_di
                 ActionKind::RemoveForCurrentAccount
             ]
         );
-        let owner = super::compat::conversation_ref(&f.context.active().scope, -1001).unwrap();
+        let owner = conversation_ref(&f.context.active().scope, -1001).unwrap();
         let intents = provider
             .intents(f.context.active(), vec![owner])
             .await
@@ -390,27 +398,426 @@ fn scoped_constructor_rejects_repository_for_a_different_verified_account() {
     let first = fixture();
     let second = fixture();
     assert!(
-        CleanerService::new_scoped(
+        TelegramCleanup::new_scoped(
+            first.gateway.clone(),
             first.gateway.clone(),
             first.context.clone(),
             second.repository.clone()
         )
         .is_err()
     );
-}
-
-#[test]
-fn compatibility_provider_cannot_wrap_an_engine_from_another_scope() {
-    let first = fixture();
-    let second = fixture();
     assert!(
-        TelegramCompatibilityProvider::new(
+        TelegramCleanup::new_scoped(
             first.gateway.clone(),
+            second.gateway.clone(),
             first.context.clone(),
-            second.service.clone()
+            first.repository.clone()
         )
         .is_err()
     );
+}
+
+#[test]
+fn cleanup_lifecycle_rejects_another_scope() {
+    let first = fixture();
+    let second = fixture();
+    tauri::async_runtime::block_on(async {
+        assert!(
+            crate::providers::ports::ReviewedLifecycle::recover(
+                second.service.as_ref(),
+                first.context.active()
+            )
+            .await
+            .is_err()
+        );
+        assert!(second.gateway.operation_log().await.is_empty());
+    });
+}
+
+#[test]
+fn retained_cleanup_rejects_raw_batches_and_unapproved_start_without_native_mutation() {
+    use super::{query::TelegramQuery, registration::TelegramProvider};
+    use crate::providers::ports::{ExecutionBatch, ProviderRegistration, StartReviewed};
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        let view = selection(&f).await;
+        let envelope = f.service.reviewed_plan(view.id).unwrap();
+        let query = Arc::new(TelegramQuery::new(f.gateway.clone(), f.context.clone()).unwrap());
+        let registration = TelegramProvider::new(query, f.service.clone());
+        let retained = registration.reviewed_lifecycle().unwrap();
+        assert!(Arc::ptr_eq(
+            &retained,
+            &registration.reviewed_lifecycle().unwrap()
+        ));
+        assert!(registration.remediation().is_err());
+        assert!(registration.live_connection().is_err());
+        assert_eq!(f.gateway.operation_log().await.len(), 0);
+        let batch = ExecutionBatch {
+            context: f.context.active().clone(),
+            plan_id: envelope.id,
+            fingerprint: envelope.fingerprint.clone(),
+            step_index: 0,
+            action: envelope.steps[0].descriptor.kind,
+            targets: envelope.steps[0].targets.clone(),
+            recipe: envelope.recipe.clone(),
+        };
+        assert!(f.service.execute_batch(batch.clone()).await.is_err());
+        assert_eq!(f.gateway.operation_log().await.len(), 0);
+        assert!(
+            retained
+                .start(
+                    f.context.active(),
+                    StartReviewed {
+                        plan_id: view.id,
+                        fingerprint: view.fingerprint.clone(),
+                        irreversible_acknowledged: true,
+                        typed_chat_title: None,
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(f.gateway.operation_log().await.len(), 0);
+        assert!(f.store.snapshot().unwrap().jobs.is_empty());
+        // Retaining a raw request, and even issuing a reviewed grant, cannot
+        // grant raw batch execution or consume the reviewed grant.
+        f.service
+            .authorize_plan(AuthorizePlanRequest {
+                plan_id: view.id,
+                fingerprint: view.fingerprint.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(f.service.execute_batch(batch).await.is_err());
+        assert_eq!(f.gateway.operation_log().await.len(), 0);
+        let job = retained
+            .start(
+                f.context.active(),
+                StartReviewed {
+                    plan_id: view.id,
+                    fingerprint: view.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            terminal(&f.service, job.id).await.status,
+            super::model::JobStatus::Completed
+        );
+        assert_eq!(f.gateway.operation_log().await.len(), 1);
+    });
+}
+
+#[test]
+fn cleanup_worker_retains_the_single_owner_only_until_it_stops() {
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        let view = selection(&f).await;
+        f.gateway
+            .inject_rate_limit_once(
+                crate::demo_gateway::TestFailurePoint::DeleteMessagesForEveryone,
+            )
+            .await;
+        let job = start(&f.service, &view).await;
+        f.gateway.wait_for_injected_failure(1).await;
+        let weak = Arc::downgrade(&f.service);
+        let service = f.service;
+        drop(service);
+        let running = weak
+            .upgrade()
+            .expect("the accepted worker must retain its cleanup owner");
+        assert!(running.has_workers().await);
+        running.cancel_job(job.id).await.unwrap();
+        running.stop_workers().await;
+        drop(running);
+        // The worker drops its Arc immediately after removing its stop token.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn reviewed_cleanup_grant_expires_after_sixty_seconds_without_native_mutation() {
+    use crate::providers::ports::{ReviewedLifecycle, ReviewedPlanRef, StartReviewed};
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        let view = selection(&f).await;
+        let cleanup: Arc<dyn ReviewedLifecycle> = f.service.clone();
+        cleanup
+            .authorize(
+                f.context.active(),
+                ReviewedPlanRef {
+                    plan_id: view.id,
+                    fingerprint: view.fingerprint.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        // GrantBook deliberately uses the real monotonic clock. Exercise its
+        // unchanged 60-second contract without a production clock/test hook.
+        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        let error = cleanup
+            .start(
+                f.context.active(),
+                StartReviewed {
+                    plan_id: view.id,
+                    fingerprint: view.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            retract_domain::ErrorCode::AuthenticationRequired
+        );
+        assert!(f.gateway.operation_log().await.is_empty());
+        assert!(f.store.snapshot().unwrap().jobs.is_empty());
+        assert!(!cleanup.has_workers().await);
+    });
+}
+
+#[test]
+fn reviewed_cleanup_reauthorization_cannot_duplicate_an_existing_plan_job() {
+    use crate::providers::ports::{ReviewedLifecycle, ReviewedPlanRef, StartReviewed};
+    tauri::async_runtime::block_on(async {
+        let f = fixture();
+        let view = selection(&f).await;
+        let job = start(&f.service, &view).await;
+        assert_eq!(
+            terminal(&f.service, job.id).await.status,
+            super::model::JobStatus::Completed
+        );
+        let before = f.store.snapshot().unwrap();
+        let calls = f.gateway.operation_log().await;
+        let cleanup: Arc<dyn ReviewedLifecycle> = f.service.clone();
+        cleanup
+            .authorize(
+                f.context.active(),
+                ReviewedPlanRef {
+                    plan_id: view.id,
+                    fingerprint: view.fingerprint.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let duplicate = cleanup
+            .start(
+                f.context.active(),
+                StartReviewed {
+                    plan_id: view.id,
+                    fingerprint: view.fingerprint,
+                    irreversible_acknowledged: true,
+                    typed_chat_title: None,
+                },
+            )
+            .await;
+        assert!(duplicate.is_err());
+        assert_eq!(f.store.snapshot().unwrap(), before);
+        assert_eq!(f.gateway.operation_log().await, calls);
+        assert_eq!(f.service.legacy_jobs().await.len(), 1);
+    });
+}
+
+#[test]
+fn reviewed_cleanup_all_operations_preserve_exact_native_call_order_and_durable_plans() {
+    use super::{locators::TelegramMessageLocator, normalize::actor_locator};
+    use crate::providers::ports::{
+        PrepareIntent, ReviewedLifecycle, ReviewedPlanRef, StartReviewed,
+    };
+    use retract_domain::{ExpectedEffect::*, ScopedResourceRef};
+    tauri::async_runtime::block_on(async {
+        type OperationCase = (
+            &'static str,
+            i64,
+            PlanOperation,
+            &'static [&'static str],
+            &'static [ExpectedEffect],
+        );
+        let cases: &[OperationCase] = &[
+            (
+                "selected_messages",
+                -1001,
+                PlanOperation::SelectedMessages,
+                &["delete_messages_for_everyone:-1001:14"],
+                &[RemovedForAllParticipants],
+            ),
+            (
+                "delete_my_messages",
+                -1001,
+                PlanOperation::DeleteMyMessages,
+                &["delete_messages_for_everyone:-1001:11,14"],
+                &[RemovedForAllParticipants],
+            ),
+            (
+                "clear_history",
+                -1001,
+                PlanOperation::ClearHistory,
+                &["clear_history_for_everyone:-1001"],
+                &[RemovedForAllParticipants],
+            ),
+            (
+                "remove_chat_for_self",
+                304,
+                PlanOperation::RemoveChatForSelf,
+                &["remove_chat_for_self:304"],
+                &[RemovedForCurrentAccountOnly],
+            ),
+            (
+                "leave_chat",
+                -1004,
+                PlanOperation::LeaveChat,
+                &[
+                    "delete_messages_for_everyone:-1004:500",
+                    "leave_chat:-1004",
+                    "remove_chat_for_self:-1004",
+                ],
+                &[
+                    RemovedForAllParticipants,
+                    MembershipRemoved,
+                    RemovedForCurrentAccountOnly,
+                ],
+            ),
+            (
+                "leave_chat",
+                -1003,
+                PlanOperation::DeleteAllMessagesAndLeave,
+                &[
+                    "delete_messages_for_everyone:-1003:31",
+                    "leave_chat:-1003",
+                    "remove_chat_for_self:-1003",
+                ],
+                &[
+                    RemovedForAllParticipants,
+                    MembershipRemoved,
+                    RemovedForCurrentAccountOnly,
+                ],
+            ),
+            (
+                "leave_chat",
+                -1002,
+                PlanOperation::ClearHistoryAndLeave,
+                &[
+                    "clear_history_for_everyone_keep_chat:-1002",
+                    "leave_chat:-1002",
+                    "remove_chat_for_self:-1002",
+                ],
+                &[
+                    RemovedForAllParticipants,
+                    MembershipRemoved,
+                    RemovedForCurrentAccountOnly,
+                ],
+            ),
+            (
+                "delete_by_sender",
+                -1001,
+                PlanOperation::DeleteBySender,
+                &["delete_messages_by_sender:-1001:714"],
+                &[RemovedForAllParticipants],
+            ),
+            (
+                "delete_group",
+                -1001,
+                PlanOperation::DeleteGroup,
+                &["delete_group:-1001"],
+                &[ContainerDestroyed],
+            ),
+        ];
+        for (action_id, chat_id, operation, expected_calls, expected_effects) in cases {
+            let f = fixture();
+            if *operation == PlanOperation::LeaveChat {
+                f.gateway.append_messages(*chat_id, 500, 1).await;
+            }
+            let scope = &f.context.active().scope;
+            let scoped = |resource: retract_domain::ProviderResourceRef| ScopedResourceRef {
+                scope: scope.clone(),
+                id: resource.resource_id().unwrap(),
+                resource,
+            };
+            let target = if *operation == PlanOperation::SelectedMessages {
+                scoped(
+                    TelegramMessageLocator::new(chat_id.to_string(), "14")
+                        .unwrap()
+                        .resource(scope.account_id),
+                )
+            } else {
+                conversation_ref(scope, *chat_id).unwrap()
+            };
+            let actor = (*operation == PlanOperation::DeleteBySender)
+                .then(|| scoped(actor_locator(714).unwrap().resource(scope.account_id)));
+            let cleanup: Arc<dyn ReviewedLifecycle> = f.service.clone();
+            let plan = cleanup
+                .prepare(
+                    f.context.active(),
+                    PrepareIntent {
+                        action_id: (*action_id).into(),
+                        targets: vec![target],
+                        actor,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                TelegramExecutionRecipe::validate_envelope(&plan)
+                    .unwrap()
+                    .operation,
+                *operation
+            );
+            assert_eq!(
+                plan.steps
+                    .iter()
+                    .map(|step| step.descriptor.effect)
+                    .collect::<Vec<_>>(),
+                *expected_effects
+            );
+            assert_eq!(f.store.snapshot().unwrap().plans, vec![plan.clone()]);
+            assert!(f.gateway.operation_log().await.is_empty());
+            cleanup
+                .authorize(
+                    f.context.active(),
+                    ReviewedPlanRef {
+                        plan_id: plan.id,
+                        fingerprint: plan.fingerprint.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            let job = cleanup
+                .start(
+                    f.context.active(),
+                    StartReviewed {
+                        plan_id: plan.id,
+                        fingerprint: plan.fingerprint.clone(),
+                        irreversible_acknowledged: true,
+                        typed_chat_title: plan.confirmation.exact_text.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                terminal(&f.service, job.id).await.status,
+                super::model::JobStatus::Completed
+            );
+            assert_eq!(
+                f.gateway.operation_log().await,
+                *expected_calls,
+                "{operation:?}"
+            );
+            let durable = f.store.snapshot().unwrap();
+            assert_eq!(durable.plans, vec![plan]);
+            assert_eq!(durable.jobs.len(), 1);
+            assert!(durable.jobs[0].started_authorized);
+            assert_eq!(durable.jobs[0].status, retract_domain::JobStatus::Completed);
+        }
+    });
 }
 
 #[test]
@@ -419,10 +826,10 @@ fn validated_store_rejects_skipping_unprocessed_batches_and_foreign_dirty_target
         let f = fixture();
         let view = selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -436,7 +843,7 @@ fn validated_store_rejects_skipping_unprocessed_batches_and_foreign_dirty_target
                 .is_err()
         );
         job.next_batch = 0;
-        job.dirty_refs = vec![super::compat::conversation_ref(&job.scope, -999).unwrap()];
+        job.dirty_refs = vec![conversation_ref(&job.scope, -999).unwrap()];
         assert!(
             f.store
                 .transaction(|state| {
@@ -454,13 +861,9 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
     use crate::providers::ports::{ActionRequest, ContentQuery, QuerySource};
     tauri::async_runtime::block_on(async {
         let f = fixture();
-        let provider = TelegramCompatibilityProvider::new(
-            f.gateway.clone(),
-            f.context.clone(),
-            f.service.clone(),
-        )
-        .unwrap();
-        let result = provider
+        let provider = f.service.clone();
+        let query = super::query::TelegramQuery::new(f.gateway.clone(), f.context.clone()).unwrap();
+        let result = query
             .search(ContentQuery {
                 scope: f.context.active().scope.clone(),
                 query: String::new(),
@@ -478,7 +881,7 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
             })
             .unwrap();
         assert_eq!(photo.kind, retract_domain::ContentKind::Image);
-        let metadata: super::compat::TelegramContentMetadata =
+        let metadata: super::normalize::TelegramContentMetadata =
             serde_json::from_value(photo.provider_metadata.as_ref().unwrap().payload.clone())
                 .unwrap();
         assert_eq!(metadata.original_kind, cleaner_domain::ContentKind::Photo);
@@ -503,7 +906,7 @@ fn normalization_preserves_telegram_filter_metadata_and_permission_truth() {
         let mut foreign = f.context.active().scope.clone();
         foreign.source_id = Uuid::new_v4().try_into().unwrap();
         assert!(
-            provider
+            query
                 .search(ContentQuery {
                     scope: foreign,
                     query: String::new(),
@@ -538,7 +941,7 @@ fn scoped_plan_installs_one_fingerprint_before_review_and_persistence() {
         let mut foreign = legacy;
         let mut other_scope = plan.scope.clone();
         other_scope.source_id = Uuid::new_v4().try_into().unwrap();
-        let other = TelegramCompatibilityProvider::bind_plan(&other_scope, &mut foreign).unwrap();
+        let other = bind_plan(&other_scope, &mut foreign).unwrap();
         assert_ne!(other.fingerprint, plan.fingerprint);
         let mut changed = plan.clone();
         changed.steps[0].descriptor.effect = ExpectedEffect::RemovedForCurrentAccountOnly;
@@ -572,7 +975,7 @@ fn stale_binding_rejects_grant_and_execution_without_gateway_mutation() {
                 .is_err()
         );
         assert!(f.gateway.delete_calls().await.is_empty());
-        assert!(f.service.jobs().await.is_empty());
+        assert!(f.service.legacy_jobs().await.is_empty());
     });
 }
 
@@ -604,8 +1007,7 @@ fn compound_cleanup_maps_each_ordered_effect_and_critical_destruction_separately
         let f = fixture();
         let chat = f.gateway.chat_by_id(-1002).await.unwrap().unwrap();
         let mut legacy = DeletionPlan::leave_chat(&chat, vec![]).unwrap();
-        let plan = TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy)
-            .unwrap();
+        let plan = bind_plan(&f.context.active().scope, &mut legacy).unwrap();
         assert_eq!(
             plan.steps
                 .iter()
@@ -620,9 +1022,7 @@ fn compound_cleanup_maps_each_ordered_effect_and_critical_destruction_separately
         assert_eq!(plan.restart_policy, RestartPolicy::RequiresNewReview);
         let chat = f.gateway.chat_by_id(-1001).await.unwrap().unwrap();
         let mut destroy = DeletionPlan::chat_wide(PlanOperation::DeleteGroup, &chat).unwrap();
-        let plan =
-            TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut destroy)
-                .unwrap();
+        let plan = bind_plan(&f.context.active().scope, &mut destroy).unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(
             plan.steps[0].descriptor.effect,
@@ -645,17 +1045,11 @@ fn normalized_counts_preserve_unavailable_selections_outside_eligible_total() {
         protected.deletion_reach = DeletionReach::SelfOnly;
         messages.push(protected);
         let mut legacy = DeletionPlan::selected_messages(messages).unwrap();
-        TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy).unwrap();
-        let mut job = crate::model::JobRecord::new(&legacy);
+        bind_plan(&f.context.active().scope, &mut legacy).unwrap();
+        let mut job = super::model::JobRecord::new(&legacy);
         job.deleted = 1;
-        job.status = crate::model::JobStatus::Completed;
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &job,
-            true,
-        )
-        .unwrap();
+        job.status = super::model::JobStatus::Completed;
+        let normalized = normalize_job(&f.context.active().scope, &legacy, &job, true).unwrap();
         assert_eq!(normalized.counters.selected, 2);
         assert_eq!(normalized.counters.eligible, 1);
         assert_eq!(normalized.counters.deleted, 1);
@@ -664,9 +1058,9 @@ fn normalized_counts_preserve_unavailable_selections_outside_eligible_total() {
 }
 
 async fn start(
-    service: &Arc<CleanerService>,
-    plan: &crate::model::PlanView,
-) -> crate::model::JobRecord {
+    service: &Arc<TelegramCleanup>,
+    plan: &super::model::PlanView,
+) -> super::model::JobRecord {
     service
         .authorize_plan(AuthorizePlanRequest {
             plan_id: plan.id,
@@ -685,11 +1079,11 @@ async fn start(
         .unwrap()
 }
 
-async fn terminal(service: &CleanerService, id: Uuid) -> crate::model::JobRecord {
+async fn terminal(service: &TelegramCleanup, id: Uuid) -> super::model::JobRecord {
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
         loop {
             if let Some(job) = service
-                .jobs()
+                .legacy_jobs()
                 .await
                 .into_iter()
                 .find(|j| j.id == id && j.status.is_terminal())
@@ -735,9 +1129,13 @@ fn identity_change_during_owner_prompt_cannot_publish_a_grant() {
         )
         .unwrap();
         context.owner_prompt = Some(prompt.clone());
-        let service =
-            CleanerService::new_scoped(f.gateway.clone(), Arc::new(context), f.repository.clone())
-                .unwrap();
+        let service = TelegramCleanup::new_scoped(
+            f.gateway.clone(),
+            f.gateway.clone(),
+            Arc::new(context),
+            f.repository.clone(),
+        )
+        .unwrap();
         let plan = service
             .prepare_selection(PrepareSelectionRequest {
                 message_refs: vec![MessageRef {
@@ -776,7 +1174,7 @@ fn identity_change_during_owner_prompt_cannot_publish_a_grant() {
                 .is_err()
         );
         assert!(f.gateway.delete_calls().await.is_empty());
-        assert!(service.jobs().await.is_empty());
+        assert!(service.legacy_jobs().await.is_empty());
     });
 }
 
@@ -787,10 +1185,10 @@ impl TelegramStateRepository for FailProgress {
     fn scope(&self) -> Option<&retract_domain::Scope> {
         self.inner.scope()
     }
-    fn load(&self) -> Result<crate::model::PersistedState, crate::error::AppError> {
+    fn load(&self) -> Result<super::model::PersistedState, crate::error::AppError> {
         self.inner.load()
     }
-    fn save(&self, state: &crate::model::PersistedState) -> Result<(), crate::error::AppError> {
+    fn save(&self, state: &super::model::PersistedState) -> Result<(), crate::error::AppError> {
         if state.jobs.iter().any(|job| job.next_batch > 0) {
             return Err(crate::error::AppError::StatePersistenceFailed);
         }
@@ -806,10 +1204,10 @@ impl TelegramStateRepository for FailAfterLeave {
     fn scope(&self) -> Option<&retract_domain::Scope> {
         self.inner.scope()
     }
-    fn load(&self) -> Result<crate::model::PersistedState, crate::error::AppError> {
+    fn load(&self) -> Result<super::model::PersistedState, crate::error::AppError> {
         self.inner.load()
     }
-    fn save(&self, state: &crate::model::PersistedState) -> Result<(), crate::error::AppError> {
+    fn save(&self, state: &super::model::PersistedState) -> Result<(), crate::error::AppError> {
         if self.left.load(std::sync::atomic::Ordering::Acquire) {
             return Err(crate::error::AppError::StatePersistenceFailed);
         }
@@ -830,7 +1228,8 @@ fn failed_membership_progress_save_prevents_following_local_removal() {
             preflight_error: None,
             left: left.clone(),
         });
-        let service = CleanerService::new_scoped(
+        let service = TelegramCleanup::new_scoped(
+            observed.clone(),
             observed,
             f.context.clone(),
             Arc::new(FailAfterLeave {
@@ -840,7 +1239,7 @@ fn failed_membership_progress_save_prevents_following_local_removal() {
         )
         .unwrap();
         let plan = service
-            .prepare_chat_action(crate::model::PrepareChatActionRequest {
+            .prepare_chat_action(super::model::PrepareChatActionRequest {
                 chat_id: -1002,
                 operation: PlanOperation::LeaveChat,
             })
@@ -877,8 +1276,13 @@ fn identity_change_during_a_mutation_records_uncertainty_and_stops() {
             preflight_error: None,
             left: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
-        let service =
-            CleanerService::new_scoped(observed, f.context.clone(), f.repository.clone()).unwrap();
+        let service = TelegramCleanup::new_scoped(
+            observed.clone(),
+            observed,
+            f.context.clone(),
+            f.repository.clone(),
+        )
+        .unwrap();
         let plan = service
             .prepare_selection(PrepareSelectionRequest {
                 message_refs: vec![MessageRef {
@@ -908,7 +1312,8 @@ fn failed_progress_save_stops_before_next_batch_and_does_not_publish_cursor() {
     tauri::async_runtime::block_on(async {
         let f = fixture();
         f.gateway.append_messages(-1001, 1000, 101).await;
-        let service = CleanerService::new_scoped(
+        let service = TelegramCleanup::new_scoped(
+            f.gateway.clone(),
             f.gateway.clone(),
             f.context.clone(),
             Arc::new(FailProgress {
@@ -959,7 +1364,7 @@ fn rate_wait_rechecks_binding_before_any_retry_call() {
         f.gateway.wait_for_injected_failure(1).await;
         f.binding.invalidate();
         let failed = terminal(&f.service, job.id).await;
-        assert_eq!(failed.status, crate::model::JobStatus::Failed);
+        assert_eq!(failed.status, super::model::JobStatus::Failed);
         assert_eq!(f.gateway.delete_calls().await.len(), 1);
         assert_eq!(f.gateway.current_reach_calls().await.len(), 1);
     });
@@ -971,10 +1376,10 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let f = fixture();
         let plan = selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let queued = TelegramCompatibilityProvider::normalize_job(
+        let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -988,9 +1393,13 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
             FoundationTelegramRepository::new(f.store.clone(), f.context.active().scope.clone())
                 .unwrap(),
         );
-        let resumed =
-            CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), next_repository)
-                .unwrap();
+        let resumed = TelegramCleanup::new_scoped(
+            f.gateway.clone(),
+            f.gateway.clone(),
+            f.context.clone(),
+            next_repository,
+        )
+        .unwrap();
         resumed.resume_incomplete().await;
         assert_eq!(terminal(&resumed, queued.id).await.deleted, 1);
         assert_eq!(f.gateway.delete_calls().await, vec![(-1001, vec![14])]);
@@ -1002,10 +1411,10 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let queued = TelegramCompatibilityProvider::normalize_job(
+        let queued = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -1035,14 +1444,15 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         let repository = Arc::new(
             FoundationTelegramRepository::new(f.store.clone(), active.scope.clone()).unwrap(),
         );
-        let service = CleanerService::new_scoped(
+        let service = TelegramCleanup::new_scoped(
+            gateway.clone(),
             gateway.clone(),
             Arc::new(EngineContext::new(active, identity, f.binding.clone()).unwrap()),
             repository,
         )
         .unwrap();
         service.resume_incomplete().await;
-        assert!(service.jobs().await.is_empty());
+        assert!(service.legacy_jobs().await.is_empty());
         assert!(gateway.delete_calls().await.is_empty());
         assert_eq!(
             f.store.snapshot().unwrap().jobs[0].status,
@@ -1069,9 +1479,13 @@ fn stale_scope_projection_cannot_overwrite_newer_plan_or_cursor() {
 fn two_services_sharing_repository_cannot_drop_each_others_plans() {
     tauri::async_runtime::block_on(async {
         let f = fixture();
-        let stale =
-            CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), f.repository.clone())
-                .unwrap();
+        let stale = TelegramCleanup::new_scoped(
+            f.gateway.clone(),
+            f.gateway.clone(),
+            f.context.clone(),
+            f.repository.clone(),
+        )
+        .unwrap();
         let first = selection(&f).await;
         assert!(
             stale
@@ -1100,19 +1514,13 @@ fn uncertain_results_do_not_reclassify_earlier_confirmed_failures() {
                 .unwrap(),
         )
         .unwrap();
-        TelegramCompatibilityProvider::bind_plan(&f.context.active().scope, &mut legacy).unwrap();
-        let mut job = crate::model::JobRecord::new(&legacy);
-        job.status = crate::model::JobStatus::Partial;
+        bind_plan(&f.context.active().scope, &mut legacy).unwrap();
+        let mut job = super::model::JobRecord::new(&legacy);
+        job.status = super::model::JobStatus::Partial;
         job.failed = 2;
         job.uncertain = 1;
         job.error_codes.push("ambiguous_outcome".into());
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &job,
-            true,
-        )
-        .unwrap();
+        let normalized = normalize_job(&f.context.active().scope, &legacy, &job, true).unwrap();
         assert_eq!(normalized.counters.failed, 2);
         assert_eq!(normalized.counters.uncertain, 1);
     });
@@ -1146,9 +1554,13 @@ fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain()
                     preflight_error: None,
                     left: left.clone(),
                 });
-                let service =
-                    CleanerService::new_scoped(observed, f.context.clone(), f.repository.clone())
-                        .unwrap();
+                let service = TelegramCleanup::new_scoped(
+                    observed.clone(),
+                    observed,
+                    f.context.clone(),
+                    f.repository.clone(),
+                )
+                .unwrap();
                 let plan = if operation == PlanOperation::SelectedMessages {
                     service
                         .prepare_selection(PrepareSelectionRequest {
@@ -1163,7 +1575,7 @@ fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain()
                         .unwrap()
                 } else {
                     service
-                        .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                        .prepare_chat_action(super::model::PrepareChatActionRequest {
                             chat_id,
                             operation: PlanOperation::LeaveChat,
                         })
@@ -1199,9 +1611,13 @@ fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain()
                     )
                     .unwrap(),
                 );
-                let recovered =
-                    CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository)
-                        .unwrap();
+                let recovered = TelegramCleanup::new_scoped(
+                    f.gateway.clone(),
+                    f.gateway.clone(),
+                    f.context.clone(),
+                    repository,
+                )
+                .unwrap();
                 let calls = f.gateway.delete_calls().await;
                 recovered.resume_incomplete().await;
                 assert_eq!(f.gateway.delete_calls().await, calls);
@@ -1227,9 +1643,13 @@ fn preflight_transport_timeout_and_confirmed_rejection_are_not_ambiguous() {
                 preflight_error: preflight.then_some(error),
                 left: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
-            let service =
-                CleanerService::new_scoped(observed, f.context.clone(), f.repository.clone())
-                    .unwrap();
+            let service = TelegramCleanup::new_scoped(
+                observed.clone(),
+                observed,
+                f.context.clone(),
+                f.repository.clone(),
+            )
+            .unwrap();
             let plan = service
                 .prepare_selection(PrepareSelectionRequest {
                     message_refs: vec![MessageRef {
@@ -1261,10 +1681,10 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
             let f = fixture();
             selection(&f).await;
             let legacy = f.repository.load().unwrap().plans.remove(0);
-            let mut queued = TelegramCompatibilityProvider::normalize_job(
+            let mut queued = normalize_job(
                 &f.context.active().scope,
                 &legacy,
-                &crate::model::JobRecord::new(&legacy),
+                &super::model::JobRecord::new(&legacy),
                 true,
             )
             .unwrap();
@@ -1287,9 +1707,13 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
                 )
                 .unwrap(),
             );
-            let service =
-                CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository)
-                    .unwrap();
+            let service = TelegramCleanup::new_scoped(
+                f.gateway.clone(),
+                f.gateway.clone(),
+                f.context.clone(),
+                repository,
+            )
+            .unwrap();
             assert_eq!(
                 f.store.snapshot().unwrap().jobs[0].retry_at,
                 Some(deadline),
@@ -1319,9 +1743,9 @@ fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
                 assert_eq!(
                     stopped.status,
                     if outcome == "cancel" {
-                        crate::model::JobStatus::Cancelled
+                        super::model::JobStatus::Cancelled
                     } else {
-                        crate::model::JobStatus::Failed
+                        super::model::JobStatus::Failed
                     }
                 );
             }
@@ -1337,10 +1761,10 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();
@@ -1383,25 +1807,26 @@ fn terminal_safe_diagnostics_round_trip_without_provider_text_or_code_loss() {
             FoundationTelegramRepository::new(f.store.clone(), f.context.active().scope.clone())
                 .unwrap(),
         );
-        CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository).unwrap();
+        TelegramCleanup::new_scoped(
+            f.gateway.clone(),
+            f.gateway.clone(),
+            f.context.clone(),
+            repository,
+        )
+        .unwrap();
         assert_eq!(
             f.store.snapshot().unwrap().jobs[0].diagnostics,
             job.diagnostics
         );
-        let mut legacy_job = crate::model::JobRecord::new(&legacy);
+        let mut legacy_job = super::model::JobRecord::new(&legacy);
         legacy_job.error_codes = vec![
             "telegram_rate_limited".into(),
             "telegram_timeout".into(),
             "not_found".into(),
             "private provider text".into(),
         ];
-        let normalized = TelegramCompatibilityProvider::normalize_job(
-            &f.context.active().scope,
-            &legacy,
-            &legacy_job,
-            true,
-        )
-        .unwrap();
+        let normalized =
+            normalize_job(&f.context.active().scope, &legacy, &legacy_job, true).unwrap();
         assert_eq!(
             normalized
                 .diagnostics
@@ -1425,7 +1850,7 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
             let f = fixture();
             if broad {
                 f.service
-                    .prepare_chat_action(crate::model::PrepareChatActionRequest {
+                    .prepare_chat_action(super::model::PrepareChatActionRequest {
                         chat_id: -1001,
                         operation: PlanOperation::ClearHistory,
                     })
@@ -1435,10 +1860,10 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
                 selection(&f).await;
             }
             let legacy = f.repository.load().unwrap().plans.remove(0);
-            let job = TelegramCompatibilityProvider::normalize_job(
+            let job = normalize_job(
                 &f.context.active().scope,
                 &legacy,
-                &crate::model::JobRecord::new(&legacy),
+                &super::model::JobRecord::new(&legacy),
                 broad,
             )
             .unwrap();
@@ -1455,11 +1880,15 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
                 )
                 .unwrap(),
             );
-            let service =
-                CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository)
-                    .unwrap();
+            let service = TelegramCleanup::new_scoped(
+                f.gateway.clone(),
+                f.gateway.clone(),
+                f.context.clone(),
+                repository,
+            )
+            .unwrap();
             service.resume_incomplete().await;
-            let stopped = &service.jobs().await[0];
+            let stopped = &service.legacy_jobs().await[0];
             assert!(stopped.status.is_terminal());
             assert!(
                 stopped
@@ -1484,7 +1913,13 @@ fn broad_or_unauthorized_recovery_requires_review_and_descriptive_recipes_never_
                 .unwrap(),
         );
         assert!(
-            CleanerService::new_scoped(f.gateway.clone(), f.context.clone(), repository).is_err()
+            TelegramCleanup::new_scoped(
+                f.gateway.clone(),
+                f.gateway.clone(),
+                f.context.clone(),
+                repository
+            )
+            .is_err()
         );
         assert!(f.gateway.delete_calls().await.is_empty());
     });
@@ -1496,10 +1931,10 @@ fn switching_account_does_not_label_potentially_inflight_work_safely_blocked() {
         let f = fixture();
         selection(&f).await;
         let legacy = f.repository.load().unwrap().plans.remove(0);
-        let mut job = TelegramCompatibilityProvider::normalize_job(
+        let mut job = normalize_job(
             &f.context.active().scope,
             &legacy,
-            &crate::model::JobRecord::new(&legacy),
+            &super::model::JobRecord::new(&legacy),
             true,
         )
         .unwrap();

@@ -5,8 +5,12 @@ use cleaner_domain::{ChatSummary, DeletionReach, MessageSnapshot};
 
 use crate::{
     error::AppError,
-    gateway::{GatewayInfo, TelegramGateway},
-    model::{AuthSnapshot, AuthStage, CatalogProgress, SearchRequest},
+    providers::telegram::{
+        model::{AuthSnapshot, AuthStage, CatalogProgress, SearchRequest},
+        native::ports::{
+            GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession,
+        },
+    },
 };
 
 pub struct SetupGateway {
@@ -25,8 +29,7 @@ fn setup_error() -> AppError {
     AppError::InvalidRequest("configure Telegram before using Retract".into())
 }
 
-#[async_trait]
-impl TelegramGateway for SetupGateway {
+impl TelegramSession for SetupGateway {
     fn info(&self) -> GatewayInfo {
         GatewayInfo {
             mode: "live",
@@ -56,7 +59,10 @@ impl TelegramGateway for SetupGateway {
             processed: 0,
         }
     }
+}
 
+#[async_trait]
+impl TelegramRead for SetupGateway {
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError> {
         Ok(Vec::new())
     }
@@ -92,7 +98,10 @@ impl TelegramGateway for SetupGateway {
     ) -> Result<Option<DeletionReach>, AppError> {
         Err(setup_error())
     }
+}
 
+#[async_trait]
+impl TelegramMutation for SetupGateway {
     async fn delete_messages_for_everyone(
         &self,
         _chat_id: i64,
@@ -128,7 +137,10 @@ impl TelegramGateway for SetupGateway {
     ) -> Result<(), AppError> {
         Err(setup_error())
     }
+}
 
+#[async_trait]
+impl TelegramConnectionIo for SetupGateway {
     async fn request_qr_auth(&self) -> Result<(), AppError> {
         Err(setup_error())
     }

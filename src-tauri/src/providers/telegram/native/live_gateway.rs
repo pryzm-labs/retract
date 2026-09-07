@@ -23,8 +23,6 @@ use zeroize::Zeroizing;
 
 use crate::{
     error::AppError,
-    gateway::{GatewayInfo, TelegramGateway},
-    model::{AuthSnapshot, AuthStage, CatalogProgress, MessageDirection, SearchRequest},
     persistence::FoundationStore,
     providers::telegram::{
         identity::{
@@ -32,7 +30,12 @@ use crate::{
             VerifiedTelegramIdentity,
         },
         locators::TelegramEnvironment,
+        model::{AuthSnapshot, AuthStage, CatalogProgress, MessageDirection, SearchRequest},
     },
+};
+
+use super::{
+    ports::{GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession},
     tdjson::TdJsonClient,
 };
 
@@ -1596,8 +1599,7 @@ impl LiveGateway {
     }
 }
 
-#[async_trait]
-impl TelegramGateway for LiveGateway {
+impl TelegramSession for LiveGateway {
     fn info(&self) -> GatewayInfo {
         GatewayInfo {
             mode: "live",
@@ -1631,7 +1633,10 @@ impl TelegramGateway for LiveGateway {
     fn catalog_progress(&self) -> CatalogProgress {
         self.catalog_progress_snapshot()
     }
+}
 
+#[async_trait]
+impl TelegramRead for LiveGateway {
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError> {
         if !self.is_ready() {
             return Ok(Vec::new());
@@ -1809,7 +1814,10 @@ impl TelegramGateway for LiveGateway {
             },
         ))
     }
+}
 
+#[async_trait]
+impl TelegramMutation for LiveGateway {
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -1901,7 +1909,10 @@ impl TelegramGateway for LiveGateway {
         self.mark_chat_summary_dirty(chat_id).await;
         Ok(())
     }
+}
 
+#[async_trait]
+impl TelegramConnectionIo for LiveGateway {
     async fn request_qr_auth(&self) -> Result<(), AppError> {
         if !matches!(
             self.auth().stage,
@@ -2257,17 +2268,17 @@ fn humanize_message_type(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::persistence::{FoundationStore, StoreBinding};
+    use crate::providers::telegram::native::tdjson::ScriptedTdJson;
     use crate::providers::telegram::{
         identity::VerifiedTelegramIdentity,
         locators::{TelegramEnvironment, TelegramPayloadValidator, telegram_provider_key},
     };
-    use crate::tdjson::ScriptedTdJson;
 
     const SCRIPTED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
     fn orchestration_fixture() -> Value {
         serde_json::from_str(include_str!(
-            "../tests/fixtures/tdlib/live-orchestration.json"
+            "../../../../tests/fixtures/tdlib/live-orchestration.json"
         ))
         .expect("valid synthetic live TDLib orchestration fixture")
     }
@@ -4275,11 +4286,17 @@ mod tests {
 
     fn fixture(name: &str) -> Value {
         let raw = match name {
-            "message-content" => include_str!("../tests/fixtures/tdlib/message-content.json"),
-            "member-statuses" => include_str!("../tests/fixtures/tdlib/member-statuses.json"),
-            "chat-positions" => include_str!("../tests/fixtures/tdlib/chat-positions.json"),
+            "message-content" => {
+                include_str!("../../../../tests/fixtures/tdlib/message-content.json")
+            }
+            "member-statuses" => {
+                include_str!("../../../../tests/fixtures/tdlib/member-statuses.json")
+            }
+            "chat-positions" => {
+                include_str!("../../../../tests/fixtures/tdlib/chat-positions.json")
+            }
             "live-orchestration" => {
-                include_str!("../tests/fixtures/tdlib/live-orchestration.json")
+                include_str!("../../../../tests/fixtures/tdlib/live-orchestration.json")
             }
             _ => panic!("unknown synthetic TDLib fixture"),
         };

@@ -1,6 +1,6 @@
 # Chat History Cleaner — Product and Engineering Plan
 
-Status: provider foundation implemented on 2026-09-04, with final whole-branch review and native/manual gates tracked separately. The real Telegram UI uses scoped v2 IPC and v3 encrypted state through the existing execution engine. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is available.
+Status: provider foundation and the direct Telegram provider migration were implemented by 2026-09-06. Both full Linux `arm64` and `amd64` gates passed on reviewed commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`; independent whole-branch review of `0d799b0..c7f2f5f` found no Critical or Important issues, and its two documentation findings are addressed in a documentation-only closure awaiting scoped re-review. Native macOS CI, Keychain/LocalAuthentication, VoiceOver, and disposable test-DC gates remain tracked separately. The real Telegram UI uses scoped v2 IPC and authenticated v3 encrypted state through independent query, connection, and reviewed-cleanup owners. Production onboarding requires a real Telegram connection; synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on the TDLib test-DC matrix in `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is available.
 
 ## 1. Product direction
 
@@ -202,35 +202,41 @@ This is preferable to:
 - **A macOS-only SwiftUI app:** excellent native UI, but it creates a second UI implementation if Windows/Linux follow. Choose it only if native macOS polish is more important than cross-platform delivery.
 - **Electron:** viable, but it bundles a larger runtime and places more pressure on Node/native-binding hardening. It offers no Telegram-specific advantage over Tauri here.
 
-### Component boundaries
+### Implemented Telegram component boundaries
 
 ```text
 React UI
-  └─ typed commands/events only
-Tauri command boundary
-  ├─ AuthService
-  ├─ ChatCatalog + CapabilityService
-  ├─ SearchService
-  ├─ DeletionPlanner
-  ├─ DeletionExecutor + RateLimitPolicy
-  ├─ JobStore + AuditSummary
-  └─ TDLibAdapter
-       └─ pinned native tdjson library → Telegram
+  └─ scoped v2 commands/events only
+Tauri command boundary + provider registry
+  └─ TelegramConnection
+       ├─ one LiveGateway + one shared FoundationStore
+       ├─ verified EngineContext (account, source, generation)
+       └─ TelegramProvider
+            ├─ TelegramQuery
+            │    └─ TelegramRead + EngineContext only
+            ├─ TelegramCleanup (direct ReviewedLifecycle owner)
+            │    ├─ separate TelegramRead and TelegramMutation ports
+            │    └─ plans, jobs, grants, workers and repository state
+            └─ TelegramPayloadValidator
+Telegram native boundary
+  ├─ typed session/read/mutation/connection ports
+  └─ LiveGateway → pinned native tdjson library → Telegram
 ```
 
-The frontend should receive purpose-built DTOs such as `ChatCapabilityView` and `DeletionPlanView`, not raw TDLib JSON. The backend must independently validate every UI command.
+Pure Telegram recipe, normalization and diagnostic modules translate between the provider lifecycle and native DTOs without owning state. `TelegramQuery` has no direct cleanup/store access or mutation authority: it owns only an `EngineContext` and a `TelegramRead` port. Production shares the `LiveGateway` behind that read port with connection/cleanup components, and that gateway retains the `FoundationStore` used for identity persistence, so a retained query may indirectly extend the store and profile-lock lifetime. It does not own cleanup state or expose store/mutation operations. `TelegramCleanup` owns reviewed planning, authorization, durable job transitions and execution once, and registration returns clones of that same owner; raw remediation and raw batch entry points remain unavailable. `FoundationStore` is shared by `Arc`, holds the cooperative profile lock for its full lifetime, and explicitly unlocks when its final owner drops. The frontend receives purpose-built DTOs such as `ChatCapabilityView` and `DeletionPlanView`, not raw TDLib JSON, and the backend independently validates every UI command.
 
-### Suggested repository layout
+### Current core repository layout
 
 ```text
-apps/desktop/                  React/Vite UI
-src-tauri/                     Tauri/Rust entrypoint and IPC
-crates/telegram-adapter/       Safe TDLib wrapper
-crates/cleaner-domain/         Capability and deletion planning rules
-crates/job-store/              Encrypted resumable job state
-vendor/tdlib/                  Pinned source/submodule or reproducible fetch metadata
-tests/fixtures/                Sanitized TDLib response fixtures
-docs/                          Threat model, release and test plans
+src/                                      React/Vite UI and scoped v2 adapter
+src-tauri/src/providers/telegram/         provider composition and pure codecs
+src-tauri/src/providers/telegram/native/  TDLib ports and native implementation
+src-tauri/src/providers/telegram/remediation/ direct reviewed cleanup owner
+src-tauri/src/persistence/                 encrypted provider/profile state
+crates/cleaner-domain/                     deletion planning rules
+crates/retract-domain/                     provider lifecycle contracts
+src-tauri/test-fixtures/telegram-migration/ frozen synthetic parity artifacts
+docs/                                     threat model, release and test plans
 ```
 
 ## 8. Security and privacy requirements
@@ -298,6 +304,17 @@ Avoid features that create hidden or automatic behavior: silent background delet
 ### Tracked provider UI prerequisite
 
 - [x] Add accessible on-demand complete job outcomes and safe structured diagnostics while retaining the compact recent-job row. Reviewed foundation Task 8 covers skipped/failed/uncertain results, retry/blocked/migration guidance and backend-described effects. Component/CSS tests are not native/browser viewport or VoiceOver evidence; those checks remain manual.
+
+### Tracked direct Telegram provider prerequisite
+
+- [x] Release the cooperative foundation profile lock explicitly when the final store owner drops, including failed initialization and cross-process contention paths.
+- [x] Freeze all nine Telegram execution recipes and one authenticated synthetic `RTRCT03` store before extraction; preserve exact fingerprints, locators, schemas, recovery decisions and ciphertext bytes through the migration.
+- [x] Place TDLib implementation behind provider-owned session/read/mutation/connection ports and enforce the boundary with controlled-input and real-tree architecture checks.
+- [x] Register an independent read-only `TelegramQuery` and one direct `TelegramCleanup` reviewed-lifecycle owner; remove the production compatibility facade, combined gateway and legacy cleanup service without adding a second executor.
+- [x] Pass the runtime-only Linux `arm64` and `amd64` container gates for the clean migrated source tree. These gates do not establish native macOS, real Keychain/LocalAuthentication, rendered VoiceOver, or live Telegram parity.
+- [x] Complete independent whole-branch review of the local migration through `c7f2f5f`; no Critical or Important findings remained. The documentation-only closure for its two Minor findings requires scoped re-review and does not add runtime acceptance beyond that reviewed baseline.
+- [ ] Publish an authorized branch/PR and run native macOS CI on the exact published revision.
+- [ ] Execute the separately authorized disposable test-DC matrix before destructive release approval.
 
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 

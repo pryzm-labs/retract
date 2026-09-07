@@ -31,6 +31,7 @@
     "verify:production-bundle": "sh scripts/verify-production-bundle.sh",
     "test:release": "node --test scripts/release-metadata.node-test.mjs",
     "check:public-repo": "node scripts/check-public-repo.mjs",
+    "check:provider-boundaries": "node --test scripts/check-provider-boundaries.node-test.mjs && node scripts/check-provider-boundaries.mjs",
     "package:unsigned": "sh scripts/package-unsigned-macos.sh",
     "preview": "vite preview",
     "test": "vitest run",

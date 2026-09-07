@@ -855,7 +855,7 @@ fn remediation_port_contracts_keep_fingerprints_targets_and_outcomes_explicit() 
 
 #[test]
 fn setup_and_default_synthetic_gateways_do_not_invent_verified_identity() {
-    use crate::gateway::TelegramGateway;
+    use crate::providers::telegram::native::ports::TelegramSession;
     let setup = crate::setup_gateway::SetupGateway::new("Synthetic setup");
     assert_eq!(setup.verified_identity(), None);
     assert_eq!(

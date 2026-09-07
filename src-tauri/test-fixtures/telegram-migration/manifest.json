@@ -1,0 +1,106 @@
+{
+  "artifactVersion": 1,
+  "baseCommit": "c2300593fcc0b94c710d6a535173799dd36da4f0",
+  "entries": [
+    {
+      "fingerprint": "sha256-v1:86f194e45fb19448672455d6ab78480ebe0913989a1c507379cba0268e49b475",
+      "fixture": "selected.json",
+      "jobId": "40000000-0000-4000-8000-000000000001",
+      "operation": "selected_messages",
+      "planId": "30000000-0000-4000-8000-000000000001",
+      "resumable": true,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:cbc5f24dd1b805957165283d9baf9e242afc6cd7cb9ac48c4362c7e76161b8d7",
+      "fixture": "delete-my-messages.json",
+      "jobId": "40000000-0000-4000-8000-000000000002",
+      "operation": "delete_my_messages",
+      "planId": "30000000-0000-4000-8000-000000000002",
+      "resumable": true,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:c8d99419ac55ad51418af5f851c5d6e655495723afbf576ca70f827cdd84cca1",
+      "fixture": "clear-history.json",
+      "jobId": "40000000-0000-4000-8000-000000000003",
+      "operation": "clear_history",
+      "planId": "30000000-0000-4000-8000-000000000003",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": false
+    },
+    {
+      "fingerprint": "sha256-v1:fa48117f47be5469bdf7053a36c29caec287a7f271c43d5a2ed0f3204417abd2",
+      "fixture": "clear-history-and-leave.json",
+      "jobId": "40000000-0000-4000-8000-000000000004",
+      "operation": "clear_history_and_leave",
+      "planId": "30000000-0000-4000-8000-000000000004",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:635c91c663b61612efbb62b30ae82e8bca59ab5ad5692af364c4e21ee4eaa685",
+      "fixture": "delete-all-messages-and-leave.json",
+      "jobId": "40000000-0000-4000-8000-000000000005",
+      "operation": "delete_all_messages_and_leave",
+      "planId": "30000000-0000-4000-8000-000000000005",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:02a7c6f7492a3d0d3f2b0bba3364ef54330ac8f21e88c5d35f4875088961e901",
+      "fixture": "remove-chat-for-self.json",
+      "jobId": "40000000-0000-4000-8000-000000000006",
+      "operation": "remove_chat_for_self",
+      "planId": "30000000-0000-4000-8000-000000000006",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": false
+    },
+    {
+      "fingerprint": "sha256-v1:2cac61f1d28a45b24565f74fd8608cd1c41a26c97354c21be2ae70d5a2e51efe",
+      "fixture": "delete-by-sender.json",
+      "jobId": "40000000-0000-4000-8000-000000000007",
+      "operation": "delete_by_sender",
+      "planId": "30000000-0000-4000-8000-000000000007",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:3939f02c4969cb703aaa708625aa463c94a5b32050f63d5f972d14b754aa0a87",
+      "fixture": "delete-group.json",
+      "jobId": "40000000-0000-4000-8000-000000000008",
+      "operation": "delete_group",
+      "planId": "30000000-0000-4000-8000-000000000008",
+      "resumable": false,
+      "scope": "active",
+      "startedAuthorized": true
+    },
+    {
+      "fingerprint": "sha256-v1:13f70dbdcaa41ed2fe0ca08e9df43bcf5700e311bde192e22e121b0ff483e541",
+      "fixture": "leave-chat.json",
+      "jobId": "40000000-0000-4000-8000-000000000009",
+      "operation": "leave_chat",
+      "planId": "30000000-0000-4000-8000-000000000009",
+      "resumable": false,
+      "scope": "foreign",
+      "startedAuthorized": false
+    }
+  ],
+  "executionSchema": "telegram.compatibility_recipe",
+  "executionSchemaVersion": 1,
+  "store": {
+    "byteLength": 36265,
+    "fixture": "store-v3.b64",
+    "magic": "RTRCT03",
+    "profile": "telegram-migration-base",
+    "sha256": "sha256:f981b648fdb1bd6b1294d7b2fec53d4794159df00ebe2d9e4fea5ec2b769d07d",
+    "testKey": "32 bytes repeated 0x54"
+  }
+}

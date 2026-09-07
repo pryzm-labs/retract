@@ -1,6 +1,7 @@
 //! Test-only provider I/O and connection fixtures. No test implements lifecycle,
 //! grants, persistence, recovery, job transitions, or a replacement batch runner.
 use super::{commands_v2, model_v2::*, tests::invoke};
+use crate::providers::telegram::remediation::TelegramCleanup;
 use crate::{
     demo_gateway::DemoGateway,
     error::AppError,
@@ -11,13 +12,13 @@ use crate::{
         ports::*,
         registry::ProviderRegistryError,
         telegram::{
-            compat::TelegramCompatibilityProvider,
             engine_context::{EngineContext, FoundationTelegramRepository},
             identity::{SessionBinding, TelegramAccountProfile, VerifiedTelegramIdentity},
             locators::*,
+            query::TelegramQuery,
+            registration::TelegramProvider,
         },
     },
-    service::CleanerService,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -342,11 +343,16 @@ impl ApplicationConnection for PendingTelegram {
         );
         let repository =
             Arc::new(FoundationTelegramRepository::new(self.store.clone(), active.scope).unwrap());
-        let engine =
-            CleanerService::new_scoped(self.gateway.clone(), context.clone(), repository).unwrap();
-        Ok(Arc::new(
-            TelegramCompatibilityProvider::new(self.gateway.clone(), context, engine).unwrap(),
-        ))
+        let engine = TelegramCleanup::new_scoped(
+            self.gateway.clone(),
+            self.gateway.clone(),
+            context.clone(),
+            repository,
+        )
+        .unwrap();
+        let query = Arc::new(TelegramQuery::new(self.gateway.clone(), context.clone()).unwrap());
+        let lifecycle = engine;
+        Ok(Arc::new(TelegramProvider::new(query, lifecycle)))
     }
     async fn auth(&self, _: AuthRequest) -> Result<(), SafeError> {
         Err(safe(ErrorCode::UnsupportedSchema))
@@ -397,9 +403,16 @@ pub async fn telegram(path: &Path, active: ActiveContext) -> (Harness, Arc<DemoG
         .await;
     let repository =
         Arc::new(FoundationTelegramRepository::new(store.clone(), active.scope.clone()).unwrap());
-    let engine = CleanerService::new_scoped(gateway.clone(), context.clone(), repository).unwrap();
-    let provider =
-        Arc::new(TelegramCompatibilityProvider::new(gateway.clone(), context, engine).unwrap());
+    let engine = TelegramCleanup::new_scoped(
+        gateway.clone(),
+        gateway.clone(),
+        context.clone(),
+        repository,
+    )
+    .unwrap();
+    let query = Arc::new(TelegramQuery::new(gateway.clone(), context.clone()).unwrap());
+    let lifecycle = engine;
+    let provider = Arc::new(TelegramProvider::new(query, lifecycle));
     (
         Harness::new(Arc::new(Connection {
             active: Arc::new(RwLock::new(Some(active))),

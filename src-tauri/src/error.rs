@@ -63,7 +63,7 @@ impl From<std::io::Error> for AppError {
     }
 }
 
-/// Native errors are never serialized at the v2 boundary.
+/// Shared infrastructure errors are never serialized at the v2 boundary.
 pub(crate) fn boundary_error(error: AppError) -> retract_domain::SafeError {
     use retract_domain::ErrorCode;
     let code = match error {
@@ -74,14 +74,12 @@ pub(crate) fn boundary_error(error: AppError) -> retract_domain::SafeError {
         AppError::InvalidRequest(ref message) if message == "stale_context" => {
             ErrorCode::StaleContext
         }
-        AppError::Gateway(ref message) if message == "RETRACT_AMBIGUOUS_OUTCOME" => {
-            ErrorCode::AmbiguousOutcome
-        }
-        AppError::Timeout(_) => ErrorCode::Transient,
         AppError::NotFound => ErrorCode::NotFound,
         AppError::SystemAuthentication(_) => ErrorCode::AuthenticationRequired,
         AppError::Domain(_) | AppError::InvalidRequest(_) => ErrorCode::ScopeMismatch,
-        AppError::Gateway(_) | AppError::JobAlreadyTerminal => ErrorCode::PermissionChanged,
+        AppError::Gateway(_) | AppError::Timeout(_) | AppError::JobAlreadyTerminal => {
+            ErrorCode::PermissionChanged
+        }
     };
     crate::provider_service::safe(code)
 }

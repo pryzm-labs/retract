@@ -29,7 +29,7 @@ use super::{
 };
 use crate::{
     error::AppError,
-    model::{JobStatus as LegacyJobStatus, PersistedState},
+    providers::telegram::model::{JobStatus as LegacyJobStatus, PersistedState},
     secure_store::{SecureJobStore, decrypt_authenticated, encrypt_authenticated},
 };
 

@@ -1,10 +1,10 @@
-use async_trait::async_trait;
 use cleaner_domain::{ChatSummary, DeletionReach, MessageSnapshot};
 
-use crate::{
-    error::AppError,
+use crate::error::AppError;
+
+use super::super::{
+    identity::VerifiedTelegramIdentity,
     model::{AuthSnapshot, CatalogProgress, SearchRequest},
-    providers::telegram::identity::VerifiedTelegramIdentity,
 };
 
 #[derive(Debug, Clone)]
@@ -14,12 +14,15 @@ pub struct GatewayInfo {
     pub reason: Option<String>,
 }
 
-#[async_trait]
-pub trait TelegramGateway: Send + Sync {
+pub trait TelegramSession: Send + Sync {
     fn info(&self) -> GatewayInfo;
     fn auth(&self) -> AuthSnapshot;
     fn verified_identity(&self) -> Option<VerifiedTelegramIdentity>;
     fn catalog_progress(&self) -> CatalogProgress;
+}
+
+#[async_trait::async_trait]
+pub trait TelegramRead: TelegramSession {
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError>;
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError>;
     async fn search(&self, request: &SearchRequest) -> Result<Vec<MessageSnapshot>, AppError>;
@@ -32,6 +35,10 @@ pub trait TelegramGateway: Send + Sync {
         chat_id: i64,
         message_id: i64,
     ) -> Result<Option<DeletionReach>, AppError>;
+}
+
+#[async_trait::async_trait]
+pub trait TelegramMutation: TelegramSession {
     async fn delete_messages_for_everyone(
         &self,
         chat_id: i64,
@@ -44,6 +51,10 @@ pub trait TelegramGateway: Send + Sync {
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError>;
     async fn delete_messages_by_sender(&self, chat_id: i64, sender_id: i64)
     -> Result<(), AppError>;
+}
+
+#[async_trait::async_trait]
+pub trait TelegramConnectionIo: TelegramSession {
     async fn request_qr_auth(&self) -> Result<(), AppError>;
     async fn submit_phone(&self, phone: &str) -> Result<(), AppError>;
     async fn submit_email_address(&self, email: &str) -> Result<(), AppError>;

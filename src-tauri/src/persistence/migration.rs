@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use super::model::{
     FoundationState, LegacyHistoryEntry, LegacyStoreFormat, MigrationProvenance, StoreBinding,
 };
-use crate::{error::AppError, model::PersistedState};
+use crate::{error::AppError, providers::telegram::model::PersistedState};
 
 pub(super) fn migrate_legacy(
     legacy: PersistedState,
@@ -41,18 +41,22 @@ pub(super) fn migrate_legacy(
         }
         let nonterminal = !job.status.is_terminal();
         let status = match job.status {
-            crate::model::JobStatus::Completed => LegacyTerminalStatus::Completed,
-            crate::model::JobStatus::Partial => LegacyTerminalStatus::Partial,
-            crate::model::JobStatus::Failed => LegacyTerminalStatus::Failed,
-            crate::model::JobStatus::Cancelled => LegacyTerminalStatus::Cancelled,
-            crate::model::JobStatus::Queued | crate::model::JobStatus::Running
+            crate::providers::telegram::model::JobStatus::Completed => {
+                LegacyTerminalStatus::Completed
+            }
+            crate::providers::telegram::model::JobStatus::Partial => LegacyTerminalStatus::Partial,
+            crate::providers::telegram::model::JobStatus::Failed => LegacyTerminalStatus::Failed,
+            crate::providers::telegram::model::JobStatus::Cancelled => {
+                LegacyTerminalStatus::Cancelled
+            }
+            crate::providers::telegram::model::JobStatus::Queued
+            | crate::providers::telegram::model::JobStatus::Running
                 if job.deleted > 0 =>
             {
                 LegacyTerminalStatus::Partial
             }
-            crate::model::JobStatus::Queued | crate::model::JobStatus::Running => {
-                LegacyTerminalStatus::Failed
-            }
+            crate::providers::telegram::model::JobStatus::Queued
+            | crate::providers::telegram::model::JobStatus::Running => LegacyTerminalStatus::Failed,
         };
         let mut diagnostics = job
             .error_codes

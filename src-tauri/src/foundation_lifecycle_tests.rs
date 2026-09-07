@@ -295,18 +295,17 @@ fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay
             let (harness, _) = telegram(directory.path(), active.clone()).await;
             let plan = harness.prepare(&active, selected(false));
             let legacy =
-                crate::providers::telegram::compat::TelegramExecutionRecipe::validate_envelope(
+                crate::providers::telegram::recipe::TelegramExecutionRecipe::validate_envelope(
                     &plan,
                 )
                 .unwrap();
-            let mut job =
-                crate::providers::telegram::compat::TelegramCompatibilityProvider::normalize_job(
-                    &active.scope,
-                    &legacy,
-                    &crate::model::JobRecord::new(&legacy),
-                    true,
-                )
-                .unwrap();
+            let mut job = crate::providers::telegram::normalize::normalize_job(
+                &active.scope,
+                &legacy,
+                &crate::providers::telegram::model::JobRecord::new(&legacy),
+                true,
+            )
+            .unwrap();
             job.status = status;
             if status == JobStatus::Queued {
                 job.retry_at = Some(chrono::Utc::now() + chrono::Duration::milliseconds(1400));

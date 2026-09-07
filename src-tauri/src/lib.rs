@@ -5,18 +5,13 @@ mod demo_gateway;
 mod error;
 #[cfg(test)]
 mod foundation_lifecycle_tests;
-mod gateway;
-mod live_gateway;
 mod local_auth;
-mod model;
 pub mod persistence;
 pub mod provider_service;
 pub mod providers;
 mod secure_store;
-mod service;
 #[cfg(test)]
 mod setup_gateway;
-mod tdjson;
 #[cfg(feature = "archive-bench")]
 pub use persistence::archive::benchmark::run_archive_storage_benchmark;
 
@@ -84,8 +79,8 @@ fn create_service<R: tauri::Runtime>(
         Arc::new(providers::telegram::locators::TelegramPayloadValidator),
     )?;
     let key = secure_store::load_tdlib_database_key(&path)?;
-    let gateway = live_gateway::LiveGateway::connect_with_identity_store(
-        live_gateway::LiveGatewayConfig::new(
+    let gateway = providers::telegram::native::LiveGateway::connect_with_identity_store(
+        providers::telegram::native::LiveGatewayConfig::new(
             settings.library_path,
             settings.api_id,
             settings.api_hash,
@@ -96,7 +91,7 @@ fn create_service<R: tauri::Runtime>(
         store.clone(),
     )?;
     Ok(ProviderService::new(
-        providers::telegram::application::TelegramConnection::new(gateway, store),
+        providers::telegram::connection::TelegramConnection::new(gateway, store),
     ))
 }
 
@@ -115,7 +110,9 @@ pub fn run() {
                 .map_err(|_| error::AppError::StatePersistenceFailed)
                 .and_then(secure_store::bind_application_root)
                 .and_then(|_| create_service(app.handle()))
-                .unwrap_or_else(|error| ProviderService::failed(error::boundary_error(error)));
+                .unwrap_or_else(|error| {
+                    ProviderService::failed(providers::telegram::diagnostics::boundary_error(error))
+                });
             app.manage(Arc::new(RuntimeState {
                 service: RwLock::new(service),
                 archives,
