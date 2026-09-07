@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-07
 
-**Status:** Backend-only scope approved; detailed specification awaiting user review. No importer implementation is authorized by this document alone.
+**Status:** Approved for implementation on 2026-09-07. Format-specific decoding remains gated on an explicitly authorized current structural specimen or official sample.
 
 **Base:** `5dc058016be4400ba70b030ba67ec9a83c94809f` — Telegram migration merged in PR #24.
 
