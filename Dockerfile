@@ -57,6 +57,7 @@ COPY --chown=retract:retract . .
 RUN --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
     cargo fetch --locked --manifest-path crates/cleaner-domain/Cargo.toml \
     && cargo fetch --locked --manifest-path crates/retract-domain/Cargo.toml \
+    && cargo fetch --locked --manifest-path crates/discord-archive/Cargo.toml \
     && cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
 FROM dependencies AS check-base
@@ -89,6 +90,7 @@ RUN --network=none npm run check:provider-boundaries
 RUN --network=none npm run verify:production-bundle
 RUN --network=none cargo fmt --manifest-path crates/cleaner-domain/Cargo.toml -- --check \
     && cargo fmt --manifest-path crates/retract-domain/Cargo.toml -- --check \
+    && cargo fmt --manifest-path crates/discord-archive/Cargo.toml -- --check \
     && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
 # Cargo's registry and compiled targets live in named BuildKit caches instead
@@ -101,6 +103,8 @@ RUN --network=none \
     && cargo clippy --offline --locked --manifest-path crates/cleaner-domain/Cargo.toml --all-targets -- -D warnings \
     && cargo test --offline --locked --manifest-path crates/retract-domain/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path crates/retract-domain/Cargo.toml --all-targets -- -D warnings \
+    && cargo test --offline --locked --manifest-path crates/discord-archive/Cargo.toml \
+    && cargo clippy --offline --locked --manifest-path crates/discord-archive/Cargo.toml --all-targets -- -D warnings \
     && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 

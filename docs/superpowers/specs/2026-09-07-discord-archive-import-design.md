@@ -52,6 +52,14 @@ This is a hard dependency gate, not an invitation to guess a parser. No current 
 
 The first implementation supports that single current JSON profile. CSV, multiple roots, and different wrappers return an unsupported-profile error; they need separate fixtures and review before support is added. Extra fields within an accepted profile can be skipped with bounded parsing; changed required fields, ambiguous roots, duplicate required JSON keys, or mixed supported/unsupported transcript formats fail closed.
 
+### Task 1 dependency and preflight evidence (2026-09-09)
+
+The format gate remains closed: no real/private specimen has been inspected. The authorized pre-gate work is a format-neutral bounded ZIP inventory and value-free structure probe. `zip` is pinned to MIT-licensed 8.6.0 with defaults disabled and only `deflate-flate2-zlib-rs`; policy permits stored/deflate and rejects encryption and other methods. Its resolved checksum is `2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b`; the codec checksums are `flate2` 1.1.10 `6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb` and `zlib-rs` 0.6.7 `34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12`. The complete ZIP-subtree checksum/review record is in [third-party notices](../../../THIRD_PARTY_NOTICES.md), and all resolved parser package checksums are in [the Cargo lockfile](../../../crates/discord-archive/Cargo.lock).
+
+Source review established that `ZipArchive::new` allocates its central index eagerly, ignores local headers and can retry older EOCD candidates. Preflight bounds directory/count/all declared metadata first. Library indexing then uses a cached metadata view with one EOCD and no payload/comment end records; embedded directory end markers are rejected. Independent local-header/range checks compensate for the library's partial local checks. Consumed entries must reach CRC-checked EOF with exact observed sizes before validation. Unselected payloads remain uncertified.
+
+Explicit Task 1 rulings keep the exact dependency surface and fail closed: entry paths must be valid ASCII after UTF-8 validation; non-ASCII, case collisions and nonportable dot/space suffixes return `UnsafeEntryName`. All ZIP64 forms return `UnsupportedZip64`; data descriptors and unsupported metadata also fail closed. The later evidence task must request an amendment if official packages need these variants. The probe supplements the named design ceilings with lowerable limits of 1,000,000 JSON tokens and 32 MiB accounted retained structure across selected entries. Only map-key names, templated paths, shape/type information and occurrence counts are reportable; string/number values and raw bytes have no report representation. JSON keys can themselves contain identifiers in arbitrary data, so the report remains a private evidence artifact requiring review before sharing.
+
 ## 3. Component boundaries
 
 ```text

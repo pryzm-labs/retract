@@ -66,6 +66,9 @@ jobs:
 
       - name: Verify synthetic archive and injected vault ownership tests
         run: |
+          cargo fmt --manifest-path crates/discord-archive/Cargo.toml -- --check
+          cargo test --release --locked --manifest-path crates/discord-archive/Cargo.toml
+          cargo clippy --locked --manifest-path crates/discord-archive/Cargo.toml --all-targets -- -D warnings
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml persistence::archive::
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml secure_store::vault
 
