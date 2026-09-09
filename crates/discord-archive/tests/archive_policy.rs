@@ -353,6 +353,96 @@ fn arithmetic_overflow_and_limits_above_design_ceilings_are_rejected() {
     rejected(bytes, ArchiveError::InvalidArchive);
 }
 
+#[derive(Clone, Copy)]
+enum CancelDuring {
+    LocalHeader,
+    Payload,
+}
+
+fn cancellation_during_zip_access(access: CancelDuring) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct Flag {
+        cancelled: AtomicBool,
+        payload_ready: AtomicBool,
+        payload_checks: AtomicUsize,
+    }
+    impl Cancellation for Flag {
+        fn is_cancelled(&self) -> bool {
+            if self.payload_ready.load(Ordering::Relaxed)
+                && self.payload_checks.fetch_add(1, Ordering::Relaxed) == 1
+            {
+                // Allow ObservedReader's outer check, then cancel at
+                // InventoryReader's check inside ZIP's payload read.
+                self.cancelled.store(true, Ordering::Relaxed);
+            }
+            self.cancelled.load(Ordering::Relaxed)
+        }
+    }
+    struct Input<'a> {
+        bytes: Cursor<Vec<u8>>,
+        cancel: &'a Flag,
+        armed: &'a AtomicBool,
+        access: CancelDuring,
+    }
+    impl Read for Input<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.bytes.read(output)
+        }
+    }
+    impl Seek for Input<'_> {
+        fn seek(&mut self, offset: SeekFrom) -> std::io::Result<u64> {
+            let position = self.bytes.seek(offset)?;
+            if self.armed.load(Ordering::Relaxed)
+                && matches!(self.access, CancelDuring::LocalHeader)
+                && position == 0
+            {
+                // The inventory's outer check has passed. Its next local-header
+                // read must propagate the cancellation raised by InventoryReader.
+                self.cancel.cancelled.store(true, Ordering::Relaxed);
+            }
+            if self.armed.load(Ordering::Relaxed)
+                && matches!(self.access, CancelDuring::Payload)
+                && position == 31
+            {
+                // The synthetic one-character filename ends at byte 31.
+                self.cancel.payload_ready.store(true, Ordering::Relaxed);
+            }
+            Ok(position)
+        }
+    }
+
+    let cancel = Flag {
+        cancelled: AtomicBool::new(false),
+        payload_ready: AtomicBool::new(false),
+        payload_checks: AtomicUsize::new(0),
+    };
+    let armed = AtomicBool::new(false);
+    let input = Input {
+        bytes: Cursor::new(zip(&[("x", b"{}")])),
+        cancel: &cancel,
+        armed: &armed,
+        access,
+    };
+    let mut archive = ArchiveInventory::inspect(input, limits(), &cancel).unwrap();
+    armed.store(true, Ordering::Relaxed);
+    assert_eq!(
+        archive.validate_entry(EntryIndex(0)),
+        Err(ArchiveError::Cancelled)
+    );
+    assert!(!archive.is_validated(EntryIndex(0)));
+}
+
+#[test]
+fn cancellation_during_local_header_access_is_not_corruption() {
+    cancellation_during_zip_access(CancelDuring::LocalHeader);
+}
+
+#[test]
+fn cancellation_during_payload_read_is_not_corruption() {
+    cancellation_during_zip_access(CancelDuring::Payload);
+}
+
 #[test]
 fn observed_pass_budget_includes_repeated_consumption() {
     let mut l = limits();

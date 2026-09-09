@@ -26,6 +26,40 @@ pub enum JsonShape {
     Mixed,
 }
 
+/// Keep absence of array-item evidence distinct from observed heterogeneous items.
+/// Only the completed report maps an unobserved item shape to public `Mixed`.
+#[derive(Eq, PartialEq)]
+enum ObservedShape {
+    Null,
+    Boolean,
+    Number { integer: bool, signed: bool },
+    String,
+    Array(Option<Box<ObservedShape>>),
+    Object(BTreeMap<String, ObservedShape>),
+    Mixed,
+}
+
+impl ObservedShape {
+    fn into_report(self) -> JsonShape {
+        match self {
+            Self::Null => JsonShape::Null,
+            Self::Boolean => JsonShape::Boolean,
+            Self::Number { integer, signed } => JsonShape::Number { integer, signed },
+            Self::String => JsonShape::String,
+            Self::Array(items) => JsonShape::Array(Box::new(
+                items.map_or(JsonShape::Mixed, |items| items.into_report()),
+            )),
+            Self::Object(fields) => JsonShape::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, shape)| (key, shape.into_report()))
+                    .collect(),
+            ),
+            Self::Mixed => JsonShape::Mixed,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathToken {
@@ -177,7 +211,7 @@ impl StructureProbe {
                 }
                 Ok(EntryStructure {
                     path,
-                    shape,
+                    shape: shape.into_report(),
                     nodes: state.nodes.into_values().collect(),
                     max_depth: state.max_depth,
                 })
@@ -188,9 +222,9 @@ impl StructureProbe {
     }
 }
 
-fn merge(target: &mut JsonShape, incoming: JsonShape) {
+fn merge(target: &mut ObservedShape, incoming: ObservedShape) {
     match (target, incoming) {
-        (JsonShape::Object(left), JsonShape::Object(right)) => {
+        (ObservedShape::Object(left), ObservedShape::Object(right)) => {
             for (key, shape) in right {
                 if let Some(previous) = left.get_mut(&key) {
                     merge(previous, shape);
@@ -199,9 +233,16 @@ fn merge(target: &mut JsonShape, incoming: JsonShape) {
                 }
             }
         }
-        (JsonShape::Array(left), JsonShape::Array(right)) => merge(left, *right),
+        (ObservedShape::Array(left), ObservedShape::Array(right)) => {
+            if let Some(right) = right {
+                match left {
+                    Some(left) => merge(left, *right),
+                    None => *left = Some(right),
+                }
+            }
+        }
         (left, right) if *left == right => (),
-        (left, _) => *left = JsonShape::Mixed,
+        (left, _) => *left = ObservedShape::Mixed,
     }
 }
 
@@ -238,7 +279,7 @@ impl State<'_> {
         self.check(bounded(*self.tokens, self.limits.max_json_tokens))
     }
 
-    fn record<E: de::Error>(&mut self, path: &[String], shape: &JsonShape) -> Result<(), E> {
+    fn record<E: de::Error>(&mut self, path: &[String], shape: &ObservedShape) -> Result<(), E> {
         if !self.nodes.contains_key(path) {
             // Account for duplicated shape keys, path keys, tree nodes and containers.
             let bytes = path
@@ -258,21 +299,21 @@ impl State<'_> {
         let node = self.nodes.get_mut(path).expect("inserted node");
         node.occurrences += 1;
         let count = match shape {
-            JsonShape::Null => &mut node.types.null,
-            JsonShape::Boolean => &mut node.types.boolean,
-            JsonShape::Number {
+            ObservedShape::Null => &mut node.types.null,
+            ObservedShape::Boolean => &mut node.types.boolean,
+            ObservedShape::Number {
                 integer: true,
                 signed: false,
             } => &mut node.types.unsigned_integer,
-            JsonShape::Number {
+            ObservedShape::Number {
                 integer: true,
                 signed: true,
             } => &mut node.types.signed_integer,
-            JsonShape::Number { integer: false, .. } => &mut node.types.number,
-            JsonShape::String => &mut node.types.string,
-            JsonShape::Array(_) => &mut node.types.array,
-            JsonShape::Object(_) => &mut node.types.object,
-            JsonShape::Mixed => return Ok(()),
+            ObservedShape::Number { integer: false, .. } => &mut node.types.number,
+            ObservedShape::String => &mut node.types.string,
+            ObservedShape::Array(_) => &mut node.types.array,
+            ObservedShape::Object(_) => &mut node.types.object,
+            ObservedShape::Mixed => return Ok(()),
         };
         *count += 1;
         Ok(())
@@ -286,8 +327,11 @@ struct ShapeSeed<'a, 'b> {
 }
 
 impl<'de> DeserializeSeed<'de> for ShapeSeed<'_, '_> {
-    type Value = JsonShape;
-    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<JsonShape, D::Error> {
+    type Value = ObservedShape;
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<ObservedShape, D::Error> {
         self.state.token()?;
         self.state
             .check(bounded(self.depth, self.state.limits.max_json_depth))?;
@@ -311,44 +355,44 @@ struct ShapeVisitor<'a, 'b> {
 }
 
 impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
-    type Value = JsonShape;
+    type Value = ObservedShape;
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("bounded JSON")
     }
-    fn visit_unit<E: de::Error>(self) -> Result<JsonShape, E> {
+    fn visit_unit<E: de::Error>(self) -> Result<ObservedShape, E> {
         self.state.scalar(1)?;
-        Ok(JsonShape::Null)
+        Ok(ObservedShape::Null)
     }
-    fn visit_bool<E: de::Error>(self, _: bool) -> Result<JsonShape, E> {
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<ObservedShape, E> {
         self.state.scalar(1)?;
-        Ok(JsonShape::Boolean)
+        Ok(ObservedShape::Boolean)
     }
-    fn visit_u64<E: de::Error>(self, _: u64) -> Result<JsonShape, E> {
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<u64>())?;
-        Ok(JsonShape::Number {
+        Ok(ObservedShape::Number {
             integer: true,
             signed: false,
         })
     }
-    fn visit_i64<E: de::Error>(self, _: i64) -> Result<JsonShape, E> {
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<i64>())?;
-        Ok(JsonShape::Number {
+        Ok(ObservedShape::Number {
             integer: true,
             signed: true,
         })
     }
-    fn visit_f64<E: de::Error>(self, value: f64) -> Result<JsonShape, E> {
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<f64>())?;
-        Ok(JsonShape::Number {
+        Ok(ObservedShape::Number {
             integer: false,
             signed: value.is_sign_negative(),
         })
     }
-    fn visit_str<E: de::Error>(self, value: &str) -> Result<JsonShape, E> {
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<ObservedShape, E> {
         self.state.scalar(value.len())?;
-        Ok(JsonShape::String)
+        Ok(ObservedShape::String)
     }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<JsonShape, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<ObservedShape, A::Error> {
         let mut shape = None;
         let mut path = self.path;
         path.push("[]".into());
@@ -367,11 +411,9 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
                 None => shape = Some(next),
             }
         }
-        Ok(JsonShape::Array(Box::new(
-            shape.unwrap_or(JsonShape::Mixed),
-        )))
+        Ok(ObservedShape::Array(shape.map(Box::new)))
     }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<JsonShape, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ObservedShape, A::Error> {
         let mut fields = BTreeMap::new();
         while let Some(key) = map.next_key_seed(KeySeed(self.state))? {
             if fields.contains_key(&key) {
@@ -390,7 +432,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
             })?;
             fields.insert(key, shape);
         }
-        Ok(JsonShape::Object(fields))
+        Ok(ObservedShape::Object(fields))
     }
 }
 

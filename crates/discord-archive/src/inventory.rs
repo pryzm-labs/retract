@@ -53,6 +53,18 @@ pub(crate) fn cancelled(cancel: &dyn Cancellation) -> Result<(), ArchiveError> {
     }
 }
 
+fn entry_io_error(error: io::Error) -> ArchiveError {
+    if error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ArchiveError>())
+        == Some(&ArchiveError::Cancelled)
+    {
+        ArchiveError::Cancelled
+    } else {
+        ArchiveError::IntegrityFailure
+    }
+}
+
 fn read_at<R: Read + Seek>(
     reader: &mut R,
     offset: u64,
@@ -415,7 +427,10 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
         let file = self
             .archive
             .by_index(index.0)
-            .map_err(|_| ArchiveError::IntegrityFailure)?;
+            .map_err(|error| match error {
+                zip::result::ZipError::Io(error) => entry_io_error(error),
+                _ => ArchiveError::IntegrityFailure,
+            })?;
         let mut reader = ObservedReader {
             inner: file,
             cancel: self.cancel,
@@ -526,7 +541,7 @@ impl<R: Read> Read for ObservedReader<'_, R> {
             let read = self
                 .inner
                 .read(&mut buffer[..size])
-                .map_err(|_| ArchiveError::IntegrityFailure)?;
+                .map_err(entry_io_error)?;
             self.seen = add(self.seen, read as u64)?;
             *self.total = add(*self.total, read as u64)?;
             bounded(self.seen, self.limits.max_entry_bytes)?;

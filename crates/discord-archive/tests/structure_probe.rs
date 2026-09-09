@@ -98,6 +98,76 @@ fn empty_containers_and_scalar_roots_are_valid_structures() {
     }
 }
 
+fn observed_object_item_shape() -> JsonShape {
+    JsonShape::Object(std::collections::BTreeMap::from([(
+        "field".to_owned(),
+        JsonShape::Number {
+            integer: true,
+            signed: false,
+        },
+    )]))
+}
+
+#[test]
+fn empty_array_before_observed_items_preserves_their_shape() {
+    let report = probe(br#"[[],[{"field":1}]]"#, limits()).unwrap();
+    assert_eq!(
+        report.entries[0].shape,
+        JsonShape::Array(Box::new(JsonShape::Array(Box::new(
+            observed_object_item_shape()
+        ))))
+    );
+}
+
+#[test]
+fn empty_array_after_observed_items_preserves_their_shape() {
+    let report = probe(br#"[[{"field":1}],[]]"#, limits()).unwrap();
+    assert_eq!(
+        report.entries[0].shape,
+        JsonShape::Array(Box::new(JsonShape::Array(Box::new(
+            observed_object_item_shape()
+        ))))
+    );
+}
+
+#[test]
+fn empty_array_fields_in_merged_objects_preserve_observed_items() {
+    for input in [
+        br#"[{"items":[]},{"items":[{"field":1}]}]"#.as_slice(),
+        br#"[{"items":[{"field":1}]},{"items":[]}]"#,
+    ] {
+        let report = probe(input, limits()).unwrap();
+        let JsonShape::Array(item) = &report.entries[0].shape else {
+            panic!("expected array")
+        };
+        let JsonShape::Object(fields) = item.as_ref() else {
+            panic!("expected object")
+        };
+        assert_eq!(
+            fields["items"],
+            JsonShape::Array(Box::new(observed_object_item_shape()))
+        );
+    }
+}
+
+#[test]
+fn empty_array_merging_keeps_genuinely_mixed_items_mixed() {
+    for input in [
+        b"[[],[1,true],[1]]".as_slice(),
+        b"[[1],[1,true],[]]",
+        b"[[1,true],[],[1]]",
+    ] {
+        assert_eq!(
+            probe(input, limits()).unwrap().entries[0].shape,
+            JsonShape::Array(Box::new(JsonShape::Array(Box::new(JsonShape::Mixed))))
+        );
+    }
+    assert_eq!(
+        probe(b"[[],[]]", limits()).unwrap().entries[0].shape,
+        JsonShape::Array(Box::new(JsonShape::Array(Box::new(JsonShape::Mixed))))
+    );
+}
+
 #[test]
 fn duplicate_keys_invalid_utf8_and_invalid_json_fail_without_snippets() {
     for input in [
