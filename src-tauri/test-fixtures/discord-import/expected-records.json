@@ -1,0 +1,94 @@
+{
+  "schemaKey": "discord.data_package.messages_json",
+  "schemaVersion": 1,
+  "policyKey": "discord.import_policy.v1",
+  "contextOrder": [
+    "9007199254741101",
+    "9007199254741102",
+    "9007199254741103",
+    "9007199254741104",
+    "9007199254741105"
+  ],
+  "records": [
+    {
+      "accountId": "9007199254741001",
+      "channelId": "9007199254741101",
+      "messageId": "9007199254741201",
+      "timestamp": {
+        "lexeme": "2030-01-02 03:04:05",
+        "calendar": {
+          "year": 2030,
+          "month": 1,
+          "day": 2,
+          "hour": 3,
+          "minute": 4,
+          "second": 5
+        },
+        "zone": "unzoned",
+        "normalization": "unresolved"
+      },
+      "text": "Invented hello 🌱\nSecond invented line.",
+      "attachmentEncoding": ""
+    },
+    {
+      "accountId": "9007199254741001",
+      "channelId": "9007199254741102",
+      "messageId": "9007199254741202",
+      "timestamp": {
+        "lexeme": "2030-01-02 03:04:05",
+        "calendar": {
+          "year": 2030,
+          "month": 1,
+          "day": 2,
+          "hour": 3,
+          "minute": 4,
+          "second": 5
+        },
+        "zone": "unzoned",
+        "normalization": "unresolved"
+      },
+      "text": "Invented group text.",
+      "attachmentEncoding": ""
+    },
+    {
+      "accountId": "9007199254741001",
+      "channelId": "9007199254741103",
+      "messageId": "9007199254741203",
+      "timestamp": {
+        "lexeme": "2030-01-02 03:04:05",
+        "calendar": {
+          "year": 2030,
+          "month": 1,
+          "day": 2,
+          "hour": 3,
+          "minute": 4,
+          "second": 5
+        },
+        "zone": "unzoned",
+        "normalization": "unresolved"
+      },
+      "text": "Invented channel text.",
+      "attachmentEncoding": "https://example.invalid/invented-file.png"
+    },
+    {
+      "accountId": "9007199254741001",
+      "channelId": "9007199254741105",
+      "messageId": "9007199254741204",
+      "timestamp": {
+        "lexeme": "2030-01-02 03:04:05",
+        "calendar": {
+          "year": 2030,
+          "month": 1,
+          "day": 2,
+          "hour": 3,
+          "minute": 4,
+          "second": 5
+        },
+        "zone": "unzoned",
+        "normalization": "unresolved"
+      },
+      "text": "",
+      "attachmentEncoding": "https://example.invalid/invented-attachment.txt"
+    }
+  ]
+}

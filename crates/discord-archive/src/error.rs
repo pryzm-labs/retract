@@ -3,6 +3,10 @@ use thiserror::Error;
 /// Fixed diagnostics: never retain upstream messages, paths, or input snippets.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ArchiveError {
+    #[error("unsupported Discord profile")]
+    UnsupportedProfile,
+    #[error("invalid Discord profile")]
+    InvalidProfile,
     #[error("invalid archive")]
     InvalidArchive,
     #[error("unsafe entry name")]

@@ -244,6 +244,15 @@ impl StructureProbe {
         archive: &mut ArchiveInventory<'_, R>,
         selected_entries: &[EntryIndex],
     ) -> Result<StructureReport, ArchiveError> {
+        Self::inspect_budgeted(archive, selected_entries, &mut 0, &mut 0)
+    }
+
+    pub(crate) fn inspect_budgeted<R: Read + Seek>(
+        archive: &mut ArchiveInventory<'_, R>,
+        selected_entries: &[EntryIndex],
+        retained: &mut u64,
+        tokens: &mut u64,
+    ) -> Result<StructureReport, ArchiveError> {
         let limits = archive.limits;
         let cancel = archive.cancel;
         cancelled(cancel)?;
@@ -256,76 +265,86 @@ impl StructureProbe {
             archive.selected_name(*index)?;
         }
         let mut entries = Vec::new();
-        let mut retained = 0;
-        let mut tokens = 0;
         for &index in selected_entries {
             cancelled(cancel)?;
             let path = template(archive.selected_name(index)?);
-            retained = add(retained, 256 + path.len() as u64 * 16)?;
-            bounded(retained, limits.max_structure_bytes)?;
+            *retained = add(*retained, 256 + path.len() as u64 * 16)?;
+            bounded(*retained, limits.max_structure_bytes)?;
             let entry = archive.consume(index, |reader| {
-                let failure = Cell::new(None);
-                let numeric_grammar = Cell::new(DecimalGrammar::Other);
-                let guard = LexicalGuard {
-                    inner: BufReader::with_capacity(8192, reader),
-                    limits,
-                    failure: &failure,
-                    depth: 0,
-                    in_string: false,
-                    escaped: false,
-                    scalar_bytes: 0,
-                    number: false,
-                    decimal: DecimalScanner::default(),
-                    numeric_grammar: &numeric_grammar,
-                    started: false,
-                    root_array: false,
-                    record_bytes: 0,
-                };
-                let mut state = State {
-                    limits,
-                    cancel,
-                    failure: &failure,
-                    nodes: BTreeMap::new(),
-                    max_depth: 0,
-                    decoded: 0,
-                    retained: &mut retained,
-                    tokens: &mut tokens,
-                    numeric_grammar: &numeric_grammar,
-                };
-                let mut deserializer = serde_json::Deserializer::from_reader(guard);
-                let parsed = ShapeSeed {
-                    state: &mut state,
-                    path: Vec::new(),
-                    depth: 1,
-                }
-                .deserialize(&mut deserializer);
-                let shape =
-                    parsed.map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidJson))?;
-                deserializer
-                    .end()
-                    .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidJson))?;
-                let mut missing = Vec::new();
-                for (path, node) in &state.nodes {
-                    if !path.is_empty() && path.last().is_some_and(|key| key != "[]") {
-                        let parent = &path[..path.len() - 1];
-                        let count = state.nodes.get(parent).map_or(0, |p| p.types.object);
-                        missing.push((path.clone(), count.saturating_sub(node.occurrences)));
-                    }
-                }
-                for (path, count) in missing {
-                    state.nodes.get_mut(&path).expect("known node").missing = count;
-                }
-                Ok(EntryStructure {
-                    path,
-                    shape: shape.into_report(),
-                    nodes: state.nodes.into_values().collect(),
-                    max_depth: state.max_depth,
-                })
+                inspect_reader(reader, limits, cancel, retained, tokens, path)
             })?;
             entries.push(entry);
         }
         Ok(StructureReport { entries })
     }
+}
+
+// Also validates an immutable bounded header buffer before typed decoding.
+// Keep the same lexical, duplicate-key, token, depth and decoded-size checks.
+pub(crate) fn inspect_reader(
+    reader: &mut dyn Read,
+    limits: ArchiveLimits,
+    cancel: &dyn Cancellation,
+    retained: &mut u64,
+    tokens: &mut u64,
+    path: Vec<PathToken>,
+) -> Result<EntryStructure, ArchiveError> {
+    let failure = Cell::new(None);
+    let numeric_grammar = Cell::new(DecimalGrammar::Other);
+    let guard = LexicalGuard {
+        inner: BufReader::with_capacity(8192, reader),
+        limits,
+        failure: &failure,
+        depth: 0,
+        in_string: false,
+        escaped: false,
+        scalar_bytes: 0,
+        number: false,
+        decimal: DecimalScanner::default(),
+        numeric_grammar: &numeric_grammar,
+        started: false,
+        root_array: false,
+        record_bytes: 0,
+    };
+    let mut state = State {
+        limits,
+        cancel,
+        failure: &failure,
+        nodes: BTreeMap::new(),
+        max_depth: 0,
+        decoded: 0,
+        retained,
+        tokens,
+        numeric_grammar: &numeric_grammar,
+    };
+    let mut deserializer = serde_json::Deserializer::from_reader(guard);
+    let parsed = ShapeSeed {
+        state: &mut state,
+        path: Vec::new(),
+        depth: 1,
+    }
+    .deserialize(&mut deserializer);
+    let shape = parsed.map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidJson))?;
+    deserializer
+        .end()
+        .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidJson))?;
+    let mut missing = Vec::new();
+    for (path, node) in &state.nodes {
+        if !path.is_empty() && path.last().is_some_and(|key| key != "[]") {
+            let parent = &path[..path.len() - 1];
+            let count = state.nodes.get(parent).map_or(0, |p| p.types.object);
+            missing.push((path.clone(), count.saturating_sub(node.occurrences)));
+        }
+    }
+    for (path, count) in missing {
+        state.nodes.get_mut(&path).expect("known node").missing = count;
+    }
+    Ok(EntryStructure {
+        path,
+        shape: shape.into_report(),
+        nodes: state.nodes.into_values().collect(),
+        max_depth: state.max_depth,
+    })
 }
 
 fn merge(target: &mut ObservedShape, incoming: ObservedShape) {
@@ -699,7 +718,7 @@ impl DecimalScanner {
     }
 }
 
-fn decimal_grammar(value: &str) -> DecimalGrammar {
+pub(crate) fn decimal_grammar(value: &str) -> DecimalGrammar {
     let mut scanner = DecimalScanner::default();
     for byte in value.bytes() {
         scanner.push(byte);

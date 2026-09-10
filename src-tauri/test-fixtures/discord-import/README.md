@@ -1,0 +1,13 @@
+# Synthetic Discord profile fixture
+
+Every identity, name, recipient, message and URL is invented by the checked-in generator. No source values were copied. Only the authorized value-free structural evidence informed the profile. All hashes in the manifest cover synthetic artifacts, never the structural specimen. The observation date is 2026-09-10.
+
+The [official Data Package description](https://support.discord.com/hc/en-us/articles/360004957991-Your-Discord-Data-Package) describes account metadata, per-channel message folders, a channel index, and JSON message fields. It does not establish a timezone interpretation for the exact unzoned grammar frozen here.
+
+The exact layout, wrappers, field names/types, optional/null variants, ID and timestamp grammars are in [manifest.json](manifest.json). `type` and recipient strings are opaque metadata. The invented `type` values are not accepted semantic discriminators: the fixture exercises unnamed recipient, named recipient, guild, bare/empty, and null-name/attachment-only shapes, without claiming friendly context names are inferable from private scalar values. Attachment encoding is one opaque string, not a parsed URL list. Unknown fields are bounded and ignored; the index is not an identity authority.
+
+All IDs exceed JavaScript's safe integer range. The generator emits message IDs directly from validated decimal strings, never JavaScript numbers. Fixed timestamp calendar components are **unzoned**, not UTC. [expected-records.json](expected-records.json) preserves synthetic lexemes and components only: it contains no epoch or UTC-instant claim. Task 3 must obtain authoritative UTC interpretation evidence (potentially checked against documented Discord Snowflake UTC milliseconds) or reject this profile. Host-local timezone inference is prohibited.
+
+Regenerate with `node scripts/generate-discord-fixtures.mjs` in the non-root, offline ARM64 Docker check environment. The stored ZIP has deterministic entry order, CRCs, Unix regular-file modes and a fixed DOS date; no compression, descriptors, ZIP64, timestamps from the clock or external input are used. The expected record data is a contract for future decoding, not a claim that decoding is implemented.
+
+Run `node --test scripts/check-discord-fixtures.test.mjs` and `node scripts/check-discord-fixtures.mjs` in that same environment. The audit verifies exact generator bytes, hashes, approved keys and lossless numeric tokens, approved synthetic strings/usernames, and rejects email/phone/IP patterns or URLs outside `example.invalid`. `npm run check:public-repo` also runs the fixture audit. Updating a hash alone cannot approve new contents.

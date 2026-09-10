@@ -1,9 +1,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, resolve } from "node:path";
+import { checkDiscordFixtures } from "./check-discord-fixtures.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const errors = [];
+try { checkDiscordFixtures(); } catch { errors.push("synthetic Discord fixture audit failed"); }
 const requiredFiles = [
   "LICENSE",
   "SECURITY.md",
