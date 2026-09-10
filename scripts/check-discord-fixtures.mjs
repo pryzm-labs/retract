@@ -11,6 +11,11 @@ function auditSensitiveContent(value) {
     || /(?<!\d)\(\d{3}\)[\s.-]*\d{3}[\s.-]*\d{4}(?!\d)/u.test(value)
     || /(?<!\d)\d{3}[-. ]+\d{3}[-. ]*\d{4}(?!\d)/u.test(value)
     || /(?<!\d)\d{10,15}(?!\d)/u.test(value)) reject();
+  // Scan IPv4 independently: a port or adjacent hex letter would otherwise
+  // become part of the broader IPv6 candidate and conceal a valid address.
+  for (const match of value.matchAll(/(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)/gu)) {
+    if (isIP(match[0]) === 4) reject();
+  }
   // Extract numeric-address candidates independently of word/punctuation tokens.
   // A final colon can be prose punctuation; try removing just that delimiter,
   // without collapsing internal IPv6 colons or treating calendar times as IPs.

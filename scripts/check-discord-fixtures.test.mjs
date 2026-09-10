@@ -55,6 +55,24 @@ test('numeric IPv6 is detected through quoting punctuation and CIDR suffixes', (
     assert.throws(() => auditValue(value, '', approved(value)), /^Error: synthetic fixture privacy audit failed$/);
   }
 });
+test('IPv4 addresses with ports and embedded text cannot be auto-approved', () => {
+  for (const value of ['192.0.2.1:80', 'Address 192.0.2.1:80 now', '"198.51.100.2:443"',
+    '[203.0.113.3]:8080', '192.0.2.1:80/24', 'a192.0.2.1z']) {
+    assert.throws(() => auditValue(value, '', approved(value)), /^Error: synthetic fixture privacy audit failed$/);
+  }
+});
+test('IPv4 addresses with ports cannot be approved as JSON keys', () => {
+  for (const key of ['192.0.2.1:80', 'Address 198.51.100.2:443 now', 'a203.0.113.3z']) {
+    assert.throws(() => auditJson(JSON.stringify({ [key]: null }), { ...approved(key), approvedKeys: [key] }),
+      /^Error: synthetic fixture privacy audit failed$/);
+  }
+});
+test('IPv4 candidate validation does not mistake invalid octets or longer numbers for addresses', () => {
+  for (const value of ['999.0.2.1:80', '192.0.2.999:80', '1192.0.2.1:80', '192.0.2.1111:80', 'Invented 192.0.2 item']) {
+    assert.doesNotThrow(() => auditValue(value, '', approved(value)));
+    assert.doesNotThrow(() => auditJson(JSON.stringify({ [value]: null }), { ...approved(value), approvedKeys: [value] }));
+  }
+});
 test('URL authorities reject relative externals credentials and even default ports', () => {
   for (const value of ['//outside.example.invalid/file', '//name@example.invalid/file', '//example.invalid:443/file',
     'https://example.invalid:443/file', 'http://example.invalid:80/file', 'ftp://example.invalid/file', '//example.invalid\\outside', 'http:example.invalid/file']) {
