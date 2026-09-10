@@ -27,10 +27,11 @@ function reject(path, expression, description) {
 
 // A lexical architecture guard, not a Rust compiler: ignore prose/literals so
 // IPC checks concern identifiers and access paths, not documentation strings.
-function rustCode(source) {
+function rustCode(source, preserveLiterals = false) {
   const masked = source.split("");
   for (let at = 0; at < source.length;) {
     let end = at;
+    let literal = false;
     if (source.startsWith("//", at)) {
       end = source.indexOf("\n", at);
       if (end < 0) end = source.length;
@@ -46,15 +47,18 @@ function rustCode(source) {
       const raw = source.slice(at).match(/^(?:b|c)?r(#{0,255})"/);
       const character = source.slice(at).match(/^'(?:\\.|[^'\\\n])'/u);
       if (raw) {
+        literal = true;
         const close = source.indexOf(`"${raw[1]}`, at + raw[0].length);
         end = close < 0 ? source.length : close + 1 + raw[1].length;
       } else if (source[at] === '"') {
+        literal = true;
         end = at + 1;
         while (end < source.length && source[end] !== '"') end += source[end] === "\\" ? 2 : 1;
         end = Math.min(end + 1, source.length);
-      } else if (character) end = at + character[0].length;
+      } else if (character) { literal = true; end = at + character[0].length; }
     }
     if (end === at) { at++; continue; }
+    if (literal && preserveLiterals) { at = end; continue; }
     for (; at < end; at++) if (masked[at] !== "\n") masked[at] = " ";
   }
   return masked.join("");
@@ -73,17 +77,154 @@ function balancedEnd(code, start) {
   return code.length;
 }
 
-function withoutTestItems(code) {
-  const expression = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]/g;
+// Evaluate cfg with test=false and all other predicates unknown. In particular,
+// any(test, feature=...) is production-capable and must never hide source.
+function absentOutsideTests(attributes) {
+  return [...attributes.matchAll(/#\s*\[\s*cfg\s*\(([\s\S]*?)\)\s*\]/g)].some((attribute) => {
+    const tokens = attribute[1].match(/\w+|[(),=]/g) ?? [];
+    let at = 0;
+    function condition() {
+      const name = tokens[at++];
+      if (tokens[at] !== "(") {
+        const plainTest = name === "test" && tokens[at] !== "=";
+        while (at < tokens.length && ![",", ")"].includes(tokens[at])) at++;
+        return plainTest ? false : null;
+      }
+      at++;
+      const args = [];
+      while (at < tokens.length && tokens[at] !== ")") {
+        args.push(condition());
+        if (tokens[at] === ",") at++;
+        else if (tokens[at] !== ")") return null;
+      }
+      if (tokens[at++] !== ")") return null;
+      if (name === "not" && args.length === 1) return args[0] === null ? null : !args[0];
+      if (name === "all") return args.includes(false) ? false : args.includes(null) ? null : true;
+      if (name === "any") return args.includes(true) ? true : args.includes(null) ? null : false;
+      return null;
+    }
+    const result = condition();
+    return at === tokens.length && result === false;
+  });
+}
+
+const rustAttributes = String.raw`(?:#\s*\[[^\]]*\]\s*)*`;
+const visibility = String.raw`(?:pub(?:\([^)]*\))?\s+)?`;
+function moduleDirectory(name) {
+  return name === "lib.rs" || name === "main.rs" || name === "mod.rs" || name.endsWith("/mod.rs")
+    ? name.slice(0, name.lastIndexOf("/") + 1) : `${name.slice(0, -3)}/`;
+}
+
+function moduleDeclarations(name, code, source) {
+  const inline = [];
+  const declarations = [];
+  const expression = new RegExp(`(${rustAttributes})${visibility}mod\\s+(\\w+)\\s*([;{])`, "g");
+  let scanned = 0;
+  let depth = 0;
   for (const match of code.matchAll(expression)) {
-    const item = /[;{]/g;
-    item.lastIndex = match.index + match[0].length;
-    const start = item.exec(code);
-    if (!start) continue;
-    const end = start[0] === ";" ? start.index + 1 : balancedEnd(code, start.index);
+    for (; scanned < match.index; scanned++) {
+      if (code[scanned] === "{") depth++;
+      if (code[scanned] === "}") depth--;
+    }
+    const parents = inline.filter((parent) => parent.start < match.index && match.index < parent.end);
+    // Declarations inside function/macro/use blocks cannot exclude sibling files.
+    if (depth !== parents.length) continue;
+    let path = `${moduleDirectory(name)}${parents.map((parent) => `${parent.name}/`).join("")}${match[2]}`;
+    const testOnly = absentOutsideTests(match[1]) || parents.some((parent) => parent.testOnly);
+    if (/#\s*\[\s*path\s*=/.test(match[1])) {
+      const attributes = source.slice(match.index, match.index + match[1].length);
+      const override = attributes.match(/#\s*\[\s*path\s*=\s*"([^"\\]*)"\s*\]/)?.[1];
+      if (override === undefined) continue; // Unsupported syntax never grants an exemption.
+      const parentDirectory = name.slice(0, name.lastIndexOf("/") + 1) + parents.map((parent) => `${parent.name}/`).join("");
+      const target = display(resolve(sourceRoot, parentDirectory, override));
+      if (target.startsWith("../") || !target.endsWith(".rs")) continue;
+      path = target.replace(/(?:\/mod)?\.rs$/, "");
+    }
+    declarations.push({ path, testOnly, external: match[3] === ";" });
+    if (match[3] === "{") {
+      const start = match.index + match[0].length - 1;
+      inline.push({ name: match[2], start, end: balancedEnd(code, start), testOnly });
+    }
+  }
+  return declarations;
+}
+
+function withoutTestItems(code) {
+  // Mask only a recognized item's own balanced extent. Unknown cfg-decorated
+  // syntax stays visible instead of searching ahead into a later production item.
+  const expression = new RegExp(`(${rustAttributes})${visibility}(?:(?:async|unsafe|const|extern)\\s+)*(mod|fn|use|type|struct|enum|impl|trait|const|static)\\b`, "g");
+  for (const match of code.matchAll(expression)) {
+    if (!absentOutsideTests(match[1])) continue;
+    const semicolonItem = ["use", "type", "const", "static"].includes(match[2]);
+    let end = match.index + match[0].length;
+    for (; end < code.length; end++) {
+      if (code[end] === "}") break;
+      if (code[end] === ";") { end++; break; }
+      if (["(", "[", "{"].includes(code[end])) {
+        const brace = code[end] === "{";
+        end = balancedEnd(code, end);
+        if (brace && !semicolonItem) break;
+        end--;
+      }
+    }
     code = code.slice(0, match.index) + " ".repeat(end - match.index) + code.slice(end);
   }
   return code;
+}
+
+function useBindings(code) {
+  const bindings = [];
+  for (const match of code.matchAll(/\buse\s+([^;]+);/g)) {
+    const tokens = match[1].match(/\w+|::|[{},*]/g) ?? [];
+    let at = 0;
+    function tree(prefix) {
+      const path = [...prefix];
+      while (at < tokens.length && !["{", "}", ",", "as"].includes(tokens[at])) {
+        const token = tokens[at++];
+        if (token !== "::") path.push(token);
+      }
+      if (tokens[at] === "{") {
+        at++;
+        while (at < tokens.length && tokens[at] !== "}") {
+          tree(path);
+          if (tokens[at] === ",") at++;
+        }
+        at++;
+      } else {
+        let binding = path.at(-1) === "self" ? path.at(-2) : path.at(-1);
+        if (tokens[at] === "as") { at++; binding = tokens[at++]; }
+        bindings.push({ path, binding });
+      }
+    }
+    tree([]);
+  }
+  return bindings;
+}
+
+function inheritedCode(name, productionCode) {
+  const ancestors = [productionCode.get("lib.rs") ?? "", productionCode.get(name) ?? ""];
+  const directories = name.split("/").slice(0, -1);
+  for (let length = 1; length <= directories.length; length++) {
+    const parent = directories.slice(0, length).join("/");
+    ancestors.push(productionCode.get(`${parent}.rs`) ?? "", productionCode.get(`${parent}/mod.rs`) ?? "");
+  }
+  return ancestors.join("\n");
+}
+
+function discordAliases(code) {
+  const imports = useBindings(code);
+  const aliases = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const { path, binding } of imports) {
+      if (binding && !aliases.has(binding) && path.some((part) => /discord/i.test(part) || aliases.has(part))) {
+        aliases.add(binding);
+        changed = true;
+      }
+    }
+  }
+  return aliases;
 }
 
 for (const legacy of ["live_gateway.rs", "tdjson.rs", "model.rs", "service.rs", "gateway.rs", "providers/telegram/compat.rs", "providers/telegram/application.rs"]) {
@@ -158,17 +299,16 @@ for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
     /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|tauri|keyring|security_framework|credentials|secure_store|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
     "Discord backend isolation forbids network, UI, credential, Telegram and process/browser APIs");
 }
-const nativeCode = new Map(rustFiles(sourceRoot).map((path) => [display(path), rustCode(readFileSync(path, "utf8"))]));
-const testModules = [];
-for (const [name, code] of nativeCode) {
-  for (const match of code.matchAll(/#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/g)) {
-    const parent = name === "lib.rs" || name.endsWith("/mod.rs") ? name.slice(0, name.lastIndexOf("/") + 1) : `${name.slice(0, -3)}/`;
-    testModules.push(`${parent}${match[1]}`);
-  }
-}
-for (const [name, raw] of nativeCode) {
-  if (name.endsWith("_tests.rs") || name.endsWith("/tests.rs") || testModules.some((module) => name === `${module}.rs` || name.startsWith(`${module}/`))) continue;
-  const code = withoutTestItems(raw);
+const nativeSource = new Map(rustFiles(sourceRoot).map((path) => [display(path), readFileSync(path, "utf8")]));
+const nativeCode = new Map([...nativeSource].map(([name, source]) => [name, rustCode(source)]));
+const modules = [...nativeCode].flatMap(([name, code]) => moduleDeclarations(name, code, rustCode(nativeSource.get(name), true)));
+// One test branch cannot hide another production-capable declaration. Inline
+// modules have descendants, but do not own a same-named sibling .rs file.
+const testModules = modules.filter((module) => module.testOnly && !modules.some((other) => other.path === module.path && !other.testOnly));
+const productionCode = new Map([...nativeCode]
+  .filter(([name]) => !testModules.some((module) => (module.external && name === `${module.path}.rs`) || name.startsWith(`${module.path}/`)))
+  .map(([name, code]) => [name, withoutTestItems(code)]));
+for (const [name, code] of productionCode) {
   const scopes = [];
   if (name === "commands.rs" || name.startsWith("commands/") || name.startsWith("compatibility/") || name === "providers/registry.rs") scopes.push(code);
   // Catch commands and direct handlers even if moved outside compatibility.
@@ -184,7 +324,8 @@ for (const [name, raw] of nativeCode) {
       if (open >= 0) scopes.push(code.slice(match.index, balancedEnd(code, open)));
     }
   }
-  if (scopes.some((scope) => /\b\w*discord\w*\b/i.test(scope))) {
+  const aliases = discordAliases(inheritedCode(name, productionCode));
+  if (scopes.some((scope) => /\b\w*discord\w*\b/i.test(scope) || aliases.has("*") || (scope.match(/\b\w+\b/g) ?? []).some((token) => aliases.has(token)))) {
     failures.push(`${name}: Discord importer is backend-only and cannot enter commands or provider registration`);
   }
 }
