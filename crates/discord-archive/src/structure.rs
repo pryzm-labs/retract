@@ -733,7 +733,7 @@ fn calendar_component(bytes: &[u8]) -> Option<u32> {
     })
 }
 
-fn timestamp_grammar(value: &str) -> TimestampGrammar {
+pub(crate) fn timestamp_grammar(value: &str) -> TimestampGrammar {
     calendar_grammar(value.as_bytes()).unwrap_or(TimestampGrammar::Unclassified)
 }
 
@@ -809,7 +809,7 @@ fn calendar_grammar(bytes: &[u8]) -> Option<TimestampGrammar> {
 
 /// Bounds the parser's scratch allocation before Serde can allocate a full token.
 /// Six raw bytes may encode one decoded byte (`\u0061`); visitors enforce decoded limits.
-struct LexicalGuard<'a, R> {
+pub(crate) struct LexicalGuard<'a, R> {
     inner: R,
     limits: ArchiveLimits,
     failure: &'a Cell<Option<ArchiveError>>,
@@ -823,6 +823,31 @@ struct LexicalGuard<'a, R> {
     started: bool,
     root_array: bool,
     record_bytes: u64,
+}
+
+impl<'a, R: Read> LexicalGuard<'a, BufReader<R>> {
+    pub(crate) fn new(
+        reader: R,
+        limits: ArchiveLimits,
+        failure: &'a Cell<Option<ArchiveError>>,
+        numeric_grammar: &'a Cell<DecimalGrammar>,
+    ) -> Self {
+        Self {
+            inner: BufReader::with_capacity(8192, reader),
+            limits,
+            failure,
+            depth: 0,
+            in_string: false,
+            escaped: false,
+            scalar_bytes: 0,
+            number: false,
+            decimal: DecimalScanner::default(),
+            numeric_grammar,
+            started: false,
+            root_array: false,
+            record_bytes: 0,
+        }
+    }
 }
 
 impl<R: Read> LexicalGuard<'_, R> {

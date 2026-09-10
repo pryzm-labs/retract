@@ -12,14 +12,14 @@ const timestamp = '2030-01-02 03:04:05';
 const row = (id, Contents, Attachments = '') => ({ ID: id, Timestamp: timestamp, Contents, Attachments });
 const contexts = [
   { header: { id: '9007199254741101', type: 'invented_direct', recipients: [owner.id, '9007199254741002'] },
-    rows: [row('9007199254741201', 'Invented hello 🌱\nSecond invented line.')] },
+    rows: [row('1985931830091579393', 'Invented hello 🌱\nSecond invented line.')] },
   { header: { id: '9007199254741102', type: 'invented_group', name: 'Invented Group', recipients: [owner.id, '9007199254741002', 'invented_unresolved_recipient'] },
-    rows: [row('9007199254741202', 'Invented group text.')] },
+    rows: [row('1985931830091579394', 'Invented group text.')] },
   { header: { id: '9007199254741103', type: 'invented_guild', name: 'Invented Channel', guild: { id: '9007199254741301', name: 'Invented Guild' } },
-    rows: [row('9007199254741203', 'Invented channel text.', 'https://example.invalid/invented-file.png')] },
+    rows: [row('1985931830091579395', 'Invented channel text.', 'https://example.invalid/invented-file.png')] },
   { header: { id: '9007199254741104', type: 'invented_unknown' }, rows: [] },
   { header: { id: '9007199254741105', type: 'invented_direct', name: null, recipients: ['9007199254741002'] },
-    rows: [row('9007199254741204', '', 'https://example.invalid/invented-attachment.txt')] },
+    rows: [row('1985931830091579396', '', 'https://example.invalid/invented-attachment.txt')] },
 ];
 
 export function crc32(bytes) {
@@ -63,7 +63,7 @@ export function artifacts() {
     }).join(',\n') + '\n]\n';
     entries.push([`Messages/c${header.id}/messages.json`, payload]);
     for (const record of rows) expectedRows.push({ accountId: owner.id, channelId: header.id, messageId: record.ID,
-      timestamp: { lexeme: record.Timestamp, calendar: { year: 2030, month: 1, day: 2, hour: 3, minute: 4, second: 5 }, zone: 'unzoned', normalization: 'unresolved' },
+      timestamp: { lexeme: record.Timestamp, calendar: { year: 2030, month: 1, day: 2, hour: 3, minute: 4, second: 5 }, zone: 'unzoned', normalization: 'snowflake_utc', utcMilliseconds: 1893553445123 },
       text: record.Contents, attachmentEncoding: record.Attachments });
   }
   const expected = json({ schemaKey: 'discord.data_package.messages_json', schemaVersion: 1, policyKey: 'discord.import_policy.v1',
@@ -90,7 +90,8 @@ export function artifacts() {
         optional: { name: 'absent|string|null', recipients: 'absent|array of opaque strings', guild: 'absent|object with id decimal string and name string' },
         constraints: 'guild requires a string channel name and excludes recipients; no friendly semantic discriminator mapping' },
       messages: { root: 'array of objects, including empty', required: { ID: 'original canonical positive u64 JSON integer token', Timestamp: 'calendar-valid YYYY-MM-DD HH:MM:SS, unzoned', Contents: 'string', Attachments: 'opaque string' } },
-      unknownFields: 'bounded and ignored', timestampPolicy: 'Fixed synthetic calendar components are unzoned. No UTC instant, host-local timezone or normalization is claimed. Task 3 must establish authoritative UTC interpretation or reject this profile.' },
+      unknownFields: 'bounded and ignored', timestampPolicy: 'Accept unzoned calendar components only when equal to message Snowflake UTC through seconds precision; normalize to full Snowflake UTC milliseconds. Reject mismatch, invalid calendar, overflow or out-of-range values. Never infer host-local time.',
+      timestampReference: 'https://docs.discord.com/developers/reference#snowflakes' },
     approvedUsernames: [owner.username], approvedStrings: [...strings].sort(), approvedNumbers: [...numbers].sort(), approvedKeys: [...keys].sort(),
     files: Object.fromEntries(entries.map(([name, body]) => [name, sha256(body)])), zipSha256: sha256(zip), expectedRecordsSha256: sha256(expected) });
   return { entries, zip, expected, manifest };

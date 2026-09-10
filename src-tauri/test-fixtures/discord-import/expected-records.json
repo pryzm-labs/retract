@@ -13,7 +13,7 @@
     {
       "accountId": "9007199254741001",
       "channelId": "9007199254741101",
-      "messageId": "9007199254741201",
+      "messageId": "1985931830091579393",
       "timestamp": {
         "lexeme": "2030-01-02 03:04:05",
         "calendar": {
@@ -25,7 +25,8 @@
           "second": 5
         },
         "zone": "unzoned",
-        "normalization": "unresolved"
+        "normalization": "snowflake_utc",
+        "utcMilliseconds": 1893553445123
       },
       "text": "Invented hello 🌱\nSecond invented line.",
       "attachmentEncoding": ""
@@ -33,7 +34,7 @@
     {
       "accountId": "9007199254741001",
       "channelId": "9007199254741102",
-      "messageId": "9007199254741202",
+      "messageId": "1985931830091579394",
       "timestamp": {
         "lexeme": "2030-01-02 03:04:05",
         "calendar": {
@@ -45,7 +46,8 @@
           "second": 5
         },
         "zone": "unzoned",
-        "normalization": "unresolved"
+        "normalization": "snowflake_utc",
+        "utcMilliseconds": 1893553445123
       },
       "text": "Invented group text.",
       "attachmentEncoding": ""
@@ -53,7 +55,7 @@
     {
       "accountId": "9007199254741001",
       "channelId": "9007199254741103",
-      "messageId": "9007199254741203",
+      "messageId": "1985931830091579395",
       "timestamp": {
         "lexeme": "2030-01-02 03:04:05",
         "calendar": {
@@ -65,7 +67,8 @@
           "second": 5
         },
         "zone": "unzoned",
-        "normalization": "unresolved"
+        "normalization": "snowflake_utc",
+        "utcMilliseconds": 1893553445123
       },
       "text": "Invented channel text.",
       "attachmentEncoding": "https://example.invalid/invented-file.png"
@@ -73,7 +76,7 @@
     {
       "accountId": "9007199254741001",
       "channelId": "9007199254741105",
-      "messageId": "9007199254741204",
+      "messageId": "1985931830091579396",
       "timestamp": {
         "lexeme": "2030-01-02 03:04:05",
         "calendar": {
@@ -85,7 +88,8 @@
           "second": 5
         },
         "zone": "unzoned",
-        "normalization": "unresolved"
+        "normalization": "snowflake_utc",
+        "utcMilliseconds": 1893553445123
       },
       "text": "",
       "attachmentEncoding": "https://example.invalid/invented-attachment.txt"

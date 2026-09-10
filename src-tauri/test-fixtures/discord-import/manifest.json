@@ -47,13 +47,18 @@
       }
     },
     "unknownFields": "bounded and ignored",
-    "timestampPolicy": "Fixed synthetic calendar components are unzoned. No UTC instant, host-local timezone or normalization is claimed. Task 3 must establish authoritative UTC interpretation or reject this profile."
+    "timestampPolicy": "Accept unzoned calendar components only when equal to message Snowflake UTC through seconds precision; normalize to full Snowflake UTC milliseconds. Reject mismatch, invalid calendar, overflow or out-of-range values. Never infer host-local time.",
+    "timestampReference": "https://docs.discord.com/developers/reference#snowflakes"
   },
   "approvedUsernames": [
     "invented_owner"
   ],
   "approvedStrings": [
     "",
+    "1985931830091579393",
+    "1985931830091579394",
+    "1985931830091579395",
+    "1985931830091579396",
     "2030-01-02 03:04:05",
     "9007199254741001",
     "9007199254741002",
@@ -62,10 +67,6 @@
     "9007199254741103",
     "9007199254741104",
     "9007199254741105",
-    "9007199254741201",
-    "9007199254741202",
-    "9007199254741203",
-    "9007199254741204",
     "9007199254741301",
     "Invented Channel",
     "Invented Group",
@@ -85,20 +86,21 @@
     "invented_owner",
     "invented_unknown",
     "invented_unresolved_recipient",
-    "unresolved",
+    "snowflake_utc",
     "unzoned"
   ],
   "approvedNumbers": [
     "1",
+    "1893553445123",
+    "1985931830091579393",
+    "1985931830091579394",
+    "1985931830091579395",
+    "1985931830091579396",
     "2",
     "2030",
     "3",
     "4",
-    "5",
-    "9007199254741201",
-    "9007199254741202",
-    "9007199254741203",
-    "9007199254741204"
+    "5"
   ],
   "approvedKeys": [
     "9007199254741101",
@@ -136,6 +138,7 @@
     "timestamp",
     "type",
     "username",
+    "utcMilliseconds",
     "year",
     "zone"
   ],
@@ -143,16 +146,16 @@
     "Account/user.json": "cdc1c17fa2594da23ea5b81c63bae29e5a9554d9eb00c7d24450ee9f2bcdffaa",
     "Messages/index.json": "7c7e1027a34d992e29e45bc8aa261fc38e51636b0fd030b3c64700c97b52f07c",
     "Messages/c9007199254741101/channel.json": "dfb7e5f75e435ab230c44d816cd091f4bb48b3ec3b714ddb13c49cbb045e1017",
-    "Messages/c9007199254741101/messages.json": "b316936472d99a28ee23596b0cc359928b542fb8caa30e920a1b79fc3b1a1558",
+    "Messages/c9007199254741101/messages.json": "194daa1e153c232e3d79304dfe459f01834652b960ad3b0a5521b227e21bd78c",
     "Messages/c9007199254741102/channel.json": "f7cd3669c9d756daae803ffaf19c94803a180a62c50539f5016563b0908874cd",
-    "Messages/c9007199254741102/messages.json": "958ba0ec1c0a0365cd4c466e3b1fe9768a1fc2a4139e86b22e4ebcb5b79c0a9a",
+    "Messages/c9007199254741102/messages.json": "005004c03027bf77ef1112cfcc9ca129f43733263a275f093a3501e39ab98283",
     "Messages/c9007199254741103/channel.json": "3966163dee52dadf2c2b45459a80c7000d095b66c63c6fd961b2533325336fb7",
-    "Messages/c9007199254741103/messages.json": "bc00a4032b50f6ee43706ce02a731adb5775f268cbe0e34c70329e9fe2213c64",
+    "Messages/c9007199254741103/messages.json": "7a9dc9d02a391572c56b02e67ecb555a6c1f8cf07436afa127e39bf2e145c704",
     "Messages/c9007199254741104/channel.json": "1f008cba6f03d97ab6cce0bbbad32bff5d2664a0fdbfd5a5ab2794f744397fc0",
     "Messages/c9007199254741104/messages.json": "2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d",
     "Messages/c9007199254741105/channel.json": "3e72dfea82babb95b8e040ad1e590a4acaaaaf4e02d214664100b85360041d1d",
-    "Messages/c9007199254741105/messages.json": "8c270de070e76914465ec57cbdf5df702a3d4a0d5236926d85f5880fbfcecad4"
+    "Messages/c9007199254741105/messages.json": "05e911ebb3b01689b116523059312ee5e47fc36e424d744ab9025a3b11132df4"
   },
-  "zipSha256": "15b81a48a604d400a5ac173a835f1d5cdcc765356432f41f785d1c53a0831786",
-  "expectedRecordsSha256": "efdfad47345f3b9e68301e1c5f5f131b599926be6b576d4f5e1365c0886682cd"
+  "zipSha256": "6d92f7c038d5b8746a5618eae2fb49f737652b947ed33de3aaf54153d3ce1f09",
+  "expectedRecordsSha256": "6f0c0170deedcf696115738fe6635a3ccc37240227ab5edecd152465e266263b"
 }

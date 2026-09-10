@@ -18,16 +18,19 @@ use std::{
     io::{Read, Seek},
 };
 
+#[derive(Eq, PartialEq)]
 pub struct AccountHeader {
     pub id: String,
     pub username: String,
 }
+#[derive(Eq, PartialEq)]
 pub struct GuildHeader {
     pub id: String,
     pub name: String,
 }
 /// `source_type` and recipients are opaque metadata, not semantic discriminators.
 /// A name may be absent or null; neither establishes a conversation kind.
+#[derive(Eq, PartialEq)]
 pub struct ContextHeader {
     pub id: String,
     pub source_type: String,
@@ -48,6 +51,8 @@ pub struct ProfileInspection {
     pub index_entry: EntryIndex,
     pub account: AccountHeader,
     pub contexts: Vec<ContextInspection>,
+    // Non-forgeable accounting follows retained headers into the typed phase.
+    pub(crate) retained_bytes: u64,
 }
 // Callers must explicitly access typed values. Diagnostics never print them.
 macro_rules! redacted_debug { ($($ty:ty),+) => {$(impl fmt::Debug for $ty {
@@ -197,6 +202,7 @@ impl DiscordProfile {
             index_entry,
             account,
             contexts,
+            retained_bytes: retained_headers,
         })
     }
 }
@@ -282,6 +288,42 @@ fn transcript(entry: &EntryStructure) -> Result<(), ArchiveError> {
     Ok(())
 }
 
+pub(crate) fn read_account_header<R: Read + Seek>(
+    archive: &mut ArchiveInventory<'_, R>,
+    index: EntryIndex,
+    retained: &mut u64,
+    tokens: &mut u64,
+    cancel: &dyn Cancellation,
+) -> Result<AccountHeader, ArchiveError> {
+    read_header_with_cancel(
+        archive,
+        index,
+        retained,
+        tokens,
+        HeaderKind::Account,
+        cancel,
+    )?
+    .account()
+}
+
+pub(crate) fn read_context_header<R: Read + Seek>(
+    archive: &mut ArchiveInventory<'_, R>,
+    index: EntryIndex,
+    retained: &mut u64,
+    tokens: &mut u64,
+    cancel: &dyn Cancellation,
+) -> Result<ContextHeader, ArchiveError> {
+    read_header_with_cancel(
+        archive,
+        index,
+        retained,
+        tokens,
+        HeaderKind::Context,
+        cancel,
+    )?
+    .context()
+}
+
 fn read_header<R: Read + Seek>(
     archive: &mut ArchiveInventory<'_, R>,
     index: EntryIndex,
@@ -289,8 +331,19 @@ fn read_header<R: Read + Seek>(
     tokens: &mut u64,
     kind: HeaderKind,
 ) -> Result<HeaderFields, ArchiveError> {
-    let limits = archive.limits;
     let cancel = archive.cancel;
+    read_header_with_cancel(archive, index, retained, tokens, kind, cancel)
+}
+
+fn read_header_with_cancel<R: Read + Seek>(
+    archive: &mut ArchiveInventory<'_, R>,
+    index: EntryIndex,
+    retained: &mut u64,
+    tokens: &mut u64,
+    kind: HeaderKind,
+    cancel: &dyn Cancellation,
+) -> Result<HeaderFields, ArchiveError> {
+    let limits = archive.limits;
     archive
         .consume(index, |reader| {
             // Validate the SAME immutable bytes that will be decoded, not an earlier
