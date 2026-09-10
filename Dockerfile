@@ -85,6 +85,7 @@ FROM check-base AS checks
 # the host filesystem, Docker's socket, or the network through this build.
 RUN --network=none npm test
 RUN --network=none npm run test:release
+RUN --network=none node --test scripts/check-discord-fixtures.node-test.mjs
 RUN --network=none npm run check:public-repo
 RUN --network=none npm run check:provider-boundaries
 RUN --network=none npm run verify:production-bundle

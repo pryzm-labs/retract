@@ -396,7 +396,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub(super) const ENVELOPE_BYTES: usize = 64 * 1024;
+pub(crate) const ENVELOPE_BYTES: usize = 64 * 1024;
 
 pub(super) fn registration_bounds(
     account: &AccountRecord,
@@ -431,7 +431,7 @@ pub(super) fn checkpoint_bounds(checkpoint: &ImportCheckpoint) -> Result<(), Arc
 
 /// Counts the actual JSON encoding without retaining a serialized buffer and
 /// aborts serialization as soon as the approved byte ceiling is exceeded.
-pub(super) fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, ArchiveError> {
+pub(crate) fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, ArchiveError> {
     struct Counter {
         bytes: usize,
         limit: usize,

@@ -20,8 +20,9 @@ pub(crate) use error::ArchiveError;
 pub(crate) use lifecycle::ArchiveOwner;
 #[allow(unused_imports)]
 pub(crate) use model::{
-    ArchiveSearch, ImportBatch, ImportCancellation, ImportCheckpoint, ImportPhase, ImportProgress,
-    ImportSession, RemovalOutcome,
+    ArchiveSearch, ENVELOPE_BYTES, ImportBatch, ImportCancellation, ImportCheckpoint, ImportPhase,
+    ImportProgress, ImportSession, MAX_ATTACHMENTS, MAX_BATCH_BYTES, MAX_BATCH_RECORDS,
+    MAX_SEARCHABLE_BYTES, RemovalOutcome, encoded_size,
 };
 #[allow(unused_imports)]
 pub(crate) use store::ArchiveStore;
