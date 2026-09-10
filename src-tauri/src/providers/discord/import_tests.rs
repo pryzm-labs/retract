@@ -450,6 +450,94 @@ fn discord_import_cancellation_inventory_both_hashes_json_and_finalization() {
 }
 
 #[test]
+fn discord_import_pre_registration_storage_loss_is_not_user_cancellation() {
+    for point in [
+        TestPoint::Poll(DiscordImportPhase::Inspecting),
+        TestPoint::HashChunk,
+    ] {
+        for stop_owner in [false, true] {
+            runtime().block_on(async {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("content.db");
+                let calls = Arc::new(AtomicUsize::new(0));
+                let opened = calls.clone();
+                let archives = Arc::new(ArchiveOwner::with_opener(move || {
+                    opened.fetch_add(1, Ordering::AcqRel);
+                    ArchiveStore::open(
+                        path.clone(),
+                        ArchiveKey::new([0x85; 32]),
+                        std::collections::BTreeMap::from([(
+                            super::locators::discord_provider_key(),
+                            Arc::new(super::DiscordPayloadValidator)
+                                as Arc<dyn crate::persistence::ProviderPayloadValidator>,
+                        )]),
+                    )
+                }));
+                let service = archives.open().await.unwrap();
+                let (imports, gate, _release) = paused(archives.clone(), point);
+                let handle = imports
+                    .start(selected(&dir.path().join("selected.zip"), FROZEN))
+                    .await
+                    .unwrap();
+                gate.entered().await;
+                if stop_owner {
+                    archives.shutdown().await;
+                } else {
+                    service.shutdown().await;
+                }
+                gate.release();
+                assert_eq!(
+                    handle.wait().await.err(),
+                    Some(DiscordImportError::StorageFailure),
+                    "{point:?}, stop_owner={stop_owner}"
+                );
+                assert_eq!(handle.latest_progress().phase, DiscordImportPhase::Failed);
+                assert_eq!(handle.latest_progress().parsed_records, 0);
+                assert!(handle.checkpoint().is_none());
+                assert_eq!(calls.load(Ordering::Acquire), 1);
+                imports.shutdown().await;
+                archives.shutdown().await;
+            });
+        }
+    }
+}
+
+#[test]
+fn discord_import_pre_registration_user_cancellation_does_not_open_storage() {
+    for point in [
+        TestPoint::Poll(DiscordImportPhase::Inspecting),
+        TestPoint::HashChunk,
+    ] {
+        runtime().block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("content.db");
+            let archives = archive(&path);
+            let (imports, gate, _release) = paused(archives.clone(), point);
+            let handle = imports
+                .start(selected(&dir.path().join("selected.zip"), FROZEN))
+                .await
+                .unwrap();
+            gate.entered().await;
+            handle.cancel();
+            gate.release();
+            assert_eq!(
+                handle.wait().await.err(),
+                Some(DiscordImportError::Cancelled)
+            );
+            assert_eq!(
+                handle.latest_progress().phase,
+                DiscordImportPhase::Cancelled
+            );
+            assert_eq!(handle.latest_progress().parsed_records, 0);
+            assert!(handle.checkpoint().is_none());
+            imports.shutdown().await;
+            archives.shutdown().await;
+            assert!(!path.exists());
+        });
+    }
+}
+
+#[test]
 fn discord_import_lost_storage_reports_storage_failure_and_reopens_interrupted() {
     runtime().block_on(async {
         let directory = tempfile::tempdir().unwrap();

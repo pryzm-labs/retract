@@ -134,6 +134,153 @@ mod discord_tests {
     const ZIP: &[u8] = include_bytes!("../../../test-fixtures/discord-import/current-json.zip");
 
     #[test]
+    fn discord_import_pending_registration_worker_loss_does_not_report_cancelled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("content.db");
+        let selected = directory.path().join("selected.zip");
+        fs::write(&selected, ZIP).unwrap();
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        gate.armed.store(true, Ordering::Release);
+        let pending = gate.clone();
+        let store_path = path.clone();
+        let archives = Arc::new(ArchiveOwner::with_opener(move || {
+            let mut store = ArchiveStore::open(
+                store_path.clone(),
+                ArchiveKey::new([0x85; 32]),
+                application_validators(),
+            )?;
+            let pending = pending.clone();
+            store.before_commit = Some(Box::new(move || {
+                pending.wait();
+                panic!("synthetic worker loss before registration commit");
+            }));
+            Ok(store)
+        }));
+        runtime().block_on(async {
+            let imports = DiscordImportOwner::new(archives.clone());
+            let handle = imports.start(File::open(&selected).unwrap()).await.unwrap();
+            gate.entered().await;
+            assert!(handle.checkpoint().is_none());
+            assert_eq!(
+                handle.latest_progress().phase,
+                DiscordImportPhase::Registering
+            );
+            gate.release();
+            assert_eq!(
+                handle.wait().await.err(),
+                Some(DiscordImportError::StorageFailure)
+            );
+            assert_eq!(handle.latest_progress().phase, DiscordImportPhase::Failed);
+            assert!(handle.checkpoint().is_none());
+            imports.shutdown().await;
+            archives.shutdown().await;
+            let store =
+                ArchiveStore::open(path, ArchiveKey::new([0x85; 32]), application_validators())
+                    .unwrap();
+            let count: i64 = store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM sources", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        });
+    }
+
+    #[test]
+    fn discord_import_pending_retry_worker_loss_is_storage_failure_before_session_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("content.db");
+        let selected = directory.path().join("selected.zip");
+        fs::write(
+            &selected,
+            crate::providers::discord::import_tests::package(700, "synthetic retry", true),
+        )
+        .unwrap();
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        let pending = gate.clone();
+        let lose_worker = Arc::new(AtomicBool::new(false));
+        let fail = lose_worker.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let opened = calls.clone();
+        let store_path = path.clone();
+        let archives = Arc::new(ArchiveOwner::with_opener(move || {
+            opened.fetch_add(1, Ordering::AcqRel);
+            let mut store = ArchiveStore::open(
+                store_path.clone(),
+                ArchiveKey::new([0x85; 32]),
+                application_validators(),
+            )?;
+            let pending = pending.clone();
+            let fail = fail.clone();
+            store.before_commit = Some(Box::new(move || {
+                if fail.load(Ordering::Acquire) {
+                    pending.wait();
+                    panic!("synthetic worker loss before retry commit");
+                }
+            }));
+            Ok(store)
+        }));
+        runtime().block_on(async {
+            let imports = DiscordImportOwner::new(archives.clone());
+            let initial = imports.start(File::open(&selected).unwrap()).await.unwrap();
+            assert_eq!(
+                initial.wait().await.err(),
+                Some(DiscordImportError::InvalidArchive)
+            );
+            let expected = imports
+                .start(File::open(&selected).unwrap())
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            assert_eq!(
+                expected.disposition,
+                super::super::ImportDisposition::RetryRequired
+            );
+            gate.armed.store(true, Ordering::Release);
+            lose_worker.store(true, Ordering::Release);
+            let retry = imports
+                .retry(File::open(&selected).unwrap(), &expected)
+                .await
+                .unwrap();
+            gate.entered().await;
+            assert!(retry.checkpoint().is_none());
+            assert_eq!(
+                retry.latest_progress().phase,
+                DiscordImportPhase::Registering
+            );
+            gate.release();
+            assert_eq!(
+                retry.wait().await.err(),
+                Some(DiscordImportError::StorageFailure)
+            );
+            assert_eq!(retry.latest_progress().phase, DiscordImportPhase::Failed);
+            assert_eq!(retry.latest_progress().parsed_records, 0);
+            assert!(retry.checkpoint().is_none());
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            imports.shutdown().await;
+            archives.shutdown().await;
+            let store =
+                ArchiveStore::open(path, ArchiveKey::new([0x85; 32]), application_validators())
+                    .unwrap();
+            assert_eq!(
+                store
+                    .import_status(
+                        &expected.checkpoint.scope,
+                        &expected.checkpoint.fingerprint,
+                        &expected.checkpoint.schema_profile
+                    )
+                    .unwrap(),
+                Some(expected.checkpoint)
+            );
+        });
+    }
+
+    #[test]
     fn discord_import_receipts_match_exact_v2_batches_and_warning_order() {
         use super::super::{ImportBatchV2, ImportWarningCode, ImportWarningDelta};
         use sha2::{Digest, Sha256};

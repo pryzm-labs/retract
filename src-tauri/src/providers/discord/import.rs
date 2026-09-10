@@ -78,6 +78,15 @@ impl From<ArchiveError> for DiscordImportError {
     }
 }
 impl DiscordImportError {
+    fn before_session(error: ArchiveError) -> Self {
+        // Open/registration/retry do not receive our cancellation signal. Their
+        // Cancelled means stopped storage or a lost command/reply channel, not
+        // user cancellation (which is checked separately through Control).
+        match error {
+            ArchiveError::Cancelled => Self::StorageFailure,
+            _ => error.into(),
+        }
+    }
     fn failure(self) -> ImportFailureCode {
         match self {
             Self::InputChanged => ImportFailureCode::InputChanged,
@@ -585,7 +594,9 @@ fn run(
     control.check()?;
     control.phase(Phase::Registering);
     let runtime = tokio::runtime::Handle::current();
-    let service = runtime.block_on(archives.open())?;
+    let service = runtime
+        .block_on(archives.open())
+        .map_err(DiscordImportError::before_session)?;
     control.check()?;
     let (checkpoint, session) = if let Some(expected) = retry {
         // Retry never calls get-or-register: a removed/stale scope must not
@@ -595,26 +606,32 @@ fn run(
         let session = runtime
             .block_on(service.retry_import(&expected.checkpoint))
             .map_err(|error| match error {
-                ArchiveError::StorageFailure | ArchiveError::UnavailableKey => error.into(),
-                _ => DiscordImportError::RetryMismatch,
+                ArchiveError::ScopeMismatch
+                | ArchiveError::StaleCursor
+                | ArchiveError::InvalidRecord
+                | ArchiveError::ConflictingObservation
+                | ArchiveError::LimitExceeded => DiscordImportError::RetryMismatch,
+                _ => DiscordImportError::before_session(error),
             })?;
         (expected.checkpoint.clone(), session)
     } else {
-        let resolution = runtime.block_on(
-            service.resolve_or_register_import(NewArchiveImport {
-                provider: discord_provider_key(),
-                native_identity: DiscordUserLocator::new(account.id.as_str())
-                    .map_err(|_| DiscordImportError::InvalidArchive)?
-                    .payload(),
-                display_name: account.username.clone(),
-                username: Some(account.username.clone()),
-                avatar: None,
-                fingerprint,
-                schema_profile: DiscordSourceProfile::payload(),
-                parser_policy: PARSER_POLICY.into(),
-                observed_at: chrono::Utc::now(),
-            }),
-        )?;
+        let resolution = runtime
+            .block_on(
+                service.resolve_or_register_import(NewArchiveImport {
+                    provider: discord_provider_key(),
+                    native_identity: DiscordUserLocator::new(account.id.as_str())
+                        .map_err(|_| DiscordImportError::InvalidArchive)?
+                        .payload(),
+                    display_name: account.username.clone(),
+                    username: Some(account.username.clone()),
+                    avatar: None,
+                    fingerprint,
+                    schema_profile: DiscordSourceProfile::payload(),
+                    parser_policy: PARSER_POLICY.into(),
+                    observed_at: chrono::Utc::now(),
+                }),
+            )
+            .map_err(DiscordImportError::before_session)?;
         if resolution.disposition != ImportDisposition::Start {
             return Ok(outcome(
                 resolution.checkpoint,
