@@ -1,13 +1,18 @@
 //! One exact, structural profile. No message decoding or timezone conversion.
 use crate::{
-    ArchiveError, ArchiveInventory, DecimalGrammar, EntryIndex, GrammarSet, JsonShape,
-    StructureProbe, TimestampGrammar, TimestampPrecision, TimestampSeparator, TimestampZone,
+    ArchiveError, ArchiveInventory, ArchiveLimits, Cancellation, DecimalGrammar, EntryIndex,
+    GrammarSet, JsonShape, StructureProbe, TimestampGrammar, TimestampPrecision,
+    TimestampSeparator, TimestampZone,
     inventory::cancelled,
     limits::{add, bounded},
     structure::{EntryStructure, decimal_grammar, inspect_reader},
 };
-use serde_json::{Map, Value};
+use serde::{
+    Deserialize,
+    de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fmt,
     io::{Read, Seek},
@@ -160,70 +165,28 @@ impl DiscordProfile {
             account_entry,
             &mut retained_headers,
             &mut header_tokens,
-        )?;
-        let account = AccountHeader {
-            id: id_field(&account, "id")?,
-            username: string(&account, "username")?,
-        };
+            HeaderKind::Account,
+        )?
+        .account()?;
         let mut contexts = Vec::new();
         for (path_id, pair) in pairs {
             let header_entry = pair.header.ok_or(ArchiveError::UnsupportedProfile)?;
             let messages_entry = pair.messages.ok_or(ArchiveError::UnsupportedProfile)?;
-            let value = read_header(
+            let header = read_header(
                 archive,
                 header_entry,
                 &mut retained_headers,
                 &mut header_tokens,
-            )?;
-            let id = id_field(&value, "id")?;
-            if id != path_id {
-                return Err(ArchiveError::InvalidProfile);
-            }
-            let source_type = string(&value, "type")?;
-            let name = match value.get("name") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(name)) => Some(name.clone()),
-                _ => return Err(ArchiveError::InvalidProfile),
-            };
-            let recipients = value
-                .get("recipients")
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or(ArchiveError::InvalidProfile)?
-                        .iter()
-                        .map(|value| {
-                            value
-                                .as_str()
-                                .map(str::to_owned)
-                                .ok_or(ArchiveError::InvalidProfile)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()?;
-            let guild = value
-                .get("guild")
-                .map(|value| {
-                    let value = value.as_object().ok_or(ArchiveError::InvalidProfile)?;
-                    Ok(GuildHeader {
-                        id: id_field(value, "id")?,
-                        name: string(value, "name")?,
-                    })
-                })
-                .transpose()?;
-            if guild.is_some() && (recipients.is_some() || name.is_none()) {
+                HeaderKind::Context,
+            )?
+            .context()?;
+            if header.id != path_id {
                 return Err(ArchiveError::InvalidProfile);
             }
             contexts.push(ContextInspection {
                 header_entry,
                 messages_entry,
-                header: ContextHeader {
-                    id,
-                    source_type,
-                    name,
-                    recipients,
-                    guild,
-                },
+                header,
             });
         }
         Ok(ProfileInspection {
@@ -250,18 +213,6 @@ fn valid_id(value: &str) -> Result<(), ArchiveError> {
     } else {
         Err(ArchiveError::InvalidProfile)
     }
-}
-fn string(value: &Map<String, Value>, key: &str) -> Result<String, ArchiveError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(ArchiveError::InvalidProfile)
-}
-fn id_field(value: &Map<String, Value>, key: &str) -> Result<String, ArchiveError> {
-    let value = string(value, key)?;
-    valid_id(&value)?;
-    Ok(value)
 }
 fn object_shape(entry: &EntryStructure) -> Result<(), ArchiveError> {
     if matches!(entry.shape, JsonShape::Object(_)) {
@@ -336,7 +287,8 @@ fn read_header<R: Read + Seek>(
     index: EntryIndex,
     retained: &mut u64,
     tokens: &mut u64,
-) -> Result<Map<String, Value>, ArchiveError> {
+    kind: HeaderKind,
+) -> Result<HeaderFields, ArchiveError> {
     let limits = archive.limits;
     let cancel = archive.cancel;
     archive
@@ -345,41 +297,365 @@ fn read_header<R: Read + Seek>(
             // pass over a potentially mutable Read+Seek implementation. Allocation is
             // bounded before Serde may construct any recursive or scalar values.
             let mut bytes = Vec::new();
-            reader
-                .take(limits.max_raw_record_bytes + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| ArchiveError::ReadFailure)?;
-            bounded(bytes.len() as u64, limits.max_raw_record_bytes)?;
-            let mut structure_bytes = 0;
+            let mut chunk = [0; 256];
+            loop {
+                cancelled(cancel)?;
+                let count = reader
+                    .read(&mut chunk)
+                    .map_err(|_| ArchiveError::ReadFailure)?;
+                if count == 0 {
+                    break;
+                }
+                let length = add(bytes.len() as u64, count as u64)?;
+                bounded(length, limits.max_raw_record_bytes)?;
+                if length > bytes.capacity() as u64 {
+                    let capacity = length
+                        .checked_next_power_of_two()
+                        .ok_or(ArchiveError::LimitExceeded)?;
+                    // Charge the whole new allocation before reserve, not merely
+                    // the data length afterward. Prior buffers/headers are never
+                    // refunded; even transient reallocation peaks are covered.
+                    charge_retained(retained, capacity, limits.max_structure_bytes)?;
+                    bytes
+                        .try_reserve_exact(capacity as usize - bytes.len())
+                        .map_err(|_| ArchiveError::LimitExceeded)?;
+                }
+                bytes.extend_from_slice(&chunk[..count]);
+            }
             let before_tokens = *tokens;
             let shape = inspect_reader(
                 &mut bytes.as_slice(),
                 limits,
                 cancel,
-                &mut structure_bytes,
+                retained,
                 tokens,
                 Vec::new(),
             )
             .map_err(profile_error)?;
             object_shape(&shape)?;
-            // A conservative aggregate ceiling covers typed strings, Vec/Map slots,
-            // and allocation growth; ignored fields count too, before Value allocation.
-            let typed_slots = (*tokens - before_tokens)
-                .checked_mul(size_of::<Value>() as u64 * 2)
-                .ok_or(ArchiveError::LimitExceeded)?;
-            *retained = add(
-                *retained,
-                add(add(bytes.len() as u64 * 4, typed_slots)?, structure_bytes)?,
-            )?;
-            bounded(*retained, limits.max_structure_bytes)?;
             drop(shape);
-            let value: Value =
-                serde_json::from_slice(&bytes).map_err(|_| ArchiveError::InvalidProfile)?;
-            cancelled(cancel)?;
-            match value {
-                Value::Object(value) => Ok(value),
-                _ => Err(ArchiveError::InvalidProfile),
+            // Reserve the validated token count for the field-selective pass too.
+            // IgnoredAny therefore cannot create a fresh parsing-work allowance.
+            let decoding_tokens = *tokens - before_tokens;
+            *tokens = add(*tokens, decoding_tokens)?;
+            bounded(*tokens, limits.max_json_tokens)?;
+            let failure = Cell::new(None);
+            let mut state = HeaderState {
+                limits,
+                cancel,
+                retained,
+                failure: &failure,
+            };
+            let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+            let header = HeaderSeed {
+                state: &mut state,
+                kind,
             }
+            .deserialize(&mut deserializer)
+            .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidProfile))?;
+            deserializer
+                .end()
+                .map_err(|_| ArchiveError::InvalidProfile)?;
+            cancelled(cancel)?;
+            Ok(header)
         })
         .map_err(profile_error)
+}
+
+fn charge_retained(retained: &mut u64, bytes: u64, maximum: u64) -> Result<(), ArchiveError> {
+    let next = add(*retained, bytes)?;
+    bounded(next, maximum)?;
+    *retained = next;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum HeaderKind {
+    Account,
+    Context,
+    Guild,
+}
+#[derive(Default)]
+struct HeaderFields {
+    id: Option<String>,
+    username: Option<String>,
+    source_type: Option<String>,
+    name: Option<String>,
+    recipients: Option<Vec<String>>,
+    guild: Option<GuildHeader>,
+}
+fn required<T>(value: Option<T>) -> Result<T, ArchiveError> {
+    value.ok_or(ArchiveError::InvalidProfile)
+}
+impl HeaderFields {
+    fn account(self) -> Result<AccountHeader, ArchiveError> {
+        Ok(AccountHeader {
+            id: required(self.id)?,
+            username: required(self.username)?,
+        })
+    }
+    fn guild(self) -> Result<GuildHeader, ArchiveError> {
+        Ok(GuildHeader {
+            id: required(self.id)?,
+            name: required(self.name)?,
+        })
+    }
+    fn context(self) -> Result<ContextHeader, ArchiveError> {
+        if self.guild.is_some() && (self.recipients.is_some() || self.name.is_none()) {
+            return Err(ArchiveError::InvalidProfile);
+        }
+        Ok(ContextHeader {
+            id: required(self.id)?,
+            source_type: required(self.source_type)?,
+            name: self.name,
+            recipients: self.recipients,
+            guild: self.guild,
+        })
+    }
+}
+struct HeaderState<'a> {
+    limits: ArchiveLimits,
+    cancel: &'a dyn Cancellation,
+    retained: &'a mut u64,
+    failure: &'a Cell<Option<ArchiveError>>,
+}
+impl HeaderState<'_> {
+    fn check<E: de::Error>(&self, result: Result<(), ArchiveError>) -> Result<(), E> {
+        result.map_err(|error| {
+            self.failure.set(Some(error));
+            E::custom("header rejected")
+        })
+    }
+    fn charge<E: de::Error>(&mut self, bytes: u64) -> Result<(), E> {
+        self.check(cancelled(self.cancel))?;
+        let charged = charge_retained(self.retained, bytes, self.limits.max_structure_bytes);
+        self.check(charged)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HeaderKey {
+    Id,
+    Username,
+    Type,
+    Name,
+    Recipients,
+    Guild,
+    Other,
+}
+impl<'de> Deserialize<'de> for HeaderKey {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+        impl Visitor<'_> for KeyVisitor {
+            type Value = HeaderKey;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("header key")
+            }
+            fn visit_str<E: de::Error>(self, key: &str) -> Result<HeaderKey, E> {
+                Ok(match key {
+                    "id" => HeaderKey::Id,
+                    "username" => HeaderKey::Username,
+                    "type" => HeaderKey::Type,
+                    "name" => HeaderKey::Name,
+                    "recipients" => HeaderKey::Recipients,
+                    "guild" => HeaderKey::Guild,
+                    _ => HeaderKey::Other,
+                })
+            }
+        }
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+struct HeaderSeed<'a, 'b> {
+    state: &'a mut HeaderState<'b>,
+    kind: HeaderKind,
+}
+impl<'de> DeserializeSeed<'de> for HeaderSeed<'_, '_> {
+    type Value = HeaderFields;
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<HeaderFields, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for HeaderSeed<'_, '_> {
+    type Value = HeaderFields;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("header object")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<HeaderFields, A::Error> {
+        let mut fields = HeaderFields::default();
+        let mut seen = 0u8;
+        while let Some(key) = map.next_key::<HeaderKey>()? {
+            self.state.check(cancelled(self.state.cancel))?;
+            let accepted = matches!(
+                (self.kind, key),
+                (_, HeaderKey::Id)
+                    | (HeaderKind::Account, HeaderKey::Username)
+                    | (
+                        HeaderKind::Context,
+                        HeaderKey::Type
+                            | HeaderKey::Name
+                            | HeaderKey::Recipients
+                            | HeaderKey::Guild
+                    )
+                    | (HeaderKind::Guild, HeaderKey::Name)
+            );
+            if !accepted {
+                // The exact immutable buffer was already guarded for all limits,
+                // including duplicate keys and ignored nested scalar/container data.
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            }
+            let bit = 1 << key as u8;
+            if seen & bit != 0 {
+                return Err(de::Error::custom("duplicate header field"));
+            }
+            seen |= bit;
+            match key {
+                HeaderKey::Id => {
+                    fields.id = Some(map.next_value_seed(TextSeed {
+                        state: self.state,
+                        identifier: true,
+                    })?)
+                }
+                HeaderKey::Username => {
+                    fields.username = Some(map.next_value_seed(TextSeed {
+                        state: self.state,
+                        identifier: false,
+                    })?)
+                }
+                HeaderKey::Type => {
+                    fields.source_type = Some(map.next_value_seed(TextSeed {
+                        state: self.state,
+                        identifier: false,
+                    })?)
+                }
+                HeaderKey::Name => {
+                    fields.name = if matches!(self.kind, HeaderKind::Context) {
+                        map.next_value_seed(OptionalText(self.state))?
+                    } else {
+                        Some(map.next_value_seed(TextSeed {
+                            state: self.state,
+                            identifier: false,
+                        })?)
+                    }
+                }
+                HeaderKey::Recipients => {
+                    fields.recipients = Some(map.next_value_seed(RecipientsSeed(self.state))?)
+                }
+                HeaderKey::Guild => {
+                    fields.guild = Some(
+                        map.next_value_seed(HeaderSeed {
+                            state: self.state,
+                            kind: HeaderKind::Guild,
+                        })?
+                        .guild()
+                        .map_err(|_| de::Error::custom("invalid guild header"))?,
+                    )
+                }
+                HeaderKey::Other => unreachable!(),
+            }
+        }
+        Ok(fields)
+    }
+}
+struct TextSeed<'a, 'b> {
+    state: &'a mut HeaderState<'b>,
+    identifier: bool,
+}
+impl<'de> DeserializeSeed<'de> for TextSeed<'_, '_> {
+    type Value = String;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<String, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+impl Visitor<'_> for TextSeed<'_, '_> {
+    type Value = String;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("bounded header string")
+    }
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<String, E> {
+        self.state.check(bounded(
+            value.len() as u64,
+            self.state.limits.max_scalar_bytes,
+        ))?;
+        if self.identifier {
+            self.state.check(valid_id(value))?;
+        } else {
+            self.state.check(bounded(
+                value.len() as u64,
+                self.state.limits.max_display_bytes,
+            ))?;
+        }
+        self.state.charge(value.len() as u64 * 2 + 64)?;
+        Ok(value.to_owned())
+    }
+}
+struct OptionalText<'a, 'b>(&'a mut HeaderState<'b>);
+impl<'de> DeserializeSeed<'de> for OptionalText<'_, '_> {
+    type Value = Option<String>;
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_option(self)
+    }
+}
+impl<'de> Visitor<'de> for OptionalText<'_, '_> {
+    type Value = Option<String>;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("optional header string")
+    }
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_some<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        TextSeed {
+            state: self.0,
+            identifier: false,
+        }
+        .deserialize(deserializer)
+        .map(Some)
+    }
+}
+struct RecipientsSeed<'a, 'b>(&'a mut HeaderState<'b>);
+impl<'de> DeserializeSeed<'de> for RecipientsSeed<'_, '_> {
+    type Value = Vec<String>;
+    fn deserialize<D: de::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+impl<'de> Visitor<'de> for RecipientsSeed<'_, '_> {
+    type Value = Vec<String>;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("recipient strings")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut recipients = Vec::new();
+        while let Some(value) = seq.next_element_seed(TextSeed {
+            state: self.0,
+            identifier: false,
+        })? {
+            if recipients.len() == recipients.capacity() {
+                let capacity = recipients.len().max(2) * 2;
+                self.0
+                    .charge(capacity as u64 * size_of::<String>() as u64)?;
+                self.0.check(
+                    recipients
+                        .try_reserve_exact(capacity - recipients.len())
+                        .map_err(|_| ArchiveError::LimitExceeded),
+                )?;
+            }
+            recipients.push(value);
+        }
+        Ok(recipients)
+    }
 }

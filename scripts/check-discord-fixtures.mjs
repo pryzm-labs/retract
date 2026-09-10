@@ -5,20 +5,37 @@ import { fileURLToPath } from 'node:url';
 import { artifacts, fixtureDirectory, sha256 } from './generate-discord-fixtures.mjs';
 
 function reject() { throw new Error('synthetic fixture privacy audit failed'); }
+function auditSensitiveContent(value) {
+  if (/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/u.test(value)
+    || /\+\d[\d ().-]{7,}\d/u.test(value)
+    || /(?<!\d)\(\d{3}\)[\s.-]*\d{3}[\s.-]*\d{4}(?!\d)/u.test(value)
+    || /(?<!\d)\d{3}[-. ]+\d{3}[-. ]*\d{4}(?!\d)/u.test(value)
+    || /(?<!\d)\d{10,15}(?!\d)/u.test(value)) reject();
+  // Extract numeric-address candidates independently of word/punctuation tokens.
+  // A final colon can be prose punctuation; try removing just that delimiter,
+  // without collapsing internal IPv6 colons or treating calendar times as IPs.
+  for (const match of value.matchAll(/[0-9A-Fa-f:.]+/gu)) {
+    const candidate = match[0].replace(/\.+$/u, '');
+    if ([candidate, candidate.replace(/^:/u, ''), candidate.replace(/:$/u, '')].some(part => isIP(part) !== 0)) reject();
+  }
+  for (const match of value.matchAll(/(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/[^\s<>"']*|[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"']*/gu)) {
+    const candidate = match[0];
+    const authority = candidate.match(/^(?:https?:)?\/\/([^/?#]*)/iu)?.[1];
+    // Inspect the original authority too: URL normalizes explicit default ports
+    // away, which must not let a port or credential spelling bypass this policy.
+    if (authority?.toLowerCase() !== 'example.invalid' || candidate.includes('\\')) reject();
+    let url; try { url = new URL(candidate.startsWith('//') ? `https:${candidate}` : candidate); } catch { reject(); }
+    if (!['https:', 'http:'].includes(url.protocol) || url.hostname !== 'example.invalid' || url.username || url.password || url.port) reject();
+  }
+}
 export function auditValue(value, key, manifest) {
   if (typeof value !== 'string') return;
+  auditSensitiveContent(value);
   if (!manifest.approvedStrings.includes(value)) reject();
   if (['id', 'ID', 'accountId', 'channelId', 'messageId'].includes(key) || /^\d+$/.test(value)) {
     if (!/^[1-9][0-9]*$/.test(value) || BigInt(value) <= 9007199254740991n || BigInt(value) > 18446744073709551615n) reject();
   }
   if (key === 'username' && !manifest.approvedUsernames.includes(value)) reject();
-  if (/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/u.test(value) || /\+\d[\d ()-]{7,}\d/u.test(value) || /\b\d{3}[-. ]\d{3}[-. ]\d{4}\b/u.test(value) || /^\d{10,15}$/.test(value)) reject();
-  if (value.split(/[\s,;()[\]]+/u).some(token => isIP(token.replace(/[.!?]+$/u, '')) !== 0)) reject();
-  if ([...value.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/gu)].some(match => isIP(match[0]) === 4)) reject();
-  for (const match of value.matchAll(/[A-Za-z][A-Za-z0-9+.-]*:[^\s]*/gu)) {
-    let url; try { url = new URL(match[0]); } catch { reject(); }
-    if (!['https:', 'http:'].includes(url.protocol) || url.hostname !== 'example.invalid' || url.username || url.password || url.port) reject();
-  }
 }
 // Lex each numeric token BEFORE JSON.parse so large IDs never round. The
 // subsequent parse sees only placeholders and is used solely for key/string audit.
@@ -35,6 +52,7 @@ export function auditJson(body, manifest) {
     if (typeof value === 'string') auditValue(value, key, manifest);
     else if (Array.isArray(value)) value.forEach(child => walk(child));
     else if (value && typeof value === 'object') for (const [key, child] of Object.entries(value)) {
+      auditSensitiveContent(key);
       if (!manifest.approvedKeys.includes(key)) reject(); walk(child, key);
     }
   }

@@ -43,3 +43,34 @@ test('sensitive patterns stay forbidden even when added to the approved manifest
     assert.throws(() => auditValue(value, '', { ...manifest, approvedStrings: [...manifest.approvedStrings, value] }));
   }
 });
+
+function approved(value) { return { ...manifest, approvedStrings: [...manifest.approvedStrings, value] }; }
+test('parenthesized and embedded phone formats cannot be auto-approved', () => {
+  for (const value of ['(202) 555-0100', 'Call (202)555-0100 now', 'Call 2025550100 now', 'x2025550100y', '+1(202)5550100']) {
+    assert.throws(() => auditValue(value, '', approved(value)), /^Error: synthetic fixture privacy audit failed$/);
+  }
+});
+test('numeric IPv6 is detected through quoting punctuation and CIDR suffixes', () => {
+  for (const value of ['"2001:4860:4860::8888"', 'Address 2001:4860:4860::8888/64', 'Address ::1:', 'Address 2001:4860:4860::8888:']) {
+    assert.throws(() => auditValue(value, '', approved(value)), /^Error: synthetic fixture privacy audit failed$/);
+  }
+});
+test('URL authorities reject relative externals credentials and even default ports', () => {
+  for (const value of ['//outside.example.invalid/file', '//name@example.invalid/file', '//example.invalid:443/file',
+    'https://example.invalid:443/file', 'http://example.invalid:80/file', 'ftp://example.invalid/file', '//example.invalid\\outside', 'http:example.invalid/file']) {
+    assert.throws(() => auditValue(value, '', approved(value)), /^Error: synthetic fixture privacy audit failed$/);
+  }
+  for (const value of ['//example.invalid/file', 'https://example.invalid/file', 'http://example.invalid/file']) assert.doesNotThrow(() => auditValue(value, '', approved(value)));
+});
+test('sensitive JSON keys are checked even when included in approvedKeys', () => {
+  for (const key of ['invented@example.invalid', '(202) 555-0100', 'Address 2001:4860:4860::8888/64', '//outside.example.invalid/file']) {
+    const policy = { ...approved(key), approvedKeys: [key] };
+    assert.throws(() => auditJson(JSON.stringify({ [key]: null }), policy), /^Error: synthetic fixture privacy audit failed$/);
+  }
+});
+test('near-miss synthetic text keys and fixed calendar components remain safe', () => {
+  for (const value of ['Invented item 42', '2030-01-02 03:04:05', '9007199254741001', 'Invented (202) note', 'Invented 202-555 item', 'Invented 03:04:05 clock']) {
+    assert.doesNotThrow(() => auditValue(value, '', approved(value)));
+    assert.doesNotThrow(() => auditJson(JSON.stringify({ [value]: null }), { ...approved(value), approvedKeys: [value] }));
+  }
+});
