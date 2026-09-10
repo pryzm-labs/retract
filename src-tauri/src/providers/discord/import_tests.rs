@@ -1,5 +1,5 @@
 //! Synthetic end-to-end coordinator contracts; no external archive or key.
-use super::import::{DiscordImportOutcome, DiscordImportOwner};
+use super::import::{DiscordImportHandle, DiscordImportOutcome, DiscordImportOwner};
 use super::progress::DiscordImportPhase;
 use crate::persistence::archive::{
     ArchiveKey, ArchiveOwner, ArchiveSearch, ArchiveService, ArchiveStore, ImportDisposition,
@@ -10,6 +10,31 @@ use std::{
     path::Path,
     sync::Arc,
 };
+
+// Test-only launch adapter: storage-internal lifecycle assertions stay beside
+// the storage implementation without exposing production import capabilities.
+pub(crate) trait ImportTestLaunch {
+    async fn start_for_test(&self, file: File) -> Result<DiscordImportHandle, DiscordImportError>;
+    async fn retry_for_test(
+        &self,
+        file: File,
+        expected: &DiscordImportOutcome,
+    ) -> Result<DiscordImportHandle, DiscordImportError>;
+}
+
+impl ImportTestLaunch for DiscordImportOwner {
+    async fn start_for_test(&self, file: File) -> Result<DiscordImportHandle, DiscordImportError> {
+        self.start(file).await
+    }
+
+    async fn retry_for_test(
+        &self,
+        file: File,
+        expected: &DiscordImportOutcome,
+    ) -> Result<DiscordImportHandle, DiscordImportError> {
+        self.retry(file, expected).await
+    }
+}
 
 #[path = "../../../../crates/discord-archive/tests/common/mod.rs"]
 mod zip_fixture;

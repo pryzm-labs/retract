@@ -242,13 +242,13 @@ impl DiscordImportOwner {
     /// The future path-opening adapter must open read-only with O_NOFOLLOW (or
     /// equivalent). File alone cannot reveal whether its caller followed a link.
     /// Here we validate regular-file metadata and retain precisely this handle.
-    pub(crate) async fn start(
+    pub(super) async fn start(
         &self,
         file: File,
     ) -> Result<DiscordImportHandle, DiscordImportError> {
         self.launch(file, None).await
     }
-    pub(crate) async fn retry(
+    pub(super) async fn retry(
         &self,
         file: File,
         expected: &DiscordImportOutcome,

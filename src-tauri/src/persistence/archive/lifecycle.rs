@@ -126,6 +126,7 @@ mod discord_tests {
 
     use super::super::worker_tests::{Gate, Release, runtime};
     use crate::providers::discord::import::{DiscordImportError, DiscordImportOwner, TestPoint};
+    use crate::providers::discord::import_tests::ImportTestLaunch;
     use crate::providers::discord::progress::DiscordImportPhase;
     use std::{
         fs::{self, File},
@@ -159,7 +160,10 @@ mod discord_tests {
         }));
         runtime().block_on(async {
             let imports = DiscordImportOwner::new(archives.clone());
-            let handle = imports.start(File::open(&selected).unwrap()).await.unwrap();
+            let handle = imports
+                .start_for_test(File::open(&selected).unwrap())
+                .await
+                .unwrap();
             gate.entered().await;
             assert!(handle.checkpoint().is_none());
             assert_eq!(
@@ -225,13 +229,16 @@ mod discord_tests {
         }));
         runtime().block_on(async {
             let imports = DiscordImportOwner::new(archives.clone());
-            let initial = imports.start(File::open(&selected).unwrap()).await.unwrap();
+            let initial = imports
+                .start_for_test(File::open(&selected).unwrap())
+                .await
+                .unwrap();
             assert_eq!(
                 initial.wait().await.err(),
                 Some(DiscordImportError::InvalidArchive)
             );
             let expected = imports
-                .start(File::open(&selected).unwrap())
+                .start_for_test(File::open(&selected).unwrap())
                 .await
                 .unwrap()
                 .wait()
@@ -244,7 +251,7 @@ mod discord_tests {
             gate.armed.store(true, Ordering::Release);
             lose_worker.store(true, Ordering::Release);
             let retry = imports
-                .retry(File::open(&selected).unwrap(), &expected)
+                .retry_for_test(File::open(&selected).unwrap(), &expected)
                 .await
                 .unwrap();
             gate.entered().await;
@@ -302,7 +309,7 @@ mod discord_tests {
         }));
         runtime().block_on(async {
             let imports = DiscordImportOwner::new(archives.clone());
-            let result = imports.start(File::open(&selected).unwrap()).await.unwrap().wait().await.unwrap();
+            let result = imports.start_for_test(File::open(&selected).unwrap()).await.unwrap().wait().await.unwrap();
             imports.shutdown().await;
             archives.shutdown().await;
             let scope = result.checkpoint.scope;
@@ -365,7 +372,10 @@ mod discord_tests {
                 }
             });
             runtime().block_on(async {
-                let handle = imports.start(File::open(&selected).unwrap()).await.unwrap();
+                let handle = imports
+                    .start_for_test(File::open(&selected).unwrap())
+                    .await
+                    .unwrap();
                 gate.entered().await;
                 if full_queue {
                     let service = archives.open().await.unwrap();
@@ -437,7 +447,10 @@ mod discord_tests {
             }));
             runtime().block_on(async {
                 let imports = DiscordImportOwner::new(archives.clone());
-                let handle = imports.start(File::open(&selected).unwrap()).await.unwrap();
+                let handle = imports
+                    .start_for_test(File::open(&selected).unwrap())
+                    .await
+                    .unwrap();
                 assert_eq!(
                     handle.wait().await.err(),
                     Some(DiscordImportError::StorageFailure)
@@ -507,7 +520,7 @@ mod discord_tests {
                 };
                 let handle = application
                     .discord_imports
-                    .start(File::open(&selected).unwrap())
+                    .start_for_test(File::open(&selected).unwrap())
                     .await
                     .unwrap();
                 gate.entered().await;
@@ -528,7 +541,7 @@ mod discord_tests {
                 assert_eq!(
                     application
                         .discord_imports
-                        .start(File::open(&selected).unwrap())
+                        .start_for_test(File::open(&selected).unwrap())
                         .await
                         .err(),
                     Some(DiscordImportError::Closed)
@@ -577,7 +590,7 @@ mod discord_tests {
             );
             let handle = application
                 .discord_imports
-                .start(File::open(&selected).unwrap())
+                .start_for_test(File::open(&selected).unwrap())
                 .await
                 .unwrap();
             gate.entered().await;

@@ -62,6 +62,61 @@ test("Discord guard accepts content-free ownership documentation", () => {
   assert.equal(check(root).status, 0);
 });
 
+test("Discord start and retry capabilities cannot escape their parent module", () => {
+  for (const method of ["start", "retry", "launch"]) {
+    for (const visibility of ["pub(crate)", "pub", "pub(in crate)", "pub(in crate::providers)"]) {
+      const root = fixture();
+      write(root, "providers/discord/import.rs", `impl DiscordImportOwner { ${visibility} async fn ${method}(&self, file: File) {} }`);
+      const result = check(root);
+      assert.equal(result.status, 1, `${visibility} ${method}`);
+      assert.match(result.stderr, /Discord import capability visibility/);
+    }
+  }
+});
+
+test("Discord parent cannot publish coordinator wrappers or re-exports", () => {
+  for (const source of [
+    "pub(crate) async fn begin(owner: &import::DiscordImportOwner, file: File) { owner.start(file).await; }",
+    "pub fn resume(owner: &import::DiscordImportOwner, file: File, outcome: Outcome) { owner.retry(file, outcome); }",
+    "pub(crate) use import::DiscordImportOwner;",
+    "pub use self::{import::{DiscordImportOwner as Owner}};",
+    "pub(crate) use import::*;",
+  ]) {
+    const root = fixture();
+    write(root, "providers/discord/mod.rs", source);
+    const result = check(root);
+    assert.equal(result.status, 1, source);
+    assert.match(result.stderr, /Discord parent cannot expose import capabilities/);
+  }
+});
+
+test("Discord modules cannot host command attributes or handler registration", () => {
+  for (const name of ["nested/tests.rs", "mod.rs", "import.rs", "commands.rs"]) {
+    for (const source of ["builder.invoke_handler(router);", "generate_handler![load];", "#[tauri::command] fn load() {}", "use tauri::command as exposed; #[exposed] fn load() {}"]) {
+      const root = fixture();
+      write(root, `providers/discord/${name}`, source);
+      const result = check(root);
+      assert.equal(result.status, 1, `${name}: ${source}`);
+      assert.match(result.stderr, /Discord modules cannot host IPC/);
+    }
+  }
+});
+
+test("private capability methods coexist with crate-visible inert lifecycle methods", () => {
+  const root = fixture();
+  write(root, "providers/discord/import.rs", `
+    impl DiscordImportOwner {
+      pub(super) async fn start(&self, file: File) {}
+      pub(self) async fn retry(&self, file: File, expected: Outcome) {}
+      async fn launch(&self, file: File) {}
+      pub(crate) fn new(archives: ArchiveOwner) {}
+      pub(crate) fn reject_new_starts(&self) {}
+      pub(crate) async fn shutdown(&self) {}
+    }
+  `);
+  assert.equal(check(root).status, 0);
+});
+
 test("Discord importer remains unavailable to commands and provider registration", () => {
   for (const name of ["commands.rs", "commands/archive.rs", "providers/registry.rs"]) {
     for (const source of ["use crate::providers::discord::import::DiscordImportOwner;", "use crate::providers::{discord::import};", "owner.discord_imports.start(file).await;"]) {
@@ -131,128 +186,50 @@ test("IPC guard permits inert owner lifecycle, documentation, literals and test-
     #[tauri::command]
     fn snapshot() { let help = "Discord importer is unavailable"; let raw = r#"discord_imports"#; }
     fn register(builder: Builder) { builder.invoke_handler(tauri::generate_handler![snapshot]); }
-    #[cfg(test)] mod tests { fn discord_import_stays_unavailable() {} }
   `);
   const result = check(root);
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("file-scope Discord module aliases cannot hide delegated registration", () => {
-  for (const imports of [
-    "use crate::discord_commands as router;",
-    "use crate::{discord_commands as router};",
-    "use crate::{providers::{discord::{commands as router}}};",
-    "use crate::providers::discord as provider; use provider::commands as router;",
+test("IPC source checks do not infer cfg exclusions or module paths", () => {
+  for (const declaration of [
+    '#[cfg(test)] mod commands_v2;',
+    'mod tests { #[cfg(test)] mod commands_v2; }',
+    '#[cfg(any(test, feature = "ipc"))] mod commands_v2;',
+    '#[path = "commands_v2.rs"] mod synthetic;',
   ]) {
     const root = fixture();
-    write(root, "lib.rs", `${imports} pub fn run() { router::register(Builder::default()); }`);
-    const result = check(root);
-    assert.equal(result.status, 1, imports);
-    assert.match(result.stderr, /Discord importer is backend-only/);
+    write(root, "compatibility/mod.rs", declaration);
+    write(root, "compatibility/commands_v2.rs", "use crate::providers::discord::import::*;");
+    assert.equal(check(root).status, 1, declaration);
   }
+  const root = fixture();
+  write(root, "compatibility/commands_v2.rs", "#[cfg(test)] mod tests { use crate::providers::discord::import::*; }");
+  assert.equal(check(root).status, 1);
 });
 
-test("type and function aliases remain forbidden in command and handler scopes", () => {
+test("direct coordinator aliases and wildcard imports are rejected in IPC files", () => {
   for (const source of [
-    "use crate::providers::discord::import::DiscordImportOwner as Owner; #[tauri::command] fn load(owner: Owner) {}",
-    "use crate::{providers::{discord::{import::DiscordImportOwner as Owner}}}; #[tauri::command] fn load(owner: Owner) {}",
-    "use crate::discord_commands::import_package as load; fn register(b: Builder) { b.invoke_handler(tauri::generate_handler![load]); }",
-    "use crate::{discord_commands::{import_package as load}}; fn register(b: Builder) { b.invoke_handler(load); }",
-    "use crate::providers::discord::*; #[tauri::command] fn load(owner: Owner) {}",
+    "use crate::providers::discord::import::DiscordImportOwner as Owner;",
+    "use crate::{providers::{discord::{import::*}}};",
+    "use crate::providers::discord::*;",
   ]) {
     const root = fixture();
-    write(root, "ipc/registration.rs", source);
-    const result = check(root);
-    assert.equal(result.status, 1, source);
-    assert.match(result.stderr, /Discord importer is backend-only/);
+    write(root, "compatibility/commands_v2.rs", source);
+    assert.equal(check(root).status, 1, source);
   }
 });
 
-test("imports in enclosing production modules reach nested command scopes", () => {
+test("lexical IPC check does not taint unrelated shadowed aliases", () => {
   const root = fixture();
   write(root, "lib.rs", `
     use crate::providers::discord::import::DiscordImportOwner as Owner;
-    mod inline { #[tauri::command] fn load(owner: super::Owner) {} }
+    mod ordinary { pub struct Owner; }
+    mod ipc;
+    pub fn run() { compatibility::commands_v2::register(Builder::default()); }
   `);
-  assert.equal(check(root).status, 1);
-  write(root, "lib.rs", "use crate::providers::discord::import::DiscordImportOwner as Owner; mod ipc;");
-  write(root, "ipc.rs", "use super::Owner as Importer; #[tauri::command] fn load(owner: Importer) {}");
-  assert.equal(check(root).status, 1);
-});
-
-test("nested test declarations cannot exempt a production compatibility sibling", () => {
-  for (const nested of [
-    "mod tests { #[cfg(test)] mod commands_v2; }",
-    "#[cfg(test)] mod tests { #[cfg(test)] mod commands_v2; }",
-    "#[cfg(any(test))] mod tests { #[cfg(test)] mod commands_v2; }",
-    "mod nested { #[cfg(any(test))] mod commands_v2; }",
-  ]) {
-    const root = fixture();
-    write(root, "compatibility/mod.rs", `pub mod commands_v2; ${nested}`);
-    write(root, "compatibility/commands_v2.rs", "fn load(runtime: RuntimeState) { runtime.discord_imports.start(file); }");
-    assert.equal(check(root).status, 1, nested);
-  }
-});
-
-test("only cfg conditions requiring test can exempt external or inline modules", () => {
-  for (const condition of ["test", "any(test)", "all(test, feature = \"synthetic\")", "any(test, all(test, feature = \"synthetic\"))"]) {
-    const root = fixture();
-    write(root, "compatibility/mod.rs", `mod nested { #[cfg(${condition})] mod fixtures; } #[cfg(${condition})] mod inline { use crate::discord_commands as router; }`);
-    write(root, "compatibility/nested/fixtures.rs", "use crate::discord_commands as router; #[tauri::command] fn synthetic() { router::register(); }");
-    const result = check(root);
-    assert.equal(result.status, 0, `${condition}: ${result.stderr}`);
-  }
-  for (const condition of ["any(test, feature = \"synthetic\")", "not(test)", "any(all(test, feature = \"synthetic\"), not(test))"]) {
-    const root = fixture();
-    write(root, "compatibility/mod.rs", `#[cfg(${condition})] mod commands_v2;`);
-    write(root, "compatibility/commands_v2.rs", "fn load(runtime: RuntimeState) { runtime.discord_imports.start(file); }");
-    assert.equal(check(root).status, 1, condition);
-  }
-});
-
-test("test-only module alternatives cannot hide a production-capable path", () => {
-  for (const declarations of [
-    "#[cfg(not(test))] mod commands_v2; #[cfg(test)] mod commands_v2;",
-    "#[cfg(not(test))] mod commands_v2; #[cfg(test)] mod commands_v2 {}",
-    "#[cfg(any(test, feature = \"ipc\"))] mod commands_v2; #[cfg(test)] mod commands_v2;",
-  ]) {
-    const root = fixture();
-    write(root, "compatibility/mod.rs", declarations);
-    write(root, "compatibility/commands_v2.rs", "fn load(runtime: RuntimeState) { runtime.discord_imports.start(file); }");
-    assert.equal(check(root).status, 1, declarations);
-  }
-});
-
-test("masking a test-only const function cannot consume the following command", () => {
-  const root = fixture();
-  write(root, "lib.rs", `
-    #[cfg(any(test))] pub const fn synthetic() -> usize { 1 }
-    #[tauri::command] fn load(owner: DiscordImportOwner) {}
-  `);
-  assert.equal(check(root).status, 1);
-});
-
-test("explicit module paths preserve production precedence and test-only helpers", () => {
-  const root = fixture();
-  write(root, "compatibility/mod.rs", '#[path = "commands_v2.rs"] mod live; #[cfg(test)] mod commands_v2;');
-  write(root, "compatibility/commands_v2.rs", "fn load(runtime: RuntimeState) { runtime.discord_imports.start(file); }");
-  assert.equal(check(root).status, 1);
-  write(root, "compatibility/mod.rs", '#[cfg(test)] #[path = "commands_v2.rs"] mod synthetic;');
+  write(root, "ipc.rs", "use crate::ordinary::Owner; #[tauri::command] fn snapshot(owner: Owner) {}");
   assert.equal(check(root).status, 0);
-});
-
-test("alias tracking ignores documentation, literals and test-only aliases", () => {
-  const root = fixture();
-  write(root, "lib.rs", `
-    // use crate::discord_commands as router;
-    const HELP: &str = "use crate::discord_commands as router;";
-    #[cfg(test)] use crate::discord_commands as router;
-    #[cfg(any(test))] mod tests { use crate::discord_commands as router; }
-    use crate::{ordinary::router, providers::discord::import::DiscordImportOwner as UnusedOwner};
-    pub fn run() { router::register(Builder::default()); }
-  `);
-  const result = check(root);
-  assert.equal(result.status, 0, result.stderr);
 });
 
 test("parser ZIP dependency cannot silently enable codecs or drift from the reviewed pin", () => {
