@@ -3,7 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use retract_domain::{
-    ActorRecord, ContentRecord, ConversationRecord, ProviderKey, ProviderResourceRef,
+    ActorRecord, ContentRecord, ConversationRecord, ProviderKey, ProviderResourceRef, ResourceKind,
+    Scope,
 };
 use rusqlite::{Connection, params, types::Value};
 
@@ -34,6 +35,7 @@ pub(super) fn validate(
         let mut rows = query.query([]).map_err(storage)?;
         while let Some(row) = rows.next().map_err(storage)? {
             let json: String = row.get(4).map_err(storage)?;
+            let raw: serde_json::Value = model::decode(&json)?;
             let mut batch = model::ImportBatch::default();
             let (scope, id, resource) = match table {
                 "actor_observations" => {
@@ -48,12 +50,38 @@ pub(super) fn validate(
                 }
                 "conversation_observations" => {
                     let record: ConversationRecord = model::decode(&json)?;
+                    validate_uuid_text(
+                        &raw,
+                        "/parentId",
+                        record.parent_id.map(|id| *id.as_uuid()),
+                    )?;
+                    if let Some(parent) = record.parent_id {
+                        // This is the ingestion catalog policy, not a same-source
+                        // observation requirement. Optional parents may survive
+                        // another snapshot's removal or be absent altogether.
+                        super::ingest::check_reference(
+                            connection,
+                            &record.scope,
+                            parent.as_uuid(),
+                            ResourceKind::Conversation,
+                        )?;
+                    }
                     let out = (
                         record.scope.clone(),
                         *record.id.as_uuid(),
                         record.resource.clone(),
                     );
-                    for actor in &record.participants {
+                    for (index, actor) in record.participants.iter().enumerate() {
+                        let participant = raw
+                            .get("participants")
+                            .and_then(|value| value.get(index))
+                            .ok_or(ArchiveError::InvalidStore)?;
+                        validate_observation_uuid_text(
+                            participant,
+                            &actor.scope,
+                            *actor.id.as_uuid(),
+                            &actor.resource,
+                        )?;
                         validate_catalog_reference(connection, &actor.resource)?;
                     }
                     batch.conversations.push(record);
@@ -61,6 +89,17 @@ pub(super) fn validate(
                 }
                 _ => {
                     let mut record: ContentRecord = model::decode(&json)?;
+                    for (pointer, id) in [
+                        ("/conversationId", Some(*record.conversation_id.as_uuid())),
+                        ("/authorId", Some(*record.author_id.as_uuid())),
+                        ("/replyTo", record.reply_to.map(|id| *id.as_uuid())),
+                        (
+                            "/threadParent",
+                            record.thread_parent.map(|id| *id.as_uuid()),
+                        ),
+                    ] {
+                        validate_uuid_text(&raw, pointer, id)?;
+                    }
                     // This is a validation view. Historical store output is
                     // checked separately and the copied record JSON is untouched.
                     record
@@ -88,6 +127,7 @@ pub(super) fn validate(
                     out
                 }
             };
+            validate_observation_uuid_text(&raw, &scope, id, &resource)?;
             if row.get::<_, String>(0).map_err(storage)? != scope.provider.as_str()
                 || row.get::<_, String>(1).map_err(storage)?
                     != scope.account_id.as_uuid().to_string()
@@ -111,6 +151,43 @@ pub(super) fn validate(
     Ok(())
 }
 
+// UUID deserialization accepts URNs, braces and other noncanonical spellings.
+// Persisted JSON is also used as a SQL projection (notably parentId), so typed
+// equality alone can hide text that bypasses catalog joins. Compare only UUID
+// fields: historical timestamps, provider payloads and detector output stay
+// byte-for-byte untouched and need not be reserialized canonically.
+fn validate_uuid_text(
+    raw: &serde_json::Value,
+    pointer: &str,
+    expected: Option<uuid::Uuid>,
+) -> Result<(), ArchiveError> {
+    let actual = raw.pointer(pointer);
+    match expected {
+        Some(id) if actual.and_then(serde_json::Value::as_str) == Some(id.to_string().as_str()) => {
+            Ok(())
+        }
+        None if actual.is_none_or(serde_json::Value::is_null) => Ok(()),
+        _ => Err(ArchiveError::InvalidStore),
+    }
+}
+
+fn validate_observation_uuid_text(
+    raw: &serde_json::Value,
+    scope: &Scope,
+    id: uuid::Uuid,
+    resource: &ProviderResourceRef,
+) -> Result<(), ArchiveError> {
+    for (pointer, id) in [
+        ("/id", id),
+        ("/scope/accountId", *scope.account_id.as_uuid()),
+        ("/scope/sourceId", *scope.source_id.as_uuid()),
+        ("/resource/accountId", *resource.account_id.as_uuid()),
+    ] {
+        validate_uuid_text(raw, pointer, Some(id))?;
+    }
+    Ok(())
+}
+
 fn kind(value: &impl serde::Serialize) -> Result<String, ArchiveError> {
     Ok(model::encode(value)?.trim_matches('"').to_owned())
 }
@@ -124,8 +201,13 @@ fn validate_catalog(
     let mut query = connection.prepare("SELECT provider, account_id, resource_id, kind, locator_schema, locator_version, canonical_key, locator_json FROM resource_identities").map_err(storage)?;
     let mut rows = query.query([]).map_err(storage)?;
     while let Some(row) = rows.next().map_err(storage)? {
-        let record: ProviderResourceRef =
-            model::decode(&row.get::<_, String>(7).map_err(storage)?)?;
+        let json: String = row.get(7).map_err(storage)?;
+        let record: ProviderResourceRef = model::decode(&json)?;
+        validate_uuid_text(
+            &model::decode(&json)?,
+            "/accountId",
+            Some(*record.account_id.as_uuid()),
+        )?;
         let validator = validators
             .get(&record.provider)
             .ok_or(ArchiveError::InvalidStore)?;

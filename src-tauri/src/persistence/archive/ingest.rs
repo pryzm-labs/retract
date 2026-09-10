@@ -219,13 +219,13 @@ fn upsert_observation(
     Ok(())
 }
 
-fn check_reference(
-    tx: &Transaction<'_>,
+pub(super) fn check_reference(
+    connection: &Connection,
     scope: &Scope,
     id: &Uuid,
     kind: ResourceKind,
 ) -> Result<(), ArchiveError> {
-    let stored = tx
+    let stored = connection
         .query_row(
             "SELECT provider, account_id, kind FROM resource_identities WHERE resource_id=?",
             [id.to_string()],

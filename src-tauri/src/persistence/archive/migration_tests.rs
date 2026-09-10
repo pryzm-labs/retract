@@ -16,6 +16,9 @@ use super::{
 const OLD_DDL: &str =
     "CREATE TABLE legacy_source(account_json TEXT NOT NULL, source_json TEXT NOT NULL) STRICT";
 
+#[path = "migration_uuid_tests.rs"]
+mod uuid_tests;
+
 pub(super) fn frozen_v1() -> (Fixture, serde_json::Value) {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
