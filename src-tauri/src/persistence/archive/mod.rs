@@ -20,14 +20,18 @@ pub(crate) use error::ArchiveError;
 pub(crate) use lifecycle::ArchiveOwner;
 #[allow(unused_imports)]
 pub(crate) use model::{
-    ArchiveSearch, ENVELOPE_BYTES, ImportBatch, ImportCancellation, ImportCheckpoint, ImportPhase,
-    ImportProgress, ImportSession, MAX_ATTACHMENTS, MAX_BATCH_BYTES, MAX_BATCH_RECORDS,
-    MAX_SEARCHABLE_BYTES, RemovalOutcome, encoded_size,
+    ArchiveImportResolution, ArchiveSearch, ENVELOPE_BYTES, ImportBatch, ImportBatchV2,
+    ImportCancellation, ImportCheckpoint, ImportDisposition, ImportFailureCode, ImportPhase,
+    ImportProgress, ImportSession, ImportWarningCode, ImportWarningDelta, MAX_ATTACHMENTS,
+    MAX_BATCH_BYTES, MAX_BATCH_RECORDS, MAX_SEARCHABLE_BYTES, NewArchiveImport, RemovalOutcome,
+    encoded_size,
 };
 #[allow(unused_imports)]
 pub(crate) use store::ArchiveStore;
 #[allow(unused_imports)]
 pub(crate) use worker::{ArchiveQuerySource, ArchiveService};
+#[cfg(test)]
+mod import_v2_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

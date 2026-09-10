@@ -24,6 +24,10 @@ pub(super) fn reserve_command_slot(service: &ArchiveService) -> impl Drop + '_ {
 }
 
 enum Command {
+    ResolveImport(
+        Box<model::NewArchiveImport>,
+        Reply<model::ArchiveImportResolution>,
+    ),
     Register(Box<(AccountRecord, SourceRecord)>, Reply<SourceRecord>),
     Source(Scope, Reply<SourceRecord>),
     Begin(Scope, Reply<Arc<ImportSession>>),
@@ -35,6 +39,17 @@ enum Command {
     ),
     Retry(Box<ImportCheckpoint>, Reply<Arc<ImportSession>>),
     Append(Arc<ImportSession>, u64, ImportBatch, Reply<ImportProgress>),
+    AppendV2(
+        Arc<ImportSession>,
+        u64,
+        model::ImportBatchV2,
+        Reply<ImportProgress>,
+    ),
+    Fail(
+        Arc<ImportSession>,
+        model::ImportFailureCode,
+        Reply<ImportProgress>,
+    ),
     Finish(Arc<ImportSession>, Reply<ImportProgress>),
     Cancel(Arc<ImportSession>, Reply<ImportProgress>),
     Search(ArchiveSearch, Reply<Page<ContentRecord>>),
@@ -101,6 +116,9 @@ impl ArchiveService {
                     break;
                 }
                 match command {
+                    Command::ResolveImport(input, reply) => {
+                        let _ = reply.send(store.resolve_or_register_import(*input));
+                    }
                     Command::Register(records, reply) => {
                         let (account, source) = *records;
                         let _ = reply.send(store.register_source(account, source));
@@ -119,6 +137,12 @@ impl ArchiveService {
                     }
                     Command::Append(session, sequence, batch, reply) => {
                         let _ = reply.send(store.append_batch(&session, sequence, batch));
+                    }
+                    Command::AppendV2(session, sequence, batch, reply) => {
+                        let _ = reply.send(store.append_batch_v2(&session, sequence, batch));
+                    }
+                    Command::Fail(session, code, reply) => {
+                        let _ = reply.send(store.fail_import(&session, code));
                     }
                     Command::Finish(session, reply) => {
                         let _ = reply.send(store.finish_import(&session));
@@ -204,6 +228,14 @@ impl ArchiveService {
         self.request(|reply| Command::Register(Box::new((account.clone(), source.clone())), reply))
             .await
     }
+    pub(crate) async fn resolve_or_register_import(
+        &self,
+        input: model::NewArchiveImport,
+    ) -> Result<model::ArchiveImportResolution, ArchiveError> {
+        input.bounded_size()?;
+        self.request(|reply| Command::ResolveImport(Box::new(input), reply))
+            .await
+    }
     pub(crate) async fn source(&self, scope: &Scope) -> Result<SourceRecord, ArchiveError> {
         self.request(|reply| Command::Source(scope.clone(), reply))
             .await
@@ -269,6 +301,40 @@ impl ArchiveService {
         session: &Arc<ImportSession>,
     ) -> Result<ImportProgress, ArchiveError> {
         self.request(|reply| Command::Finish(session.clone(), reply))
+            .await
+    }
+    pub(crate) fn append_batch_v2(
+        &self,
+        session: &Arc<ImportSession>,
+        sequence: u64,
+        batch: &model::ImportBatchV2,
+    ) -> Result<oneshot::Receiver<Result<ImportProgress, ArchiveError>>, ArchiveError> {
+        self.check_running()?;
+        batch.bounded_size()?;
+        session.cancellation_signal().check()?;
+        let slot = match self.sender.try_reserve() {
+            Ok(slot) => slot,
+            Err(mpsc::error::TrySendError::Full(_)) => return Err(ArchiveError::Busy),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ArchiveError::Cancelled),
+        };
+        self.check_running()?;
+        session.cancellation_signal().check()?;
+        let (reply, result) = oneshot::channel();
+        slot.send(Command::AppendV2(
+            session.clone(),
+            sequence,
+            batch.clone(),
+            reply,
+        ));
+        Ok(result)
+    }
+
+    pub(crate) async fn fail_import(
+        &self,
+        session: &Arc<ImportSession>,
+        code: model::ImportFailureCode,
+    ) -> Result<ImportProgress, ArchiveError> {
+        self.request(|reply| Command::Fail(session.clone(), code, reply))
             .await
     }
     pub(crate) async fn cancel_import(

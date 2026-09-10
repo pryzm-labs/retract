@@ -193,7 +193,7 @@ fn wrong_key_unsupported_version_binding_and_corrupt_files_are_preserved() {
     );
     assert_eq!(fs::read(&fixture.path).unwrap(), before);
     for statement in [
-        "UPDATE schema_migrations SET version = 2",
+        "UPDATE schema_migrations SET version = 999",
         "UPDATE schema_migrations SET version = 1, application = 'another-application'",
     ] {
         let db = open_keyed(&fixture.path, &key(), false).unwrap();
@@ -218,8 +218,7 @@ fn wrong_key_unsupported_version_binding_and_corrupt_files_are_preserved() {
 #[test]
 fn self_consistent_prior_development_schema_is_rejected_without_mutation() {
     use sha2::{Digest, Sha256};
-    let fixture = Fixture::new();
-    drop(fixture.open());
+    let (fixture, _) = super::migration_tests::frozen_v1();
     let db = open_keyed(&fixture.path, &key(), false).unwrap();
     db.execute_batch("DROP INDEX conversation_parent_reference;")
         .unwrap();
@@ -793,7 +792,7 @@ fn recovery_fixture_child() {
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let db = open_keyed(std::path::Path::new(&path), &key(), false).unwrap();
         match std::env::var(CHILD_MODE).unwrap().as_str() {
-            "unsupported-wal" => db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; UPDATE schema_migrations SET version = 2;").unwrap(),
+            "unsupported-wal" => db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; UPDATE schema_migrations SET version = 999;").unwrap(),
             "supported-wal" => {
                 db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;").unwrap();
                 let mut updated = source();
@@ -802,7 +801,7 @@ fn recovery_fixture_child() {
             }
             mode @ ("unsupported-journal" | "supported-journal") => {
                 if mode == "unsupported-journal" {
-                    db.execute_batch("UPDATE schema_migrations SET version = 2;").unwrap();
+                    db.execute_batch("UPDATE schema_migrations SET version = 999;").unwrap();
                 }
                 db.execute_batch("PRAGMA cache_size = 1; PRAGMA cache_spill = ON; BEGIN IMMEDIATE;").unwrap();
                 db.execute("UPDATE schema_migrations SET application = ?", ["synthetic-uncommitted".repeat(100000)]).unwrap();
@@ -898,7 +897,7 @@ fn rejected_clean_wal_database_with_absent_sidecars_stays_byte_preserved() {
     let fixture = Fixture::new();
     drop(fixture.open());
     let db = open_keyed(&fixture.path, &key(), false).unwrap();
-    db.execute_batch("PRAGMA journal_mode = WAL; UPDATE schema_migrations SET version = 2;")
+    db.execute_batch("PRAGMA journal_mode = WAL; UPDATE schema_migrations SET version = 999;")
         .unwrap();
     drop(db);
     let before = snapshot_recovery_files(&fixture.path);

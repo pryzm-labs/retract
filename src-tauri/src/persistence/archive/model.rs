@@ -41,6 +41,130 @@ pub(crate) struct ImportBatch {
     pub contents: Vec<retract_domain::ContentRecord>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct ImportBatchV2 {
+    pub records: ImportBatch,
+    pub warnings: Vec<ImportWarningDelta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImportWarningCode {
+    UnknownConversationKind,
+    MissingOptionalContext,
+}
+
+impl ImportWarningCode {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownConversationKind => "unknown_conversation_kind",
+            Self::MissingOptionalContext => "missing_optional_context",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ImportWarningDelta {
+    pub code: ImportWarningCode,
+    pub count: u64,
+}
+
+impl ImportBatchV2 {
+    pub(crate) fn bounded_size(&self) -> Result<usize, ArchiveError> {
+        if self.warnings.len() > MAX_WARNING_CODES {
+            return Err(ArchiveError::LimitExceeded);
+        }
+        for warning in &self.warnings {
+            if warning.count == 0 {
+                return Err(ArchiveError::InvalidRecord);
+            }
+            super::ingest_state::integer(warning.count)?;
+        }
+        if self.records.actors.is_empty()
+            && self.records.conversations.is_empty()
+            && self.records.contents.is_empty()
+        {
+            if self.warnings.is_empty() {
+                return Err(ArchiveError::InvalidRecord);
+            }
+        } else {
+            self.records.bounded_size()?;
+        }
+        encoded_size(
+            &batch_v2_payload(&self.records, &self.warnings),
+            MAX_BATCH_BYTES,
+        )
+    }
+
+    pub(super) fn normalize_provider_fields(&mut self) {
+        for content in &mut self.records.contents {
+            clear_derived_fields(content);
+        }
+    }
+}
+
+pub(super) fn clear_derived_fields(content: &mut retract_domain::ContentRecord) {
+    content.privacy_findings.clear();
+    content.detector_version = None;
+}
+
+pub(super) fn batch_v2_payload<'a>(
+    records: &'a ImportBatch,
+    warnings: &'a [ImportWarningDelta],
+) -> impl Serialize + 'a {
+    // Domain separation and an explicit version ensure v1 digests remain valid
+    // only under their legacy receipt format. Array order is intentionally kept.
+    ("retract.archive.batch", 2_u8, records, warnings)
+}
+
+/// Backend input only: provider payloads are untrusted and the store owns all
+/// account/source UUIDs and canonical identity resolution. No mutation grant.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NewArchiveImport {
+    pub provider: retract_domain::ProviderKey,
+    pub native_identity: VersionedPayload,
+    pub display_name: String,
+    pub username: Option<String>,
+    pub avatar: Option<VersionedPayload>,
+    pub fingerprint: String,
+    pub schema_profile: VersionedPayload,
+    pub parser_policy: String,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl NewArchiveImport {
+    pub(super) fn bounded_size(&self) -> Result<(), ArchiveError> {
+        encoded_size(&self.native_identity, ENVELOPE_BYTES)?;
+        envelope_bounds(self.avatar.as_ref())?;
+        provenance_bounds(&self.fingerprint, &self.schema_profile)?;
+        if self.parser_policy.trim().is_empty()
+            || self.parser_policy.len() > 256
+            || self.parser_policy.chars().any(char::is_control)
+        {
+            return Err(ArchiveError::InvalidRecord);
+        }
+        encoded_size(self, MAX_BATCH_BYTES)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportDisposition {
+    Start,
+    Ready,
+    Busy,
+    RetryRequired,
+}
+
+#[derive(Debug)]
+pub(crate) struct ArchiveImportResolution {
+    pub account: AccountRecord,
+    pub source: SourceRecord,
+    pub checkpoint: ImportCheckpoint,
+    pub disposition: ImportDisposition,
+    pub session: Option<std::sync::Arc<ImportSession>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ImportSession {
     pub(super) id: uuid::Uuid,
@@ -100,6 +224,19 @@ pub(crate) struct ImportCheckpoint {
     pub revision: u64,
     pub progress: ImportProgress,
     pub warnings: Vec<ImportWarning>,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub failure_code: Option<ImportFailureCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImportFailureCode {
+    InvalidArchive,
+    UnsupportedProfile,
+    LimitExceeded,
+    InputChanged,
+    IncompleteSource,
+    StorageFailure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,19 +331,7 @@ impl ImportBatch {
     }
 
     pub(super) fn digest(&self) -> Result<String, ArchiveError> {
-        struct HashWriter(Sha256);
-        impl Write for HashWriter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.update(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut writer = HashWriter(Sha256::new());
-        serde_json::to_writer(&mut writer, self).map_err(|_| ArchiveError::InvalidRecord)?;
-        Ok(hex(&writer.0.finalize()))
+        digest_serialized(self)
     }
 
     pub(super) fn validate(
@@ -394,6 +519,22 @@ pub(super) fn derive_findings(content: &mut retract_domain::ContentRecord) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub(super) fn digest_serialized(value: &impl Serialize) -> Result<String, ArchiveError> {
+    struct HashWriter(Sha256);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, value).map_err(|_| ArchiveError::InvalidRecord)?;
+    Ok(hex(&writer.0.finalize()))
 }
 
 pub(crate) const ENVELOPE_BYTES: usize = 64 * 1024;

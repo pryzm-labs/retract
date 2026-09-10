@@ -51,7 +51,8 @@ impl ArchiveStore {
             tx.execute("INSERT INTO cleanup_tasks(task_id, provider, account_id, source_id, removed_items, state) VALUES(?1, ?2, ?3, ?4, ?5, 'pending')",
                 params![uuid::Uuid::new_v4().to_string(), s[0], s[1], s[2], super::ingest_state::integer(count)?]).map_err(storage)?;
             // Cascades erase observations, attachments, findings, run/session,
-            // receipts and warnings. FTS secure-delete triggers erase terms.
+            // receipts, warning deltas and import identity mappings. FTS
+            // secure-delete triggers erase terms. Cleanup tombstones remain.
             // Deleting the run invalidates every import and query generation.
             tx.execute("DELETE FROM sources WHERE provider=?1 AND account_id=?2 AND source_id=?3", params![s[0], s[1], s[2]]).map_err(storage)?;
             // Build one memory-only membership set, instead of rescanning all

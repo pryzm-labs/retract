@@ -16,6 +16,190 @@ use super::{
 const OLD_DDL: &str =
     "CREATE TABLE legacy_source(account_json TEXT NOT NULL, source_json TEXT NOT NULL) STRICT";
 
+pub(super) fn frozen_v1() -> (Fixture, serde_json::Value) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
+    let encoded = include_str!("../../../test-fixtures/archive-v1/store-v1.b64");
+    let manifest_bytes = include_bytes!("../../../test-fixtures/archive-v1/manifest.json");
+    assert_eq!(
+        Sha256::digest(manifest_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        "44f9812af2f16ef8b1679f504fca16a2a99d6c31b74b67193bffd2a06c39865c"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-fixtures/archive-v1/manifest.json"
+    ))
+    .unwrap();
+    let bytes = STANDARD.decode(encoded.trim()).unwrap();
+    assert_eq!(format!("{}\n", STANDARD.encode(&bytes)), encoded);
+    assert_eq!(
+        bytes.len() as u64,
+        manifest["decodedBytes"].as_u64().unwrap()
+    );
+    assert_eq!(
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+        manifest["decodedSha256"]
+    );
+    assert_eq!(
+        manifest["creatingCommit"],
+        "ae3026b92b2126d63e3ea9983eccb4f86e718108"
+    );
+    assert_eq!(
+        manifest["schemaHash"],
+        "323d5ed46b977547f54c4fae614e0804d0210ce84d6606d6a73645e8d06d9c8b"
+    );
+    assert!(!bytes.starts_with(b"SQLite format 3"));
+    for needle in [
+        "legacyneedle",
+        "discordneedle",
+        "example.test",
+        "invented_owner",
+    ] {
+        assert!(!bytes.windows(needle.len()).any(|p| p == needle.as_bytes()));
+    }
+    let fixture = Fixture::new();
+    fs::write(&fixture.path, bytes).unwrap();
+    fs::set_permissions(&fixture.path, fs::Permissions::from_mode(0o600)).unwrap();
+    (fixture, manifest)
+}
+
+fn migration_validators() -> std::collections::BTreeMap<
+    retract_domain::ProviderKey,
+    std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
+> {
+    let mut registry = validators();
+    registry.insert(
+        "discord".to_owned().try_into().unwrap(),
+        std::sync::Arc::new(crate::providers::discord::DiscordPayloadValidator),
+    );
+    registry
+}
+
+#[test]
+fn frozen_v1_production_migration_preserves_all_rows_generations_and_legacy_replay() {
+    let (fixture, manifest) = frozen_v1();
+    let mut store =
+        ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).unwrap();
+    store
+        .transaction(|tx| {
+            assert_eq!(
+                tx.query_row("SELECT version FROM schema_migrations", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+            for (table, expected) in manifest["logicalRows"].as_object().unwrap() {
+                let width = expected
+                    .as_array()
+                    .unwrap()
+                    .first()
+                    .map_or(0, |r| r.as_array().unwrap().len());
+                let mut query = tx
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                    .unwrap();
+                let actual = query
+                    .query_map([], |row| {
+                        Ok((0..width)
+                            .map(|i| match row.get::<_, rusqlite::types::Value>(i).unwrap() {
+                                rusqlite::types::Value::Null => serde_json::Value::Null,
+                                rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                                rusqlite::types::Value::Text(s) => serde_json::json!(s),
+                                _ => panic!("unexpected fixture value"),
+                            })
+                            .collect::<Vec<_>>())
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(serde_json::json!(actual), *expected, "{table}");
+            }
+            for table in ["archive_import_identities", "import_warning_deltas"] {
+                assert_eq!(
+                    tx.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(
+                tx.query_row(
+                    "SELECT observed_at FROM import_runs WHERE provider='synthetic'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "2026-09-05T00:00:00Z"
+            );
+            assert_eq!(
+                tx.query_row(
+                    "SELECT sum(digest_version) FROM import_batch_receipts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(super::test_support::fts_count(&store, "legacyneedle"), 1);
+    assert_eq!(super::test_support::fts_count(&store, "discordneedle"), 1);
+    let old = super::test_support::checkpoint(&store);
+    assert_eq!(old.progress.phase, super::ImportPhase::Interrupted);
+    let session = store.retry_import(&old).unwrap();
+    let mut input = super::test_support::batch("frozen-v1", "legacyneedle owner@example.test");
+    input.contents[0]
+        .attachments
+        .push(super::test_support::attachment("synthetic passport.txt"));
+    let replay = store.append_batch(&session, 0, input).unwrap();
+    assert_eq!(replay.committed_items, 1);
+    assert_eq!(replay.committed_bytes, old.progress.committed_bytes);
+    drop(store);
+    let bytes = fs::read(&fixture.path).unwrap();
+    assert!(!bytes.starts_with(b"SQLite format 3"));
+    assert!(!bytes.windows(12).any(|p| p == b"legacyneedle"));
+    drop(ArchiveStore::open(fixture.path, key(), migration_validators()).unwrap());
+}
+
+#[test]
+fn frozen_v1_candidate_failures_and_unknown_newer_schema_preserve_original() {
+    for mutation in [
+        "UPDATE schema_migrations SET version=999",
+        "DROP INDEX content_scope_order",
+        "UPDATE import_runs SET committed_bytes=committed_bytes+1",
+        "UPDATE actor_observations SET record_json=json_set(record_json, '$.evidence', 'live')",
+    ] {
+        let (fixture, _) = frozen_v1();
+        let db = open_keyed(&fixture.path, &key(), false).unwrap();
+        db.execute_batch(mutation).unwrap();
+        drop(db);
+        let before = snapshot_recovery_files(&fixture.path);
+        assert!(ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).is_err());
+        assert_eq!(snapshot_recovery_files(&fixture.path), before);
+        if mutation.contains("actor_observations") {
+            let candidate_bytes = fs::read(candidate(&fixture.path)).unwrap();
+            assert!(!candidate_bytes.starts_with(b"SQLite format 3"));
+            assert!(
+                !candidate_bytes
+                    .windows(12)
+                    .any(|part| part == b"legacyneedle")
+            );
+            let original = open_immutable_keyed(&fixture.path, &key()).unwrap();
+            schema::validate_v1(&original).unwrap();
+        }
+    }
+    let (fixture, _) = frozen_v1();
+    let before = snapshot_recovery_files(&fixture.path);
+    // Missing provider validation must be caught before promoting the candidate.
+    assert!(ArchiveStore::open(fixture.path.clone(), key(), validators()).is_err());
+    assert_eq!(snapshot_recovery_files(&fixture.path), before);
+}
+
 fn candidate(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".migration");
