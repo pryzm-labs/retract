@@ -388,6 +388,137 @@ fn equal_grammar_from_distinct_invented_values_is_identical_and_value_free() {
 }
 
 #[test]
+fn exact_path_candidates_distinguish_case_and_filename_boundaries() {
+    for (path, expected) in [
+        ("Account/user.json", vec!["title_case_account", "user_json"]),
+        ("account/user.json", vec!["account", "user_json"]),
+        (
+            "Messages/index.json",
+            vec!["title_case_messages", "index_json"],
+        ),
+        ("messages/index.json", vec!["messages", "index_json"]),
+        (
+            "Messages/c9007199254740993/messages.json",
+            vec![
+                "title_case_messages",
+                "lowercase_c_prefixed_canonical_positive_u64_decimal",
+                "messages_json",
+            ],
+        ),
+        ("user.json", vec!["user_json"]),
+    ] {
+        let mut archive =
+            ArchiveInventory::inspect(Cursor::new(zip(&[(path, b"{}")])), limits(), &NeverCancel)
+                .unwrap();
+        let report = StructureProbe::inspect(&mut archive, &[EntryIndex(0)]).unwrap();
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["entries"][0]["path"],
+            serde_json::json!(expected)
+        );
+    }
+}
+
+#[test]
+fn path_candidate_lookalikes_and_unknown_literals_stay_redacted() {
+    for path in [
+        "ACCOUNT/User.json",
+        "aCcount/USER.JSON",
+        "Accounts/users.json",
+        "XAccount/user.jsonx",
+        "AccountX/.user.json",
+        " Account/user .json",
+        "MESSAGES/unknown.json",
+        "mEssages/private.json",
+        "MessagesX/missing.json",
+        "XMessages/other.json",
+        "MessagesBackup/user.JSON",
+        "ArbitraryRoot/UnknownFile.json",
+        "Unknown/user-json",
+        "UnlistedPrefix/UnknownFilename",
+    ] {
+        let mut archive =
+            ArchiveInventory::inspect(Cursor::new(zip(&[(path, b"{}")])), limits(), &NeverCancel)
+                .unwrap();
+        let report = StructureProbe::inspect(&mut archive, &[EntryIndex(0)]).unwrap();
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["entries"][0]["path"],
+            serde_json::json!(["redacted_segment", "redacted_segment"])
+        );
+    }
+    // Recognition is per segment; none of these paths is an accepted profile rule.
+    for (path, expected) in [
+        ("Unknown/user.json", ["redacted_segment", "user_json"]),
+        (
+            "Account/unknown.json",
+            ["title_case_account", "redacted_segment"],
+        ),
+        (
+            "Messages/unknown.json",
+            ["title_case_messages", "redacted_segment"],
+        ),
+    ] {
+        let mut archive =
+            ArchiveInventory::inspect(Cursor::new(zip(&[(path, b"{}")])), limits(), &NeverCancel)
+                .unwrap();
+        let report = StructureProbe::inspect(&mut archive, &[EntryIndex(0)]).unwrap();
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["entries"][0]["path"],
+            serde_json::json!(expected)
+        );
+    }
+}
+
+#[test]
+fn path_candidates_preserve_equal_shape_json_and_debug_non_disclosure() {
+    let mut representations = Vec::new();
+    for (unknown_path, payload) in [
+        (
+            "Messages/c9007199254740993/PRIVATE_ALPHA_FILE.json",
+            br#"{"field":"SYNTHETIC_ALPHA_PRIVATE_VALUE"}"#.as_slice(),
+        ),
+        (
+            "Messages/c18446744073709551615/PRIVATE_BETA_LONGER_FILE.json",
+            br#"{"field":"SYNTHETIC_BETA_PRIVATE_VALUE_OF_DIFFERENT_SIZE"}"#.as_slice(),
+        ),
+    ] {
+        let mut archive = ArchiveInventory::inspect(
+            Cursor::new(zip(&[
+                ("Account/user.json", payload),
+                (unknown_path, payload),
+            ])),
+            limits(),
+            &NeverCancel,
+        )
+        .unwrap();
+        let report =
+            StructureProbe::inspect(&mut archive, &[EntryIndex(0), EntryIndex(1)]).unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        let debug = format!("{report:?}");
+        assert!(json.contains("title_case_account"));
+        assert!(json.contains("title_case_messages"));
+        assert!(json.contains("user_json"));
+        for sentinel in [
+            "9007199254740993",
+            "18446744073709551615",
+            "PRIVATE_ALPHA_FILE",
+            "PRIVATE_BETA_LONGER_FILE",
+            "SYNTHETIC_ALPHA_PRIVATE_VALUE",
+            "SYNTHETIC_BETA_PRIVATE_VALUE_OF_DIFFERENT_SIZE",
+            "Account/user.json",
+            unknown_path,
+        ] {
+            assert!(!json.contains(sentinel), "JSON leaked a synthetic sentinel");
+            assert!(
+                !debug.contains(sentinel),
+                "Debug leaked a synthetic sentinel"
+            );
+        }
+        representations.push((json, debug));
+    }
+    assert_eq!(representations[0], representations[1]);
+}
+
+#[test]
 fn report_retains_shapes_and_keys_but_never_scalar_values_or_private_paths() {
     let report = probe(br#"[{"text":"SENTINEL_PRIVATE_BODY","id":987654321012345678,"url":"https://private.example/tokenSECRET","timestamp":"2042-01-02T03:04:05Z","flag":true,"nullable":null,"nested":[-928461,2.584739]}]"#, limits()).unwrap();
     let JsonShape::Array(item) = &report.entries[0].shape else {
