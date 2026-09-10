@@ -3,11 +3,12 @@ use crate::{
     limits::{add, bounded, ratio},
 };
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fmt,
     io::{self, Read, Seek, SeekFrom},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -35,6 +36,7 @@ pub struct ArchiveInventory<'a, R> {
     pub(crate) limits: ArchiveLimits,
     pub(crate) cancel: &'a dyn Cancellation,
     observed: u64,
+    reader_cancel: Arc<OnceLock<&'a dyn Cancellation>>,
 }
 
 impl<R> fmt::Debug for ArchiveInventory<'_, R> {
@@ -50,6 +52,44 @@ pub(crate) fn cancelled(cancel: &dyn Cancellation) -> Result<(), ArchiveError> {
         Err(ArchiveError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+pub(crate) struct EitherCancellation<'a>(pub &'a dyn Cancellation, pub &'a dyn Cancellation);
+impl Cancellation for EitherCancellation<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled() || self.1.is_cancelled()
+    }
+}
+
+/// Use at every parsing layer, including immutable buffered passes. Keeps
+/// cancellation distinguishable from JSON/decoder errors without source data.
+pub(crate) struct CancelRead<'a> {
+    reader: &'a mut dyn Read,
+    cancel: &'a dyn Cancellation,
+    failure: &'a Cell<Option<ArchiveError>>,
+}
+impl<'a> CancelRead<'a> {
+    pub(crate) fn new(
+        reader: &'a mut dyn Read,
+        cancel: &'a dyn Cancellation,
+        failure: &'a Cell<Option<ArchiveError>>,
+    ) -> Self {
+        Self {
+            reader,
+            cancel,
+            failure,
+        }
+    }
+}
+impl Read for CancelRead<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        cancelled(self.cancel).map_err(|error| {
+            self.failure.set(Some(error));
+            io::Error::other(error)
+        })?;
+        let length = bytes.len().min(8192);
+        self.reader.read(&mut bytes[..length])
     }
 }
 
@@ -352,6 +392,7 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
         directory.extend_from_slice(&end[..20]);
         directory.extend_from_slice(&[0, 0]);
         let indexing = Arc::new(AtomicBool::new(true));
+        let reader_cancel = Arc::new(OnceLock::new());
         let reader = InventoryReader {
             inner: reader,
             metadata: directory,
@@ -359,6 +400,7 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
             position: 0,
             indexing: Arc::clone(&indexing),
             cancel,
+            reader_cancel: Arc::clone(&reader_cancel),
         };
         let archive = ZipArchive::new(reader).map_err(|_| {
             if cancel.is_cancelled() {
@@ -378,11 +420,23 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
             limits,
             cancel,
             observed: 0,
+            reader_cancel,
         })
     }
 
     pub fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Bound to this retained inventory's lifetime and set once. The original
+    /// token remains authoritative; a typed reader cannot replace either token.
+    pub(crate) fn bind_reader_cancellation(
+        &mut self,
+        cancel: &'a dyn Cancellation,
+    ) -> Result<(), ArchiveError> {
+        self.reader_cancel
+            .set(cancel)
+            .map_err(|_| ArchiveError::InvalidSelection)
     }
 
     /// Selection is by generic extension only; it makes no schema claim.
@@ -470,13 +524,18 @@ struct InventoryReader<'a, R> {
     position: u64,
     indexing: Arc<AtomicBool>,
     cancel: &'a dyn Cancellation,
+    reader_cancel: Arc<OnceLock<&'a dyn Cancellation>>,
 }
 
 impl<R: Read> Read for InventoryReader<'_, R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         cancelled(self.cancel).map_err(io::Error::other)?;
+        if let Some(cancel) = self.reader_cancel.get() {
+            cancelled(*cancel).map_err(io::Error::other)?;
+        }
         if !self.indexing.load(Ordering::Relaxed) {
-            return self.inner.read(output);
+            let length = output.len().min(8192);
+            return self.inner.read(&mut output[..length]);
         }
         let end = self.metadata_start + self.metadata.len() as u64;
         let count = output
@@ -503,6 +562,9 @@ impl<R: Read> Read for InventoryReader<'_, R> {
 impl<R: Seek> Seek for InventoryReader<'_, R> {
     fn seek(&mut self, offset: SeekFrom) -> io::Result<u64> {
         cancelled(self.cancel).map_err(io::Error::other)?;
+        if let Some(cancel) = self.reader_cancel.get() {
+            cancelled(*cancel).map_err(io::Error::other)?;
+        }
         if !self.indexing.load(Ordering::Relaxed) {
             return self.inner.seek(offset);
         }
@@ -580,10 +642,62 @@ mod tests {
             position: 0,
             indexing: Arc::new(AtomicBool::new(true)),
             cancel: &NeverCancel,
+            reader_cancel: Arc::new(OnceLock::new()),
         };
         reader.seek(SeekFrom::End(1)).unwrap();
         assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
         reader.seek(SeekFrom::Start(u64::MAX)).unwrap();
         assert!(reader.seek(SeekFrom::Current(1)).is_err());
+    }
+
+    #[test]
+    fn reader_cancellation_binding_is_once_only_and_preserves_both_authorities() {
+        struct Flag(AtomicBool);
+        impl Cancellation for Flag {
+            fn is_cancelled(&self) -> bool {
+                self.0.load(Ordering::Relaxed)
+            }
+        }
+        for original_cancels in [false, true] {
+            let original = Flag(AtomicBool::new(false));
+            let reader = Flag(AtomicBool::new(false));
+            let mut empty_zip = vec![0; 22];
+            empty_zip[..4].copy_from_slice(b"PK\x05\x06");
+            let mut archive = ArchiveInventory::inspect(
+                Cursor::new(empty_zip),
+                ArchiveLimits::default(),
+                &original,
+            )
+            .unwrap();
+            archive.bind_reader_cancellation(&reader).unwrap();
+            assert_eq!(
+                archive.bind_reader_cancellation(&reader),
+                Err(ArchiveError::InvalidSelection)
+            );
+            assert_eq!(
+                archive.bind_reader_cancellation(&NeverCancel),
+                Err(ArchiveError::InvalidSelection)
+            );
+            if original_cancels {
+                original.0.store(true, Ordering::Relaxed)
+            } else {
+                reader.0.store(true, Ordering::Relaxed)
+            };
+            assert_eq!(
+                archive.bind_reader_cancellation(&NeverCancel),
+                Err(ArchiveError::InvalidSelection)
+            );
+            let mut input = archive.archive.into_inner();
+            // The retained input cannot keep working under either cancelled
+            // authority, even if a replacement token would claim not cancelled.
+            assert_eq!(
+                entry_io_error(input.read(&mut [0; 1]).unwrap_err()),
+                ArchiveError::Cancelled
+            );
+            assert_eq!(
+                entry_io_error(input.seek(SeekFrom::Start(0)).unwrap_err()),
+                ArchiveError::Cancelled
+            );
+        }
     }
 }

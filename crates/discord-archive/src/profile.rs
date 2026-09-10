@@ -3,7 +3,7 @@ use crate::{
     ArchiveError, ArchiveInventory, ArchiveLimits, Cancellation, DecimalGrammar, EntryIndex,
     GrammarSet, JsonShape, StructureProbe, TimestampGrammar, TimestampPrecision,
     TimestampSeparator, TimestampZone,
-    inventory::cancelled,
+    inventory::{CancelRead, EitherCancellation, cancelled},
     limits::{add, bounded},
     structure::{EntryStructure, decimal_grammar, inspect_reader},
 };
@@ -344,6 +344,8 @@ fn read_header_with_cancel<R: Read + Seek>(
     cancel: &dyn Cancellation,
 ) -> Result<HeaderFields, ArchiveError> {
     let limits = archive.limits;
+    let both = EitherCancellation(archive.cancel, cancel);
+    let cancel = &both;
     archive
         .consume(index, |reader| {
             // Validate the SAME immutable bytes that will be decoded, not an earlier
@@ -376,15 +378,11 @@ fn read_header_with_cancel<R: Read + Seek>(
                 bytes.extend_from_slice(&chunk[..count]);
             }
             let before_tokens = *tokens;
-            let shape = inspect_reader(
-                &mut bytes.as_slice(),
-                limits,
-                cancel,
-                retained,
-                tokens,
-                Vec::new(),
-            )
-            .map_err(profile_error)?;
+            let failure = Cell::new(None);
+            let mut input = bytes.as_slice();
+            let mut buffered = CancelRead::new(&mut input, cancel, &failure);
+            let shape = inspect_reader(&mut buffered, limits, cancel, retained, tokens, Vec::new())
+                .map_err(|error| failure.get().unwrap_or_else(|| profile_error(error)))?;
             object_shape(&shape)?;
             drop(shape);
             // Reserve the validated token count for the field-selective pass too.
@@ -392,14 +390,21 @@ fn read_header_with_cancel<R: Read + Seek>(
             let decoding_tokens = *tokens - before_tokens;
             *tokens = add(*tokens, decoding_tokens)?;
             bounded(*tokens, limits.max_json_tokens)?;
-            let failure = Cell::new(None);
+            // from_reader needs scalar scratch storage where from_slice borrowed
+            // the immutable input. Reserve its conservative geometric capacity
+            // against the same cumulative budget before it can allocate.
+            let scratch = (bytes.len() as u64).min(limits.max_scalar_bytes);
+            charge_retained(retained, add(scratch, scratch)?, limits.max_structure_bytes)?;
             let mut state = HeaderState {
                 limits,
                 cancel,
                 retained,
                 failure: &failure,
             };
-            let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+            let mut input = bytes.as_slice();
+            let mut deserializer = serde_json::Deserializer::from_reader(CancelRead::new(
+                &mut input, cancel, &failure,
+            ));
             let header = HeaderSeed {
                 state: &mut state,
                 kind,
@@ -408,7 +413,7 @@ fn read_header_with_cancel<R: Read + Seek>(
             .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidProfile))?;
             deserializer
                 .end()
-                .map_err(|_| ArchiveError::InvalidProfile)?;
+                .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidProfile))?;
             cancelled(cancel)?;
             Ok(header)
         })

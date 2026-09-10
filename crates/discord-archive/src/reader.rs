@@ -3,7 +3,7 @@ use crate::{
     AccountHeader, ArchiveError, ArchiveInventory, ArchiveLimits, Cancellation, ChannelContext,
     DecimalGrammar, DiscordId, EntryIndex, EntryIntegrity, ExportAccount, GuildContext, JsonShape,
     ProfileInspection, ReadSummary, RecordSink, SentMessage,
-    inventory::cancelled,
+    inventory::{CancelRead, EitherCancellation, cancelled},
     limits::{add, bounded},
     profile::{read_account_header, read_context_header},
     record::timestamp_millis,
@@ -14,7 +14,7 @@ use std::{
     cell::Cell,
     collections::BTreeSet,
     fmt,
-    io::{self, Read, Seek},
+    io::{Read, Seek},
 };
 
 struct Selection {
@@ -40,6 +40,7 @@ impl<'a, R: Read + Seek> DiscordArchiveReader<'a, R> {
         cancel: &'a dyn Cancellation,
     ) -> Result<Self, ArchiveError> {
         cancelled(cancel)?;
+        archive.bind_reader_cancellation(cancel)?;
         if profile.schema_key != "discord.data_package.messages_json"
             || profile.schema_version != 1
             || profile.policy_key != "discord.import_policy.v1"
@@ -74,17 +75,14 @@ impl<'a, R: Read + Seek> DiscordArchiveReader<'a, R> {
         if account != profile.account {
             return Err(ArchiveError::InvalidProfile);
         }
+        let both = EitherCancellation(archive.cancel, cancel);
         let shape = archive.consume(profile.index_entry, |reader| {
             let failure = Cell::new(None);
-            let mut reader = CancelRead {
-                reader,
-                cancel,
-                failure: &failure,
-            };
+            let mut reader = CancelRead::new(reader, &both, &failure);
             inspect_reader(
                 &mut reader,
                 limits,
-                cancel,
+                &both,
                 &mut retained,
                 &mut tokens,
                 Vec::new(),
@@ -233,11 +231,12 @@ impl<'a, R: Read + Seek> DiscordArchiveReader<'a, R> {
             };
             cancelled(self.cancel)?;
             sink.begin_channel(channel)?;
+            let both = EitherCancellation(self.archive.cancel, self.cancel);
             let count = self.archive.consume(selection.messages, |reader| {
                 stream(
                     reader,
                     limits,
-                    self.cancel,
+                    &both,
                     &mut self.tokens,
                     &account.id,
                     &id,
@@ -296,11 +295,7 @@ fn stream(
     let failure = Cell::new(None);
     let numeric = Cell::new(DecimalGrammar::Other);
     let guard = LexicalGuard::new(
-        CancelRead {
-            reader,
-            cancel,
-            failure: &failure,
-        },
+        CancelRead::new(reader, cancel, &failure),
         limits,
         &failure,
         &numeric,
@@ -328,20 +323,6 @@ fn stream(
     Ok(count)
 }
 
-struct CancelRead<'a> {
-    reader: &'a mut dyn Read,
-    cancel: &'a dyn Cancellation,
-    failure: &'a Cell<Option<ArchiveError>>,
-}
-impl Read for CancelRead<'_> {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        cancelled(self.cancel).map_err(|error| {
-            self.failure.set(Some(error));
-            io::Error::other(error)
-        })?;
-        self.reader.read(bytes)
-    }
-}
 struct Transcript<'a, 'b> {
     state: &'a mut State<'b>,
     account: &'a DiscordId,
