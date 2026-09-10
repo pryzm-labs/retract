@@ -27,13 +27,16 @@ use tokio::sync::RwLock;
 /// inspecting workers, invalidating the old service and installing a replacement.
 pub(crate) struct RuntimeState {
     pub(crate) service: RwLock<Arc<ProviderService>>,
-    pub(crate) archives: persistence::archive::ArchiveOwner,
+    pub(crate) archives: Arc<persistence::archive::ArchiveOwner>,
+    pub(crate) discord_imports: providers::discord::import::DiscordImportOwner,
 }
 impl RuntimeState {
     /// Application exit owns the credential-clear callback; tests inject it.
     pub(crate) async fn shutdown(&self, clear_cached_secrets: impl FnOnce()) {
+        self.discord_imports.reject_new_starts();
         let current = self.service.write().await;
         current.shutdown().await;
+        self.discord_imports.shutdown().await;
         self.archives.shutdown().await;
         clear_cached_secrets();
         // Queued settings can acquire coordination only after all stores are
@@ -43,9 +46,21 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub(crate) fn new(service: Arc<ProviderService>) -> Self {
+        Self::with_archives(
+            service,
+            persistence::archive::ArchiveOwner::application(std::path::PathBuf::new()),
+        )
+    }
+
+    fn with_archives(
+        service: Arc<ProviderService>,
+        archives: persistence::archive::ArchiveOwner,
+    ) -> Self {
+        let archives = Arc::new(archives);
         Self {
             service: RwLock::new(service),
-            archives: persistence::archive::ArchiveOwner::application(std::path::PathBuf::new()),
+            discord_imports: providers::discord::import::DiscordImportOwner::new(archives.clone()),
+            archives,
         }
     }
 }
@@ -113,10 +128,7 @@ pub fn run() {
                 .unwrap_or_else(|error| {
                     ProviderService::failed(providers::telegram::diagnostics::boundary_error(error))
                 });
-            app.manage(Arc::new(RuntimeState {
-                service: RwLock::new(service),
-                archives,
-            }));
+            app.manage(Arc::new(RuntimeState::with_archives(service, archives)));
             Ok(())
         })
         .build(tauri::generate_context!())

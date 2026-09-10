@@ -1,13 +1,16 @@
-//! Backend-only archive codecs. No usable provider, connection or action ports.
-// The coordinator consumes these entry points in the next implementation stage.
+//! Backend-only archive normalization and owned import. No usable provider ports.
+// Kept backend-only until a separately reviewed UI/IPC integration.
 #![allow(dead_code)]
+pub(crate) mod import;
 pub(crate) mod locators;
 pub(crate) mod model;
 mod normalize;
+pub(crate) mod progress;
 
 pub(crate) use locators::DiscordPayloadValidator;
-#[allow(unused_imports)] // Backend coordinator is added in the next stage.
 pub(crate) use normalize::DiscordNormalizer;
 
+#[cfg(test)]
+pub(crate) mod import_tests;
 #[cfg(test)]
 mod tests;
