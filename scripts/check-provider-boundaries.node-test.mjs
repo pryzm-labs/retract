@@ -74,6 +74,69 @@ test("Discord importer remains unavailable to commands and provider registration
   }
 });
 
+test("actual compatibility IPC modules reject Discord owner access through RuntimeState", () => {
+  for (const name of ["compatibility/commands_v2.rs", "compatibility/model_v2.rs", "compatibility/mod.rs", "compatibility/archive/commands.rs"]) {
+    const root = fixture();
+    write(root, name, `
+      use crate::RuntimeState;
+      #[tauri::command]
+      pub async fn import_archive(runtime: tauri::State<'_, Arc<RuntimeState>>) {
+        runtime.discord_imports.start(file).await;
+      }
+    `);
+    const result = check(root);
+    assert.equal(result.status, 1, name);
+    assert.match(result.stderr, /Discord importer is backend-only/);
+  }
+});
+
+test("actual handler registration locations reject Discord command exposure", () => {
+  for (const name of ["compatibility/commands_v2.rs", "lib.rs", "ipc/registration.rs"]) {
+    for (const source of [
+      "fn register(builder: Builder) { builder.invoke_handler(tauri::generate_handler![import_discord_v2]); }",
+      "fn register(builder: Builder) { builder.invoke_handler(discord_commands::dispatch); }",
+      "#[tauri::command] async fn discord_import_v2() {}",
+      "#[tauri::command] async fn import_archive(runtime: State<'_, Arc<RuntimeState>>) { runtime.discord_imports.start(file).await; }",
+    ]) {
+      const root = fixture();
+      write(root, name, source);
+      const result = check(root);
+      assert.equal(result.status, 1, `${name}: ${source}`);
+      assert.match(result.stderr, /Discord importer is backend-only/);
+    }
+  }
+});
+
+test("lib entry point cannot delegate registration to a Discord command module", () => {
+  const root = fixture();
+  write(root, "lib.rs", "pub fn run() { let app = discord_commands::register(tauri::Builder::default()); }");
+  const result = check(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Discord importer is backend-only/);
+});
+
+test("IPC guard permits inert owner lifecycle, documentation, literals and test-only modules", () => {
+  const root = fixture();
+  write(root, "lib.rs", `
+    struct RuntimeState { discord_imports: DiscordImportOwner }
+    impl RuntimeState { async fn shutdown(&self) { self.discord_imports.shutdown().await; } }
+    pub fn run() { compatibility::commands_v2::register(tauri::Builder::default()); }
+  `);
+  write(root, "compatibility/mod.rs", "pub mod commands_v2; #[cfg(test)] mod fixtures;");
+  write(root, "compatibility/fixtures.rs", "fn fixture(runtime: RuntimeState) { runtime.discord_imports.start(file); }");
+  write(root, "compatibility/tests.rs", "fn discord_import_remains_unavailable() {}");
+  write(root, "compatibility/commands_v2.rs", `
+    /// Discord importer remains unavailable: runtime.discord_imports.start(file).
+    /* Outer docs /* nested */ DiscordImportOwner is not used here. */
+    #[tauri::command]
+    fn snapshot() { let help = "Discord importer is unavailable"; let raw = r#"discord_imports"#; }
+    fn register(builder: Builder) { builder.invoke_handler(tauri::generate_handler![snapshot]); }
+    #[cfg(test)] mod tests { fn discord_import_stays_unavailable() {} }
+  `);
+  const result = check(root);
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("parser ZIP dependency cannot silently enable codecs or drift from the reviewed pin", () => {
   for (const dependency of ['zip = "8"', 'zip = { version = "=8.6.0", features = ["aes-crypto"] }', 'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }']) {
     const root = fixture();
