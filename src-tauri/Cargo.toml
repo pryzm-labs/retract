@@ -14,10 +14,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 archive-bench = []
+discord-import-bench = []
 
 [[example]]
 name = "archive_storage_bench"
 required-features = ["archive-bench"]
+
+[[example]]
+name = "discord_import_bench"
+required-features = ["discord-import-bench"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -19,6 +19,7 @@ pub use record::{
     RecordSink, SentMessage,
 };
 pub use structure::{
-    DecimalGrammar, GrammarSet, JsonShape, PathToken, ScalarGrammars, StructureProbe,
-    StructureReport, TimestampGrammar, TimestampPrecision, TimestampSeparator, TimestampZone,
+    DecimalGrammar, EntryStructure, GrammarSet, JsonShape, NodeSummary, PathToken, ScalarGrammars,
+    StructureProbe, StructureReport, TimestampGrammar, TimestampPrecision, TimestampSeparator,
+    TimestampZone, TypeCounts,
 };

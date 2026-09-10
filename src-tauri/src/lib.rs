@@ -14,6 +14,8 @@ mod secure_store;
 mod setup_gateway;
 #[cfg(feature = "archive-bench")]
 pub use persistence::archive::benchmark::run_archive_storage_benchmark;
+#[cfg(feature = "discord-import-bench")]
+pub use providers::discord::benchmark::run_discord_import_benchmark;
 
 use provider_service::ProviderService;
 use std::sync::{

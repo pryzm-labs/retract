@@ -44,6 +44,47 @@ test("archive parser accepts ordinary Read and Seek code", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("Discord backend and benchmark reject network, browser, credentials and Telegram coupling", () => {
+  for (const name of ["import", "normalize", "locators", "benchmark"]) {
+    for (const source of ["use reqwest::Client;", "use std::net::{TcpStream};", "use webbrowser::open;", "use crate::secure_store::load_archive_index_key;", "use security_framework::passwords;", "use crate::providers::telegram::model;"]) {
+      const root = fixture();
+      write(root, `providers/discord/${name}.rs`, source);
+      const result = check(root);
+      assert.equal(result.status, 1, `${name}: ${source}`);
+      assert.match(result.stderr, /Discord backend isolation/);
+    }
+  }
+});
+
+test("Discord guard accepts content-free ownership documentation", () => {
+  const root = fixture();
+  write(root, "providers/discord/import.rs", "/// Construction performs no credential operations.\npub struct Owner;\n");
+  assert.equal(check(root).status, 0);
+});
+
+test("Discord importer remains unavailable to commands and provider registration", () => {
+  for (const name of ["commands.rs", "commands/archive.rs", "providers/registry.rs"]) {
+    for (const source of ["use crate::providers::discord::import::DiscordImportOwner;", "use crate::providers::{discord::import};", "owner.discord_imports.start(file).await;"]) {
+      const root = fixture();
+      write(root, name, source);
+      const result = check(root);
+      assert.equal(result.status, 1, `${name}: ${source}`);
+      assert.match(result.stderr, /Discord importer is backend-only/);
+    }
+  }
+});
+
+test("parser ZIP dependency cannot silently enable codecs or drift from the reviewed pin", () => {
+  for (const dependency of ['zip = "8"', 'zip = { version = "=8.6.0", features = ["aes-crypto"] }', 'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }']) {
+    const root = fixture();
+    write(root, "parser/src/lib.rs", "use std::io::Read;");
+    write(root, "parser/Cargo.toml", `[dependencies]\n${dependency}\n`);
+    const result = check(root, join(root, "parser/src"));
+    assert.equal(result.status, 1, dependency);
+    assert.match(result.stderr, /reviewed ZIP dependency/);
+  }
+});
+
 test("archive parser rejects network, UI, credentials, provider, SQL and browser coupling", () => {
   for (const source of [
     "use reqwest::Client;", "use hyper::Client;", "use ureq::Agent;", "use std::net::TcpStream;",

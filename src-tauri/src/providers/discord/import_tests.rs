@@ -330,6 +330,37 @@ fn discord_import_installation_precedes_parser_and_key_work_and_stable_hardlinks
 }
 
 use super::import::{DiscordImportError, TestPoint};
+
+#[test]
+fn discord_import_failure_diagnostics_exclude_synthetic_content_and_selected_path() {
+    runtime().block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let archives = archive(&root.join("content.db"));
+        let imports = DiscordImportOwner::new(archives.clone());
+        let sentinel = "SYNTHETIC_DIAGNOSTIC_SENTINEL@example.invalid";
+        let path = root.join("synthetic-diagnostic-sentinel.zip");
+        let handle = imports
+            .start(selected(&path, &package(3, sentinel, true)))
+            .await
+            .unwrap();
+        let error = handle.wait().await.unwrap_err();
+        assert_eq!(error, DiscordImportError::InvalidArchive);
+        let diagnostic = format!("{error:?} {error} {:?}", handle.latest_progress());
+        for excluded in [
+            sentinel,
+            "synthetic-diagnostic-sentinel",
+            root.to_str().unwrap(),
+            "198593183009",
+            "invented_owner",
+        ] {
+            assert!(!diagnostic.contains(excluded));
+        }
+        assert_eq!(handle.latest_progress().phase, DiscordImportPhase::Failed);
+        imports.shutdown().await;
+        archives.shutdown().await;
+    });
+}
 use crate::persistence::archive::{ArchiveError, ImportPhase};
 use std::sync::{
     Condvar, Mutex,

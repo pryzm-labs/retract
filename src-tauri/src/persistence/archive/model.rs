@@ -71,7 +71,12 @@ pub(crate) struct ImportWarningDelta {
 
 impl ImportBatchV2 {
     pub(crate) fn bounded_size(&self) -> Result<usize, ArchiveError> {
-        if self.warnings.len() > MAX_WARNING_CODES {
+        self.bounded_size_with(AdmissionLimits::default())
+    }
+
+    pub(super) fn bounded_size_with(&self, limits: AdmissionLimits) -> Result<usize, ArchiveError> {
+        limits.validate()?;
+        if self.warnings.len() > limits.warning_codes {
             return Err(ArchiveError::LimitExceeded);
         }
         for warning in &self.warnings {
@@ -88,11 +93,11 @@ impl ImportBatchV2 {
                 return Err(ArchiveError::InvalidRecord);
             }
         } else {
-            self.records.bounded_size()?;
+            self.records.bounded_size_with(limits)?;
         }
         encoded_size(
             &batch_v2_payload(&self.records, &self.warnings),
-            MAX_BATCH_BYTES,
+            limits.bytes,
         )
     }
 
@@ -252,6 +257,48 @@ pub(crate) const MAX_ATTACHMENTS: usize = 100;
 pub(crate) const MAX_WARNING_CODES: usize = 32;
 pub(crate) const MAX_QUEUED_BATCHES: usize = 2;
 
+/// Internal admission parameters for small boundary tests. Production callers
+/// use Default, which draws exclusively from the authoritative named ceilings.
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionLimits {
+    pub records: usize,
+    pub bytes: usize,
+    pub text: usize,
+    pub envelope: usize,
+    pub attachments: usize,
+    pub warning_codes: usize,
+}
+impl Default for AdmissionLimits {
+    fn default() -> Self {
+        Self {
+            records: MAX_BATCH_RECORDS,
+            bytes: MAX_BATCH_BYTES,
+            text: MAX_SEARCHABLE_BYTES,
+            envelope: ENVELOPE_BYTES,
+            attachments: MAX_ATTACHMENTS,
+            warning_codes: MAX_WARNING_CODES,
+        }
+    }
+}
+impl AdmissionLimits {
+    fn validate(self) -> Result<(), ArchiveError> {
+        let ceiling = Self::default();
+        for (value, maximum) in [
+            (self.records, ceiling.records),
+            (self.bytes, ceiling.bytes),
+            (self.text, ceiling.text),
+            (self.envelope, ceiling.envelope),
+            (self.attachments, ceiling.attachments),
+            (self.warning_codes, ceiling.warning_codes),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(ArchiveError::LimitExceeded);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ImportLimits {
     pub items: u64,
@@ -271,6 +318,11 @@ impl ImportBatch {
     /// Worker callers can reject a batch before copying or queueing it. No
     /// encoded buffer or detector input is allocated until these bounds pass.
     pub(crate) fn bounded_size(&self) -> Result<usize, ArchiveError> {
+        self.bounded_size_with(AdmissionLimits::default())
+    }
+
+    pub(super) fn bounded_size_with(&self, limits: AdmissionLimits) -> Result<usize, ArchiveError> {
+        limits.validate()?;
         let count = self.conversations.iter().try_fold(
             self.contents
                 .len()
@@ -286,28 +338,28 @@ impl ImportBatch {
         if count == 0 {
             return Err(ArchiveError::InvalidRecord);
         }
-        if count > MAX_BATCH_RECORDS {
+        if count > limits.records {
             return Err(ArchiveError::LimitExceeded);
         }
-        self.item_bounds()?;
-        encoded_size(self, MAX_BATCH_BYTES)
+        self.item_bounds(limits)?;
+        encoded_size(self, limits.bytes)
     }
 
-    fn item_bounds(&self) -> Result<(), ArchiveError> {
+    fn item_bounds(&self, limits: AdmissionLimits) -> Result<(), ArchiveError> {
         for actor in self
             .actors
             .iter()
             .chain(self.conversations.iter().flat_map(|c| &c.participants))
         {
-            resource_bounds(&actor.resource)?;
-            envelope_bounds(actor.avatar.as_ref())?;
+            encoded_size(&actor.resource, limits.envelope)?;
+            envelope_bounds_with(actor.avatar.as_ref(), limits.envelope)?;
         }
         for conversation in &self.conversations {
-            resource_bounds(&conversation.resource)?;
-            envelope_bounds(conversation.provider_metadata.as_ref())?;
+            encoded_size(&conversation.resource, limits.envelope)?;
+            envelope_bounds_with(conversation.provider_metadata.as_ref(), limits.envelope)?;
         }
         for content in &self.contents {
-            if content.attachments.len() > MAX_ATTACHMENTS {
+            if content.attachments.len() > limits.attachments {
                 return Err(ArchiveError::LimitExceeded);
             }
             let searchable_bytes = content.attachments.iter().try_fold(
@@ -318,13 +370,13 @@ impl ImportBatch {
                         .ok_or(ArchiveError::LimitExceeded)
                 },
             )?;
-            if searchable_bytes > MAX_SEARCHABLE_BYTES {
+            if searchable_bytes > limits.text {
                 return Err(ArchiveError::LimitExceeded);
             }
-            resource_bounds(&content.resource)?;
-            envelope_bounds(content.provider_metadata.as_ref())?;
+            encoded_size(&content.resource, limits.envelope)?;
+            envelope_bounds_with(content.provider_metadata.as_ref(), limits.envelope)?;
             for attachment in &content.attachments {
-                envelope_bounds(Some(&attachment.locator))?;
+                envelope_bounds_with(Some(&attachment.locator), limits.envelope)?;
             }
         }
         Ok(())
@@ -452,8 +504,15 @@ fn resource_bounds(resource: &ProviderResourceRef) -> Result<(), ArchiveError> {
 }
 
 fn envelope_bounds(envelope: Option<&VersionedPayload>) -> Result<(), ArchiveError> {
+    envelope_bounds_with(envelope, ENVELOPE_BYTES)
+}
+
+fn envelope_bounds_with(
+    envelope: Option<&VersionedPayload>,
+    maximum: usize,
+) -> Result<(), ArchiveError> {
     if let Some(envelope) = envelope {
-        encoded_size(envelope, ENVELOPE_BYTES)?;
+        encoded_size(envelope, maximum)?;
     }
     Ok(())
 }

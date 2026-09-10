@@ -91,6 +91,20 @@ for (const path of rustFiles(sourceRoot)) {
   );
 }
 
+for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
+  if (path.endsWith("_tests.rs") || path.endsWith("/tests.rs")) continue;
+  reject(path,
+    /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|tauri|keyring|security_framework|credentials|secure_store|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
+    "Discord backend isolation forbids network, UI, credential, Telegram and process/browser APIs");
+}
+for (const path of rustFiles(sourceRoot).filter((path) => {
+  const name = display(path);
+  return name === "commands.rs" || name.startsWith("commands/") || name === "providers/registry.rs";
+})) {
+  reject(path, /\b(?:discord|discord_imports|DiscordImportOwner|DiscordImportHandle|run_discord_import_benchmark)\b/,
+    "Discord importer is backend-only and cannot enter commands or provider registration");
+}
+
 // Source checks catch accidental coupling, not hostile obfuscation or arbitrary
 // code execution. Production parser code has no filesystem or runtime services.
 for (const path of rustFiles(archiveRoot)) {
@@ -119,6 +133,9 @@ if (existsSync(archiveManifest)) {
       const dependency = line.match(/^([A-Za-z0-9_-]+)\s*=/)?.[1];
       if (!allowed.has(dependency) || /\b(?:package|path|git|workspace)\s*=/.test(line)) {
         failures.push("archive parser dependency is outside the reviewed allowlist");
+      }
+      if (dependency === "zip" && !/^zip\s*=\s*\{\s*version\s*=\s*"=8\.6\.0",\s*default-features\s*=\s*false,\s*features\s*=\s*\["deflate-flate2-zlib-rs"\]\s*\}\s*(?:#.*)?$/.test(line)) {
+        failures.push("archive parser must preserve the reviewed ZIP dependency pin and codec features");
       }
     }
   }

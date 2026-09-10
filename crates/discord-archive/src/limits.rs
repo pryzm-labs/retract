@@ -101,3 +101,45 @@ pub(crate) fn ratio(expanded: u64, compressed: u64, maximum: u64) -> Result<(), 
         .ok_or(ArchiveError::LimitExceeded)?;
     bounded(expanded, allowed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every independently configurable ceiling must reject both disabling
+    // and raising it. The integration suites exercise lower injected values.
+    #[test]
+    fn every_production_ceiling_is_positive_and_only_lowerable() {
+        let defaults = ArchiveLimits::default();
+        macro_rules! check {
+            ($($field:ident),+ $(,)?) => { $(
+                let mut lower = defaults;
+                lower.$field = 1;
+                assert_eq!(lower.validate(), Ok(()), stringify!($field));
+                lower.$field = 0;
+                assert_eq!(lower.validate(), Err(ArchiveError::InvalidLimits), stringify!($field));
+                lower.$field = defaults.$field + 1;
+                assert_eq!(lower.validate(), Err(ArchiveError::InvalidLimits), stringify!($field));
+            )+ };
+        }
+        check!(
+            max_archive_bytes,
+            max_directory_bytes,
+            max_entries,
+            max_path_bytes,
+            max_path_components,
+            max_entry_bytes,
+            max_total_declared_bytes,
+            max_observed_bytes,
+            max_expansion_ratio,
+            max_json_depth,
+            max_scalar_bytes,
+            max_raw_record_bytes,
+            max_decoded_record_bytes,
+            max_json_tokens,
+            max_display_bytes,
+            max_selected_contexts,
+            max_structure_bytes
+        );
+    }
+}

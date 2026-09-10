@@ -316,6 +316,13 @@ Avoid features that create hidden or automatic behavior: silent background delet
 - [ ] Publish an authorized branch/PR and run native macOS CI on the exact published revision.
 - [ ] Execute the separately authorized disposable test-DC matrix before destructive release approval.
 
+### Tracked Discord backend stage
+
+- [x] Implement the bounded, versioned Discord archive reader, normalized records, encrypted import migration, owned coordinator, replay, search/findings, restart and local-source removal. Acceptance uses synthetic inputs and the opt-in generated resource benchmark.
+- [ ] Complete the independent whole-branch review and native macOS gate for the final revision.
+- [ ] Build and test Discord source-selection, review and remediation UI before enabling user-facing availability.
+- [ ] Perform separately authorized real private-export validation. Publication, merge and release remain separate decisions.
+
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 
 - Obtain app API credentials and clarify public-distribution compliance.

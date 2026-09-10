@@ -768,11 +768,57 @@ fn record_budgets_reset_between_streamed_items() {
 #[test]
 fn retained_structure_budget_bounds_unique_keys_across_records() {
     let mut policy = limits();
-    policy.max_structure_bytes = 60;
+    // Discover the one-shape boundary without coupling this regression to the
+    // layout/accounting of a report node. Repeated shapes fit; new shapes don't.
+    policy.max_structure_bytes = (1..=policy.max_structure_bytes)
+        .find(|ceiling| {
+            probe(
+                br#"[{"first":0}]"#,
+                discord_archive::ArchiveLimits {
+                    max_structure_bytes: *ceiling,
+                    ..policy
+                },
+            )
+            .is_ok()
+        })
+        .unwrap();
+    assert!(probe(br#"[{"first":0},{"first":0},{"first":0}]"#, policy).is_ok());
     assert_eq!(
         probe(br#"[{"first":0},{"second":0},{"third":0}]"#, policy).unwrap_err(),
         ArchiveError::LimitExceeded
     );
+}
+
+#[test]
+fn grammar_members_consume_retained_budget_incrementally() {
+    let mut policy = limits();
+    policy.max_structure_bytes = (1..=policy.max_structure_bytes)
+        .find(|ceiling| {
+            probe(
+                br#"["1","2"]"#,
+                discord_archive::ArchiveLimits {
+                    max_structure_bytes: *ceiling,
+                    ..policy
+                },
+            )
+            .is_ok()
+        })
+        .unwrap();
+    assert!(probe(br#"["1","2","3"]"#, policy).is_ok());
+    assert_eq!(
+        probe(br#"["1","2","0"]"#, policy).unwrap_err(),
+        ArchiveError::LimitExceeded
+    );
+}
+
+#[test]
+fn report_fields_are_nameable_by_public_api_consumers() {
+    fn consume(entry: &discord_archive::EntryStructure) -> &discord_archive::TypeCounts {
+        let node: &discord_archive::NodeSummary = &entry.nodes[0];
+        &node.types
+    }
+    let report = probe(br#"{"synthetic":null}"#, limits()).unwrap();
+    assert_eq!(consume(&report.entries[0]).object, 1);
 }
 
 #[test]

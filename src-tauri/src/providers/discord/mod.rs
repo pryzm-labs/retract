@@ -7,6 +7,9 @@ pub(crate) mod model;
 mod normalize;
 pub(crate) mod progress;
 
+#[cfg(feature = "discord-import-bench")]
+pub(crate) mod benchmark;
+
 pub(crate) use locators::DiscordPayloadValidator;
 pub(crate) use normalize::DiscordNormalizer;
 
