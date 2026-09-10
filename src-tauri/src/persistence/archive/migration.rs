@@ -54,6 +54,11 @@ fn migrate_locked(
         let mut new = codec::open_keyed(&candidate, key, false)?;
         schema::initialize(&mut new)?;
         populate(old, &mut new)?;
+        // Reopen after population so validation sees durable candidate state,
+        // including copied FTS shadow data, never a virtual-table write cache.
+        codec::validate_connection_settings(&new)?;
+        new.close().map_err(|_| ArchiveError::StorageFailure)?;
+        let new = codec::open_keyed(&candidate, key, false)?;
         validate_candidate(&new)?;
         validate_encrypted_candidate(&new)?;
         new.execute(
@@ -98,6 +103,7 @@ pub(super) fn upgrade_v1(
         key,
         |old| {
             schema::validate_v1(old)?;
+            validate_sqlite_indexes(old)?;
             store::validate_registrations(old, validators)?;
             super::ingest_state::validate_runs_v1(old, validators)
         },
@@ -105,72 +111,9 @@ pub(super) fn upgrade_v1(
         |new| {
             store::validate_registrations(new, validators)?;
             super::ingest_state::validate_runs(new, validators)?;
-            validate_observations(new, validators)
+            super::migration_validation::validate(new, validators)
         },
     )
-}
-
-fn validate_observations(
-    connection: &Connection,
-    validators: &std::collections::BTreeMap<
-        retract_domain::ProviderKey,
-        std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
-    >,
-) -> Result<(), ArchiveError> {
-    use super::{ingest_state::storage, model};
-    use retract_domain::{ActorRecord, ContentRecord, ConversationRecord};
-    for table in [
-        "actor_observations",
-        "conversation_observations",
-        "content_observations",
-    ] {
-        let mut query = connection
-            .prepare(&format!(
-                "SELECT provider, account_id, source_id, resource_id, record_json FROM {table}"
-            ))
-            .map_err(storage)?;
-        let mut rows = query.query([]).map_err(storage)?;
-        while let Some(row) = rows.next().map_err(storage)? {
-            let json: String = row.get(4).map_err(storage)?;
-            let mut batch = model::ImportBatch::default();
-            let (scope, id) = match table {
-                "actor_observations" => {
-                    let record: ActorRecord = model::decode(&json)?;
-                    let out = (record.scope.clone(), *record.id.as_uuid());
-                    batch.actors.push(record);
-                    out
-                }
-                "conversation_observations" => {
-                    let record: ConversationRecord = model::decode(&json)?;
-                    let out = (record.scope.clone(), *record.id.as_uuid());
-                    batch.conversations.push(record);
-                    out
-                }
-                _ => {
-                    let record: ContentRecord = model::decode(&json)?;
-                    let out = (record.scope.clone(), *record.id.as_uuid());
-                    batch.contents.push(record);
-                    out
-                }
-            };
-            if row.get::<_, String>(0).map_err(storage)? != scope.provider.as_str()
-                || row.get::<_, String>(1).map_err(storage)?
-                    != scope.account_id.as_uuid().to_string()
-                || row.get::<_, String>(2).map_err(storage)?
-                    != scope.source_id.as_uuid().to_string()
-                || row.get::<_, String>(3).map_err(storage)? != id.to_string()
-            {
-                return Err(ArchiveError::InvalidStore);
-            }
-            // The batch's encoded input ceiling excludes store-derived findings.
-            // Preserve persisted findings and their detector version verbatim.
-            let validator = validators
-                .get(&scope.provider)
-                .ok_or(ArchiveError::InvalidRecord)?;
-            batch.validate(&scope, validator.as_ref())?;
-        }
-    }
-    Ok(())
 }
 
 fn populate_v2(old: &Connection, new: &mut Connection) -> Result<(), ArchiveError> {
@@ -267,12 +210,70 @@ fn populate_v2(old: &Connection, new: &mut Connection) -> Result<(), ArchiveErro
         }
     }
     tx.execute_batch(&cleanup_trigger).map_err(storage)?;
+    tx.commit().map_err(storage)?;
+    // Preserve the old FTS index, not a regenerated substitute. Copy after all
+    // content-trigger writes commit; reopen before the ordinary FTS integrity
+    // command verifies postings, row IDs, columns and document token counts.
+    // These four shadow tables have identical authenticated v1/v2 DDL.
+    let tx = new.transaction().map_err(storage)?;
+    for (table, order) in [
+        ("content_fts_data", "id"),
+        ("content_fts_idx", "segid, term"),
+        ("content_fts_docsize", "id"),
+        ("content_fts_config", "k"),
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), [])
+            .map_err(storage)?;
+        let mut query = old
+            .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
+            .map_err(storage)?;
+        let width = query.column_count();
+        let mut insert = tx
+            .prepare(&format!(
+                "INSERT INTO {table} VALUES({})",
+                vec!["?"; width].join(",")
+            ))
+            .map_err(storage)?;
+        let mut rows = query.query([]).map_err(storage)?;
+        while let Some(row) = rows.next().map_err(storage)? {
+            let values = (0..width)
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            insert
+                .execute(rusqlite::params_from_iter(values))
+                .map_err(storage)?;
+        }
+    }
     tx.commit().map_err(storage)
+}
+
+fn validate_sqlite_indexes(connection: &Connection) -> Result<(), ArchiveError> {
+    // Unlike quick_check, this also checks expression/index entries against
+    // table records (including the conversation-parent JSON expression index).
+    let mut query = connection
+        .prepare("PRAGMA integrity_check")
+        .map_err(super::ingest_state::storage)?;
+    let mut rows = query.query([]).map_err(super::ingest_state::storage)?;
+    let row = rows
+        .next()
+        .map_err(super::ingest_state::storage)?
+        .ok_or(ArchiveError::InvalidStore)?;
+    if row
+        .get::<_, String>(0)
+        .map_err(super::ingest_state::storage)?
+        != "ok"
+        || rows.next().map_err(super::ingest_state::storage)?.is_some()
+    {
+        return Err(ArchiveError::InvalidStore);
+    }
+    Ok(())
 }
 
 fn validate_encrypted_candidate(connection: &Connection) -> Result<(), ArchiveError> {
     codec::validate_connection_settings(connection)?;
     schema::validate(connection)?;
+    validate_sqlite_indexes(connection)?;
     let corrupt = connection
         .prepare("PRAGMA cipher_integrity_check")
         .map_err(|_| ArchiveError::InvalidStore)?

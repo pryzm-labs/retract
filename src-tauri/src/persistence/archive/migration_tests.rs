@@ -200,6 +200,296 @@ fn frozen_v1_candidate_failures_and_unknown_newer_schema_preserve_original() {
     assert_eq!(snapshot_recovery_files(&fixture.path), before);
 }
 
+#[test]
+fn frozen_v1_boundary_provider_input_migrates_without_recomputing_historical_findings() {
+    let (fixture, _) = frozen_v1();
+    let db = open_keyed(&fixture.path, &key(), false).unwrap();
+    schema::validate_v1(&db).unwrap();
+    let encoded: String = db
+        .query_row(
+            "SELECT record_json FROM content_observations WHERE provider='discord'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut content: retract_domain::ContentRecord = model::decode(&encoded).unwrap();
+    let findings = content.privacy_findings.clone();
+    // Deliberately not today's detector fingerprint: recomputation must fail
+    // the preservation assertion even if the resulting categories are equal.
+    let detector = Some(format!("cleaner-sha256:{}", "b".repeat(64)));
+    model::clear_derived_fields(&mut content);
+    let mut input = model::ImportBatch {
+        contents: vec![content],
+        ..Default::default()
+    };
+    let remaining = super::MAX_BATCH_BYTES - input.bounded_size().unwrap();
+    input.contents[0]
+        .searchable_text
+        .push_str(&"\0".repeat(remaining / 6));
+    input.contents[0]
+        .searchable_text
+        .push_str(&"x".repeat(remaining % 6));
+    assert_eq!(input.bounded_size().unwrap(), 4 * 1024 * 1024);
+    input
+        .validate(
+            &input.contents[0].scope,
+            &crate::providers::discord::DiscordPayloadValidator,
+        )
+        .unwrap();
+    input.contents[0].searchable_text.push('x');
+    assert_eq!(input.bounded_size(), Err(ArchiveError::LimitExceeded));
+    input.contents[0].searchable_text.pop();
+    let digest = input.digest().unwrap();
+    let mut persisted = input.contents.remove(0);
+    persisted.privacy_findings = findings.clone();
+    persisted.detector_version = detector.clone();
+    assert!(model::encode(&persisted).unwrap().len() > 4 * 1024 * 1024);
+    // Synthesize a valid old ingestion result inside the authenticated frozen
+    // v1 schema. Keep the historical findings/version; don't run a detector.
+    let expected = model::encode(&persisted).unwrap();
+    db.execute("UPDATE content_observations SET searchable_text=?1, record_json=?2 WHERE provider='discord'", rusqlite::params![persisted.searchable_text, expected]).unwrap();
+    db.execute(
+        "UPDATE privacy_findings SET detector_version=? WHERE provider='discord'",
+        [&detector],
+    )
+    .unwrap();
+    // Model a second legacy upsert batch before finalization, retaining the
+    // first receipt that supplied this source's actor/conversation records.
+    db.execute("UPDATE import_runs SET committed_bytes=committed_bytes+?1, next_batch=next_batch+1, revision=revision+1 WHERE provider='discord'", [4 * 1024 * 1024]).unwrap();
+    db.execute("INSERT INTO import_batch_receipts SELECT provider,account_id,source_id,run_id,sequence+1,?2,committed_records,committed_bytes+?1,next_batch+1 FROM import_batch_receipts WHERE provider='discord'", rusqlite::params![4 * 1024 * 1024, digest]).unwrap();
+    schema::validate_v1(&db).unwrap();
+    drop(db);
+    let store = ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).unwrap();
+    store
+        .transaction(|tx| {
+            let actual: String = tx
+                .query_row(
+                    "SELECT record_json FROM content_observations WHERE provider='discord'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            let record: retract_domain::ContentRecord = model::decode(&actual).unwrap();
+            assert_eq!(record.privacy_findings, findings);
+            assert_eq!(record.detector_version, detector);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(super::test_support::fts_count(&store, "discordneedle"), 1);
+    drop(store);
+    let bytes = fs::read(&fixture.path).unwrap();
+    assert!(!bytes.starts_with(b"SQLite format 3"));
+    assert!(!bytes.windows(13).any(|part| part == b"discordneedle"));
+    drop(ArchiveStore::open(fixture.path, key(), migration_validators()).unwrap());
+}
+
+fn reject_authenticated_v1_mutation(mutation: &str) {
+    let (fixture, _) = frozen_v1();
+    let db = open_keyed(&fixture.path, &key(), false).unwrap();
+    db.execute_batch(mutation).unwrap();
+    schema::validate_v1(&db).unwrap();
+    drop(db);
+    let before = snapshot_recovery_files(&fixture.path);
+    assert!(
+        ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).is_err(),
+        "accepted inconsistent v1: {mutation}"
+    );
+    assert_eq!(snapshot_recovery_files(&fixture.path), before);
+    schema::validate_v1(&open_immutable_keyed(&fixture.path, &key()).unwrap()).unwrap();
+    for suffix in [".migration", ".migration-wal", ".migration-journal"] {
+        if let Ok(bytes) = fs::read(super::store::sidecar(&fixture.path, suffix)) {
+            assert!(!bytes.starts_with(b"SQLite format 3"));
+            assert!(!bytes.windows(12).any(|part| part == b"legacyneedle"));
+        }
+    }
+}
+
+macro_rules! inconsistent_v1 {
+    ($name:ident, $sql:literal) => {
+        #[test]
+        fn $name() {
+            reject_authenticated_v1_mutation($sql);
+        }
+    };
+}
+
+inconsistent_v1!(
+    frozen_v1_rejects_timestamp_nanosecond_projection,
+    "UPDATE content_observations SET timestamp_nanos=timestamp_nanos+1"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_search_text_projection,
+    "UPDATE content_observations SET searchable_text='different synthetic text'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_attachment_names_projection,
+    "UPDATE content_observations SET attachment_names='different synthetic name'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_conversation_reference_projection,
+    "UPDATE content_observations SET conversation_id=NULL"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_actor_reference_projection,
+    "UPDATE content_observations SET author_id=NULL"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_reply_reference_projection,
+    "UPDATE content_observations SET reply_to_id=resource_id"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_thread_reference_projection,
+    "UPDATE content_observations SET thread_parent_id=conversation_id"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_identity_locator_json,
+    "UPDATE resource_identities SET locator_json=json_set(locator_json, '$.canonicalKey', 'different') WHERE provider='synthetic' AND kind='content'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_identity_indexed_locator,
+    "UPDATE resource_identities SET canonical_key='different' WHERE provider='synthetic' AND kind='content'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_actor_catalog_mismatch,
+    "UPDATE resource_identities SET locator_json=json_set(locator_json, '$.locatorPayload.nativeId', 'different') WHERE provider='synthetic' AND kind='actor'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_conversation_catalog_mismatch,
+    "UPDATE resource_identities SET locator_json=json_set(locator_json, '$.locatorPayload.nativeId', 'different') WHERE provider='synthetic' AND kind='conversation'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_actor_scope_projection,
+    "UPDATE actor_observations SET record_json=json_set(record_json, '$.scope.sourceId', '00000000-0000-0000-0000-000000000099')"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_conversation_scope_projection,
+    "UPDATE conversation_observations SET record_json=json_set(record_json, '$.scope.sourceId', '00000000-0000-0000-0000-000000000099')"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_missing_ready_actor,
+    "DELETE FROM actor_observations WHERE provider='discord'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_missing_ready_conversation,
+    "DELETE FROM conversation_observations WHERE provider='discord'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_attachment_row_mismatch,
+    "UPDATE attachments SET record_json=json_set(record_json, '$.sizeBytes', 6)"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_missing_attachment_row,
+    "DELETE FROM attachments"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_attachment_ordinal_gap,
+    "UPDATE attachments SET ordinal=1"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_extra_attachment_row,
+    "INSERT INTO attachments SELECT provider, account_id, source_id, resource_id, 1, record_json FROM attachments"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_finding_row_mismatch,
+    "UPDATE privacy_findings SET kind='phone_number' WHERE kind='email_address'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_finding_version_mismatch,
+    "UPDATE privacy_findings SET detector_version='historical-other-version'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_missing_finding_row,
+    "DELETE FROM privacy_findings WHERE kind='email_address'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_extra_finding_row,
+    "INSERT INTO privacy_findings SELECT provider, account_id, source_id, resource_id, 'phone_number', detector_version FROM privacy_findings WHERE kind='email_address'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_invalid_persisted_finding_version,
+    "UPDATE content_observations SET record_json=json_set(record_json, '$.detectorVersion', NULL)"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_missing_fts_postings,
+    "INSERT INTO content_fts(content_fts,rowid,searchable_text,attachment_names) SELECT 'delete',observation_key,searchable_text,attachment_names FROM content_observations WHERE provider='discord'"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_extra_fts_postings,
+    "INSERT INTO content_fts(rowid,searchable_text,attachment_names) VALUES(900, 'syntheticghost', '')"
+);
+inconsistent_v1!(
+    frozen_v1_rejects_fts_document_lengths,
+    "UPDATE content_fts_docsize SET sz=X'0000'"
+);
+
+#[test]
+fn frozen_v1_rejects_indexed_timestamp_that_would_repeat_or_skip_cursor_results() {
+    for offset in [-1, 1] {
+        let (fixture, _) = frozen_v1();
+        let db = open_keyed(&fixture.path, &key(), false).unwrap();
+        db.execute("UPDATE content_observations SET timestamp_seconds=timestamp_seconds+? WHERE provider='discord'", [offset]).unwrap();
+        let json: String = db
+            .query_row(
+                "SELECT record_json FROM content_observations WHERE provider='discord'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let typed: retract_domain::ContentRecord = model::decode(&json).unwrap();
+        // The query orders on SQL columns but builds its next cursor from the
+        // returned typed timestamp. A lower column repeats this same item on
+        // that cursor; a higher column skips it below a typed-time cutoff.
+        let cutoff_nanos = typed.timestamp.timestamp_subsec_nanos() + u32::from(offset > 0);
+        let visible: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM content_observations WHERE provider='discord' AND (timestamp_seconds,timestamp_nanos,resource_id) < (?1,?2,?3))", rusqlite::params![typed.timestamp.timestamp(), cutoff_nanos, typed.id.as_uuid().to_string()], |row| row.get(0)).unwrap();
+        assert_eq!(visible, offset < 0);
+        drop(db);
+        let before = snapshot_recovery_files(&fixture.path);
+        assert!(
+            ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).is_err(),
+            "accepted timestamp offset {offset}"
+        );
+        assert_eq!(snapshot_recovery_files(&fixture.path), before);
+    }
+}
+
+#[test]
+fn frozen_v1_interrupted_source_may_still_lack_mandatory_observations() {
+    let (fixture, _) = frozen_v1();
+    let db = open_keyed(&fixture.path, &key(), false).unwrap();
+    db.execute_batch("DELETE FROM actor_observations WHERE provider='synthetic'; DELETE FROM conversation_observations WHERE provider='synthetic';").unwrap();
+    drop(db);
+    let store = ArchiveStore::open(fixture.path, key(), migration_validators()).unwrap();
+    assert_eq!(
+        super::test_support::checkpoint(&store).progress.phase,
+        super::ImportPhase::Interrupted
+    );
+    assert_eq!(
+        store.source(&source().scope()).unwrap().state,
+        retract_domain::SourceState::Unavailable
+    );
+}
+
+#[test]
+fn frozen_v1_empty_findings_do_not_bypass_persisted_detector_version_bounds() {
+    for version in [
+        "x".repeat(4 * 1024 * 1024),
+        "x".repeat(129),
+        " ".into(),
+        "bad\nversion".into(),
+    ] {
+        let (fixture, _) = frozen_v1();
+        let db = open_keyed(&fixture.path, &key(), false).unwrap();
+        db.execute("UPDATE content_observations SET record_json=json_set(record_json, '$.privacyFindings', json('[]'), '$.detectorVersion', ?) WHERE provider='discord'", [&version]).unwrap();
+        db.execute("DELETE FROM privacy_findings WHERE provider='discord'", [])
+            .unwrap();
+        drop(db);
+        let before = snapshot_recovery_files(&fixture.path);
+        assert!(ArchiveStore::open(fixture.path.clone(), key(), migration_validators()).is_err());
+        assert_eq!(snapshot_recovery_files(&fixture.path), before);
+    }
+}
+
 fn candidate(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".migration");

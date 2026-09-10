@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use retract_domain::{ProviderResourceRef, ResourceKind, Scope};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use uuid::Uuid;
 
 use super::{
@@ -135,27 +135,47 @@ impl ArchiveStore {
             .validators
             .get(&session.scope.provider)
             .ok_or(ArchiveError::InvalidRecord)?;
-        let progress = self.transaction_checked(|tx| {
-            let mut run = active_session(tx, session, validator.validation_policy_key().as_str(), self.import_limits)?;
-            let s = scope_sql(&session.scope);
-            let missing = tx.query_row("SELECT EXISTS(SELECT 1 FROM content_observations c
-                WHERE c.provider=?1 AND c.account_id=?2 AND c.source_id=?3 AND (
-                    NOT EXISTS(SELECT 1 FROM conversation_observations v WHERE v.provider=c.provider AND v.account_id=c.account_id AND v.source_id=c.source_id AND v.resource_id=c.conversation_id)
-                    OR NOT EXISTS(SELECT 1 FROM actor_observations a WHERE a.provider=c.provider AND a.account_id=c.account_id AND a.source_id=c.source_id AND a.resource_id=c.author_id)))",
-                params![s[0], s[1], s[2]], |row| row.get::<_, bool>(0)).map_err(storage)?;
-            run.checkpoint.progress.phase = if missing { ImportPhase::Failed } else { ImportPhase::Ready };
-            run.checkpoint.failure_code = missing.then_some(model::ImportFailureCode::IncompleteSource);
-            collect_warnings(tx, &run)?;
-            save_run(tx, &mut run)?;
-            set_source_phase(tx, &session.scope, run.checkpoint.progress.phase)?;
-            Ok(run.checkpoint.progress)
-        }, || session.cancellation.check())?;
+        let progress = self.transaction_checked(
+            |tx| {
+                let mut run = active_session(
+                    tx,
+                    session,
+                    validator.validation_policy_key().as_str(),
+                    self.import_limits,
+                )?;
+                let missing = missing_mandatory_observations(tx, &session.scope)?;
+                run.checkpoint.progress.phase = if missing {
+                    ImportPhase::Failed
+                } else {
+                    ImportPhase::Ready
+                };
+                run.checkpoint.failure_code =
+                    missing.then_some(model::ImportFailureCode::IncompleteSource);
+                collect_warnings(tx, &run)?;
+                save_run(tx, &mut run)?;
+                set_source_phase(tx, &session.scope, run.checkpoint.progress.phase)?;
+                Ok(run.checkpoint.progress)
+            },
+            || session.cancellation.check(),
+        )?;
         if progress.phase == ImportPhase::Failed {
             Err(ArchiveError::IncompleteSource)
         } else {
             Ok(progress)
         }
     }
+}
+
+pub(super) fn missing_mandatory_observations(
+    connection: &Connection,
+    scope: &Scope,
+) -> Result<bool, ArchiveError> {
+    let s = scope_sql(scope);
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM content_observations c
+        WHERE c.provider=?1 AND c.account_id=?2 AND c.source_id=?3 AND (
+            NOT EXISTS(SELECT 1 FROM conversation_observations v WHERE v.provider=c.provider AND v.account_id=c.account_id AND v.source_id=c.source_id AND v.resource_id=c.conversation_id)
+            OR NOT EXISTS(SELECT 1 FROM actor_observations a WHERE a.provider=c.provider AND a.account_id=c.account_id AND a.source_id=c.source_id AND a.resource_id=c.author_id)))",
+        params![s[0], s[1], s[2]], |row| row.get(0)).map_err(storage)
 }
 
 fn upsert_identity(

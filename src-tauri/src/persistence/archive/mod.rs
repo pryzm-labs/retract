@@ -6,6 +6,7 @@ mod ingest;
 mod ingest_state;
 mod lifecycle;
 mod migration;
+mod migration_validation;
 mod model;
 mod preflight;
 mod query;
