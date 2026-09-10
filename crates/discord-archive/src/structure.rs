@@ -320,7 +320,7 @@ pub(crate) fn inspect_reader(
     let mut deserializer = serde_json::Deserializer::from_reader(guard);
     let parsed = ShapeSeed {
         state: &mut state,
-        path: Vec::new(),
+        path: &mut Vec::new(),
         depth: 1,
     }
     .deserialize(&mut deserializer);
@@ -328,16 +328,23 @@ pub(crate) fn inspect_reader(
     deserializer
         .end()
         .map_err(|_| failure.get().unwrap_or(ArchiveError::InvalidJson))?;
-    let mut missing = Vec::new();
-    for (path, node) in &state.nodes {
-        if !path.is_empty() && path.last().is_some_and(|key| key != "[]") {
-            let parent = &path[..path.len() - 1];
-            let count = state.nodes.get(parent).map_or(0, |p| p.types.object);
-            missing.push((path.clone(), count.saturating_sub(node.occurrences)));
-        }
-    }
-    for (path, count) in missing {
-        state.nodes.get_mut(&path).expect("known node").missing = count;
+    // The per-node overhead already covers these counters. Do not clone owned
+    // ancestor paths a third time merely to update missing-field counts.
+    let missing: Vec<_> = state
+        .nodes
+        .iter()
+        .map(|(path, node)| {
+            if !path.is_empty() && path.last().is_some_and(|key| key != "[]") {
+                let parent = &path[..path.len() - 1];
+                let count = state.nodes.get(parent).map_or(0, |p| p.types.object);
+                count.saturating_sub(node.occurrences)
+            } else {
+                0
+            }
+        })
+        .collect();
+    for (node, count) in state.nodes.values_mut().zip(missing) {
+        node.missing = count;
     }
     Ok(EntryStructure {
         path,
@@ -488,7 +495,7 @@ impl State<'_> {
 
 struct ShapeSeed<'a, 'b> {
     state: &'a mut State<'b>,
-    path: Vec<String>,
+    path: &'a mut Vec<String>,
     depth: u64,
 }
 
@@ -502,22 +509,40 @@ impl<'de> DeserializeSeed<'de> for ShapeSeed<'_, '_> {
         self.state
             .check(bounded(self.depth, self.state.limits.max_json_depth))?;
         self.state.max_depth = self.state.max_depth.max(self.depth);
-        let path = self.path.clone();
+        let path = self.path;
         let state = self.state;
+        // Reserve each distinct report node before its owned path copies or
+        // descendants exist. A deep document cannot defer all charges to unwind.
+        state.node::<D::Error>(path)?;
         let shape = deserializer.deserialize_any(ShapeVisitor {
             state,
-            path: self.path,
+            path,
             depth: self.depth,
         })?;
-        state.record(&path, &shape)?;
+        state.record(path, &shape)?;
         Ok(shape)
     }
 }
 
 struct ShapeVisitor<'a, 'b> {
     state: &'a mut State<'b>,
-    path: Vec<String>,
+    path: &'a mut Vec<String>,
     depth: u64,
+}
+
+// One traversal path is shared by every frame. Drop restores it on successful
+// descent, syntax/limit failures, cancellation and unwinding alike.
+struct PathFrame<'a>(&'a mut Vec<String>);
+impl<'a> PathFrame<'a> {
+    fn push(path: &'a mut Vec<String>, segment: String) -> Self {
+        path.push(segment);
+        Self(path)
+    }
+}
+impl Drop for PathFrame<'_> {
+    fn drop(&mut self) {
+        self.0.pop();
+    }
 }
 
 impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
@@ -535,7 +560,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_u64<E: de::Error>(self, _: u64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<u64>())?;
-        self.state.number(&self.path)?;
+        self.state.number(self.path)?;
         Ok(ObservedShape::Number {
             integer: true,
             signed: false,
@@ -543,7 +568,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_i64<E: de::Error>(self, _: i64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<i64>())?;
-        self.state.number(&self.path)?;
+        self.state.number(self.path)?;
         Ok(ObservedShape::Number {
             integer: true,
             signed: true,
@@ -551,7 +576,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<f64>())?;
-        self.state.number(&self.path)?;
+        self.state.number(self.path)?;
         Ok(ObservedShape::Number {
             integer: false,
             signed: value.is_sign_negative(),
@@ -559,20 +584,19 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_str<E: de::Error>(self, value: &str) -> Result<ObservedShape, E> {
         self.state.scalar(value.len())?;
-        self.state.string(&self.path, value)?;
+        self.state.string(self.path, value)?;
         Ok(ObservedShape::String)
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<ObservedShape, A::Error> {
         let mut shape = None;
-        let mut path = self.path;
-        path.push("[]".into());
+        let path = PathFrame::push(self.path, "[]".into());
         loop {
             if self.depth == 1 {
                 self.state.decoded = 0;
             }
             let next = sequence.next_element_seed(ShapeSeed {
                 state: self.state,
-                path: path.clone(),
+                path: path.0,
                 depth: self.depth + 1,
             })?;
             let Some(next) = next else { break };
@@ -589,15 +613,15 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
             if fields.contains_key(&key) {
                 return Err(self.state.reject(ArchiveError::DuplicateJsonKey));
             }
-            let mut path = self.path.clone();
-            path.push(if key == "[]" || key.starts_with('~') {
+            let segment = if key == "[]" || key.starts_with('~') {
                 format!("~{key}")
             } else {
                 key.clone()
-            });
+            };
+            let path = PathFrame::push(self.path, segment);
             let shape = map.next_value_seed(ShapeSeed {
                 state: self.state,
-                path,
+                path: path.0,
                 depth: self.depth + 1,
             })?;
             fields.insert(key, shape);

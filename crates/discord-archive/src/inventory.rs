@@ -153,10 +153,41 @@ fn extra_fields(mut bytes: &[u8]) -> Result<(), ArchiveError> {
     Ok(())
 }
 
-fn validate_name(
-    raw: &[u8],
+// Component bytes borrow the already bounded directory; comparison folds ASCII
+// without allocating. Each distinct (parent, component) stores only fixed-size
+// metadata, never an owned copy of every ancestor prefix.
+struct AsciiComponent<'a>(&'a str);
+
+impl PartialEq for AsciiComponent<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(other.0)
+    }
+}
+impl Eq for AsciiComponent<'_> {}
+impl PartialOrd for AsciiComponent<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for AsciiComponent<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(other.0.bytes().map(|byte| byte.to_ascii_lowercase()))
+    }
+}
+
+struct PathNode {
+    id: usize,
+    directory: bool,
+    explicit: bool,
+}
+
+fn validate_name<'a>(
+    raw: &'a [u8],
     limits: ArchiveLimits,
-    paths: &mut BTreeMap<String, (String, bool, bool)>,
+    paths: &mut BTreeMap<(usize, AsciiComponent<'a>), PathNode>,
 ) -> Result<String, ArchiveError> {
     bounded(raw.len() as u64, limits.max_path_bytes)?;
     let name = std::str::from_utf8(raw).map_err(|_| ArchiveError::UnsafeEntryName)?;
@@ -170,27 +201,38 @@ fn validate_name(
         return Err(ArchiveError::UnsafeEntryName);
     }
     let directory = name.ends_with('/');
-    let components: Vec<_> = name.trim_end_matches('/').split('/').collect();
-    bounded(components.len() as u64, limits.max_path_components)?;
-    let mut prefix = String::new();
-    for (index, part) in components.iter().enumerate() {
-        if part.is_empty() || matches!(*part, "." | "..") || part.ends_with(['.', ' ']) {
+    let components = name.trim_end_matches('/').split('/');
+    let count = components.clone().count();
+    bounded(count as u64, limits.max_path_components)?;
+    let mut parent = 0;
+    for (index, part) in components.enumerate() {
+        if part.is_empty() || matches!(part, "." | "..") || part.ends_with(['.', ' ']) {
             return Err(ArchiveError::UnsafeEntryName);
         }
-        if index > 0 {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        let last = index + 1 == components.len();
+        let last = index + 1 == count;
         let is_directory = !last || directory;
-        let key = prefix.to_ascii_lowercase();
-        if let Some((original, was_directory, explicit)) = paths.get(&key)
-            && (original != &prefix || *was_directory != is_directory || (last && *explicit))
-        {
-            return Err(ArchiveError::UnsafeEntryName);
+        let id = paths.len() + 1;
+        match paths.entry((parent, AsciiComponent(part))) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let node = entry.get();
+                if entry.key().1.0 != part
+                    || node.directory != is_directory
+                    || (last && node.explicit)
+                {
+                    return Err(ArchiveError::UnsafeEntryName);
+                }
+                parent = node.id;
+                entry.get_mut().explicit |= last;
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(PathNode {
+                    id,
+                    directory: is_directory,
+                    explicit: last,
+                });
+                parent = id;
+            }
         }
-        let explicit = last || paths.get(&key).is_some_and(|p| p.2);
-        paths.insert(key, (prefix.clone(), is_directory, explicit));
     }
     if name.ends_with("//") {
         return Err(ArchiveError::UnsafeEntryName);
@@ -370,6 +412,8 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
             });
             offset = next;
         }
+        // Release the borrowed component index before constructing ZIP's index.
+        drop(paths);
         if offset != directory.len() {
             return Err(ArchiveError::InvalidArchive);
         }
