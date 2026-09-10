@@ -18,6 +18,375 @@ fn probe(payload: &[u8], policy: ArchiveLimits) -> Result<StructureReport, Archi
     StructureProbe::inspect(&mut archive, &[EntryIndex(0)])
 }
 
+fn scalar_grammars(report: &StructureReport, path: &[&str]) -> serde_json::Value {
+    let encoded = serde_json::to_value(report).unwrap();
+    encoded["entries"][0]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["path"] == serde_json::json!(path))
+        .unwrap()["grammars"]
+        .clone()
+}
+
+fn string_grammars(value: &str) -> serde_json::Value {
+    let payload = serde_json::to_vec(value).unwrap();
+    scalar_grammars(&probe(&payload, limits()).unwrap(), &[])
+}
+
+fn observed(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"Observed": [value]})
+}
+
+#[test]
+fn decimal_strings_classify_exact_syntax_and_u64_boundaries() {
+    // Permitting signs, rounding, trimming, or overflowing an ID breaks this table.
+    for (input, expected) in [
+        ("1", "CanonicalPositiveU64Decimal"),
+        ("9007199254740993", "CanonicalPositiveU64Decimal"),
+        ("18446744073709551615", "CanonicalPositiveU64Decimal"),
+        ("18446744073709551616", "OutOfU64Range"),
+        ("9999999999999999999999999999999999999999", "OutOfU64Range"),
+        ("0", "Zero"),
+        ("00", "NoncanonicalDecimal"),
+        ("01", "NoncanonicalDecimal"),
+        ("-0", "NoncanonicalDecimal"),
+        ("-1", "NoncanonicalDecimal"),
+        ("+1", "NoncanonicalDecimal"),
+        ("1.0", "NoncanonicalDecimal"),
+        (".5", "NoncanonicalDecimal"),
+        ("1.", "NoncanonicalDecimal"),
+        ("1e0", "NoncanonicalDecimal"),
+        ("1E+2", "NoncanonicalDecimal"),
+        ("1e-2", "NoncanonicalDecimal"),
+        (" 1", "NoncanonicalDecimal"),
+        ("1 ", "NoncanonicalDecimal"),
+        ("\t\n1\r ", "NoncanonicalDecimal"),
+        ("-18446744073709551616", "NoncanonicalDecimal"),
+        ("01e1", "NoncanonicalDecimal"),
+        ("", "Other"),
+        (" ", "Other"),
+        ("+", "Other"),
+        ("-", "Other"),
+        (".", "Other"),
+        ("e1", "Other"),
+        ("1e", "Other"),
+        ("1e+", "Other"),
+        ("1 2", "Other"),
+        ("1\u{a0}", "Other"),
+        ("１２", "Other"),
+        ("0x12", "Other"),
+        ("NaN", "Other"),
+        ("Infinity", "Other"),
+        ("1invented", "Other"),
+    ] {
+        let grammar = string_grammars(input);
+        assert_eq!(grammar["decimal_strings"], observed(expected.into()));
+        assert_eq!(grammar["decimal_numbers"], "NoObservation");
+    }
+}
+
+#[test]
+fn numeric_grammar_uses_original_tokens_without_rounding_or_normalizing() {
+    for (input, expected) in [
+        ("1", "CanonicalPositiveU64Decimal"),
+        ("9007199254740993", "CanonicalPositiveU64Decimal"),
+        ("18446744073709551615", "CanonicalPositiveU64Decimal"),
+        ("18446744073709551616", "OutOfU64Range"),
+        ("9999999999999999999999999999999999999999", "OutOfU64Range"),
+        ("0", "Zero"),
+        ("-0", "NoncanonicalDecimal"),
+        ("-1", "NoncanonicalDecimal"),
+        ("0.0", "NoncanonicalDecimal"),
+        ("1.0", "NoncanonicalDecimal"),
+        ("1e0", "NoncanonicalDecimal"),
+        ("1E+2", "NoncanonicalDecimal"),
+        ("1e-2", "NoncanonicalDecimal"),
+        ("-18446744073709551616", "NoncanonicalDecimal"),
+        ("18446744073709551615.0", "NoncanonicalDecimal"),
+    ] {
+        // JSON formatting whitespace is outside the numeric token.
+        let payload = format!(" \n{input}\t ");
+        let report = probe(payload.as_bytes(), limits()).unwrap();
+        let grammar = scalar_grammars(&report, &[]);
+        assert_eq!(grammar["decimal_numbers"], observed(expected.into()));
+        assert_eq!(grammar["decimal_strings"], "NoObservation");
+        assert_eq!(grammar["timestamps"], "NoObservation");
+    }
+    for input in ["01", "+1", "00", "1.", ".5", "1e", "--1"] {
+        assert_eq!(
+            probe(input.as_bytes(), limits()).unwrap_err(),
+            ArchiveError::InvalidJson
+        );
+    }
+}
+
+#[test]
+fn numeric_grammar_does_not_bleed_across_keys_containers_or_tokens() {
+    let report = probe(
+        br#"{"a":18446744073709551616,"1e0":[null,true,"-0",{"b":0}],"c":1e0,"d":9007199254740993}"#,
+        limits(),
+    ).unwrap();
+    for (path, expected) in [
+        (vec!["a"], "OutOfU64Range"),
+        (vec!["1e0", "[]", "b"], "Zero"),
+        (vec!["c"], "NoncanonicalDecimal"),
+        (vec!["d"], "CanonicalPositiveU64Decimal"),
+    ] {
+        assert_eq!(
+            scalar_grammars(&report, &path)["decimal_numbers"],
+            observed(expected.into())
+        );
+    }
+}
+
+#[test]
+fn timestamps_distinguish_every_closed_separator_precision_and_zone_form() {
+    let mut inputs = Vec::new();
+    let mut expected_forms = Vec::new();
+    for (separator, separator_name) in [("T", "UpperT"), (" ", "Space")] {
+        for (fraction, precision) in [
+            ("", "Seconds"),
+            (".123", "Milliseconds"),
+            (".123456", "Microseconds"),
+            (".123456789", "Nanoseconds"),
+        ] {
+            for (suffix, zone) in [("Z", "UpperZ"), ("+02:30", "ColonOffset"), ("", "Unzoned")] {
+                let input = format!("2040-02-29{separator}12:34:56{fraction}{suffix}");
+                let expected = serde_json::json!({"Calendar": {
+                    "separator": separator_name, "precision": precision, "zone": zone
+                }});
+                assert_eq!(
+                    string_grammars(&input)["timestamps"],
+                    observed(expected.clone())
+                );
+                inputs.push(input);
+                expected_forms.push(expected);
+            }
+        }
+    }
+    inputs.extend(inputs.clone().into_iter().rev());
+    inputs.push("invented".into());
+    expected_forms.push("Unclassified".into());
+    let report = probe(&serde_json::to_vec(&inputs).unwrap(), limits()).unwrap();
+    let grammar = scalar_grammars(&report, &["[]"]);
+    let forms = grammar["timestamps"]["Observed"].as_array().unwrap();
+    assert_eq!(forms.len(), 25);
+    for expected in expected_forms {
+        assert!(forms.contains(&expected));
+    }
+}
+
+#[test]
+fn timestamp_calendar_boundaries_and_offset_grammar_are_validated() {
+    let valid = observed(serde_json::json!({"Calendar": {
+        "separator": "UpperT", "precision": "Seconds", "zone": "UpperZ"
+    }}));
+    for input in [
+        "0001-01-01T00:00:00Z",
+        "9999-12-31T23:59:59Z",
+        "2000-02-29T00:00:00Z",
+        "2036-02-29T00:00:00Z",
+        "2400-02-29T00:00:00Z",
+        "1900-02-28T00:00:00Z",
+    ] {
+        assert_eq!(string_grammars(input)["timestamps"], valid);
+    }
+    // Literal month lengths make this independent of the classifier's calendar calculation.
+    for (month, last_day) in [
+        (1, 31),
+        (2, 28),
+        (3, 31),
+        (4, 30),
+        (5, 31),
+        (6, 30),
+        (7, 31),
+        (8, 31),
+        (9, 30),
+        (10, 31),
+        (11, 30),
+        (12, 31),
+    ] {
+        let good = format!("2041-{month:02}-{last_day:02}T00:00:00Z");
+        let bad = format!("2041-{month:02}-{:02}T00:00:00Z", last_day + 1);
+        assert_eq!(string_grammars(&good)["timestamps"], valid);
+        assert_eq!(
+            string_grammars(&bad)["timestamps"],
+            observed("Unclassified".into())
+        );
+    }
+    for suffix in ["+00:00", "+23:59", "-23:59", "-00:01", "-01:00"] {
+        let input = format!("2040-02-29T23:59:59{suffix}");
+        assert_eq!(
+            string_grammars(&input)["timestamps"],
+            observed(serde_json::json!({"Calendar": {
+                "separator": "UpperT", "precision": "Seconds", "zone": "ColonOffset"
+            }}))
+        );
+    }
+}
+
+#[test]
+fn unknown_or_invalid_timestamp_forms_remain_unclassified() {
+    for input in [
+        "0000-01-01T00:00:00Z",
+        "10000-01-01T00:00:00Z",
+        "1900-02-29T00:00:00Z",
+        "2100-02-29T00:00:00Z",
+        "2041-02-29T00:00:00Z",
+        "2040-00-01T00:00:00Z",
+        "2040-13-01T00:00:00Z",
+        "2040-01-00T00:00:00Z",
+        "2040-01-32T00:00:00Z",
+        "2040-01-01T24:00:00Z",
+        "2040-01-01T00:60:00Z",
+        "2040-01-01T00:00:60Z",
+        "2040-01-01T00:00:00-00:00",
+        "2040-01-01T00:00:00+24:00",
+        "2040-01-01T00:00:00+00:60",
+        "2040-01-01T00:00:00+0000",
+        "2040-01-01T00:00:00+00",
+        "2040-01-01T00:00:00+00:00:00",
+        "2040-01-01T00:00:00z",
+        "2040-01-01t00:00:00Z",
+        "2040-01-01_00:00:00Z",
+        "2040-01-01T00:00:00.Z",
+        "2040-01-01T00:00:00.1Z",
+        "2040-01-01T00:00:00.12Z",
+        "2040-01-01T00:00:00.1234Z",
+        "2040-01-01T00:00:00.12345Z",
+        "2040-01-01T00:00:00.1234567Z",
+        "2040-01-01T00:00:00.12345678Z",
+        "2040-01-01T00:00:00.1234567890Z",
+        "2040-01-01T00:00:00,123Z",
+        "2040-01-01T00:00:00.abcZ",
+        "2040-01-01T00:00:00.１２３Z",
+        " 2040-01-01T00:00:00Z",
+        "2040-01-01T00:00:00Z ",
+        "2040-01-01T00:00:00Z\n",
+        "2040-1-01T00:00:00Z",
+        "2040-01-1T00:00:00Z",
+        "2040/01/01T00:00:00Z",
+        "2040-01-01T0:00:00Z",
+        "2040-01-01T00:0:00Z",
+        "2040-01-01T00:00:0Z",
+        "2040-01-01",
+        "",
+        "invented",
+        "2040-01-01T00:00:00Zinvented",
+    ] {
+        assert_eq!(
+            string_grammars(input)["timestamps"],
+            observed("Unclassified".into())
+        );
+    }
+}
+
+#[test]
+fn grammar_evidence_keeps_mixed_and_unobserved_states_distinct() {
+    for input in ["null", "true", "false", "[]", "{}"] {
+        assert_eq!(
+            scalar_grammars(&probe(input.as_bytes(), limits()).unwrap(), &[]),
+            serde_json::json!({
+                "decimal_strings": "NoObservation", "decimal_numbers": "NoObservation", "timestamps": "NoObservation"
+            })
+        );
+    }
+    let report = probe(
+        br#"[[],["9007199254740993","0","01","18446744073709551616","invented",0,1e0],["other invented text","999999999999999999999999","-1","0","18446744073709551615",0,2e0],[]]"#,
+        limits(),
+    )
+    .unwrap();
+    let grammar = scalar_grammars(&report, &["[]", "[]"]);
+    assert_eq!(
+        grammar["decimal_strings"],
+        serde_json::json!({"Observed":[
+            "CanonicalPositiveU64Decimal", "Zero", "NoncanonicalDecimal", "OutOfU64Range", "Other"
+        ]})
+    );
+    assert_eq!(
+        grammar["decimal_numbers"],
+        serde_json::json!({"Observed":["Zero", "NoncanonicalDecimal"]})
+    );
+    assert_eq!(grammar["timestamps"], observed("Unclassified".into()));
+    let report = probe(
+        br#"["2040-01-01T00:00:00Z","invented",null,"2040-01-01 00:00:00"]"#,
+        limits(),
+    )
+    .unwrap();
+    let timestamps = scalar_grammars(&report, &["[]"])["timestamps"]["Observed"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(timestamps.len(), 3);
+    assert!(timestamps.contains(&serde_json::json!("Unclassified")));
+    assert!(timestamps.contains(&serde_json::json!({"Calendar":{"separator":"Space","precision":"Seconds","zone":"Unzoned"}})));
+    assert!(timestamps.contains(&serde_json::json!({"Calendar":{"separator":"UpperT","precision":"Seconds","zone":"UpperZ"}})));
+}
+
+#[test]
+fn path_grammar_recognizes_only_the_closed_c_prefix_and_canonical_decimal() {
+    for (segment, expected) in [
+        ("9007199254740993", "decimal_identifier"),
+        ("18446744073709551615", "decimal_identifier"),
+        (
+            "c9007199254740993",
+            "lowercase_c_prefixed_canonical_positive_u64_decimal",
+        ),
+        (
+            "c18446744073709551615",
+            "lowercase_c_prefixed_canonical_positive_u64_decimal",
+        ),
+        ("0", "mixed_identifier"),
+        ("01", "mixed_identifier"),
+        ("18446744073709551616", "mixed_identifier"),
+        ("c0", "mixed_identifier"),
+        ("c01", "mixed_identifier"),
+        ("c18446744073709551616", "mixed_identifier"),
+        ("C9007199254740993", "mixed_identifier"),
+        ("x9007199254740993", "mixed_identifier"),
+        ("cc9007199254740993", "mixed_identifier"),
+        ("c+9007199254740993", "mixed_identifier"),
+        ("c-9007199254740993", "mixed_identifier"),
+        ("c9007199254740993x", "mixed_identifier"),
+        ("c9007199254740993.0", "mixed_identifier"),
+        ("c9007199254740993e0", "mixed_identifier"),
+        ("c", "redacted_segment"),
+    ] {
+        let path = format!("messages/{segment}/messages.json");
+        let mut archive =
+            ArchiveInventory::inspect(Cursor::new(zip(&[(&path, b"[]")])), limits(), &NeverCancel)
+                .unwrap();
+        let report = StructureProbe::inspect(&mut archive, &[EntryIndex(0)]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["entries"][0]["path"][1],
+            expected
+        );
+    }
+}
+
+#[test]
+fn equal_grammar_from_distinct_invented_values_is_identical_and_value_free() {
+    let mut reports = Vec::new();
+    for (path, payload) in [
+        ("messages/c9007199254740993/messages.json", br#"{"decimal":"9007199254740993","numeric":9007199254740993,"time":"2040-02-29T01:02:03.123+01:00","text":"SENTINEL_ALPHA_730145","url":"https://example.invalid/invented-alpha"}"#.as_slice()),
+        ("messages/c18446744073709551615/messages.json", br#"{"decimal":"18446744073709551615","numeric":18446744073709551615,"time":"2088-12-31T23:59:59.987-07:30","text":"SENTINEL_BETA_893501_WITH_DIFFERENT_SIZE","url":"https://example.invalid/invented-beta-longer"}"#.as_slice()),
+    ] {
+        let mut archive = ArchiveInventory::inspect(Cursor::new(zip(&[(path, payload)])), limits(), &NeverCancel).unwrap();
+        let report = StructureProbe::inspect(&mut archive, &[EntryIndex(0)]).unwrap();
+        let json = serde_json::to_string(&report).unwrap();
+        let debug = format!("{report:?}");
+        for sentinel in ["9007199254740993", "18446744073709551615", "2040-02-29", "2088-12-31", "+01:00", "-07:30", "SENTINEL_", "example.invalid", "invented-alpha", "invented-beta"] {
+            assert!(!json.contains(sentinel), "JSON leaked a synthetic sentinel");
+            assert!(!debug.contains(sentinel), "Debug leaked a synthetic sentinel");
+        }
+        reports.push(json);
+    }
+    assert_eq!(reports[0], reports[1]);
+    assert!(reports[0].contains("CanonicalPositiveU64Decimal"));
+    assert!(reports[0].contains("Milliseconds"));
+}
+
 #[test]
 fn report_retains_shapes_and_keys_but_never_scalar_values_or_private_paths() {
     let report = probe(br#"[{"text":"SENTINEL_PRIVATE_BODY","id":987654321012345678,"url":"https://private.example/tokenSECRET","timestamp":"2042-01-02T03:04:05Z","flag":true,"nullable":null,"nested":[-928461,2.584739]}]"#, limits()).unwrap();

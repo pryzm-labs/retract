@@ -60,7 +60,7 @@ impl ObservedShape {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathToken {
     Account,
@@ -75,6 +75,7 @@ pub enum PathToken {
     IndexJson,
     DataJson,
     DecimalIdentifier,
+    LowercaseCPrefixedCanonicalPositiveU64Decimal,
     MixedIdentifier,
     RedactedSegment,
 }
@@ -93,7 +94,16 @@ fn template(name: &str) -> Vec<PathToken> {
             "channel.json" => PathToken::ChannelJson,
             "index.json" => PathToken::IndexJson,
             "data.json" => PathToken::DataJson,
-            value if value.bytes().all(|b| b.is_ascii_digit()) => PathToken::DecimalIdentifier,
+            value if decimal_grammar(value) == DecimalGrammar::CanonicalPositiveU64Decimal => {
+                PathToken::DecimalIdentifier
+            }
+            value
+                if value.strip_prefix('c').is_some_and(|rest| {
+                    decimal_grammar(rest) == DecimalGrammar::CanonicalPositiveU64Decimal
+                }) =>
+            {
+                PathToken::LowercaseCPrefixedCanonicalPositiveU64Decimal
+            }
             value if value.bytes().any(|b| b.is_ascii_digit()) => PathToken::MixedIdentifier,
             _ => PathToken::RedactedSegment,
         })
@@ -112,6 +122,91 @@ pub struct TypeCounts {
     pub object: u64,
 }
 
+/// Closed syntax categories, not identifiers or numeric values.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum DecimalGrammar {
+    CanonicalPositiveU64Decimal,
+    Zero,
+    NoncanonicalDecimal,
+    OutOfU64Range,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum TimestampSeparator {
+    UpperT,
+    Space,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum TimestampPrecision {
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum TimestampZone {
+    UpperZ,
+    ColonOffset,
+    Unzoned,
+}
+
+/// Gregorian calendar years 0001..9999, with no leap seconds or inferred zone.
+/// The finite product has 24 calendar alternatives and one unknown alternative.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum TimestampGrammar {
+    Unclassified,
+    Calendar {
+        separator: TimestampSeparator,
+        precision: TimestampPrecision,
+        zone: TimestampZone,
+    },
+}
+
+/// An unobserved scalar kind must not look like observed, unclassified input.
+#[derive(Debug, Default, Serialize)]
+pub enum GrammarSet<T> {
+    #[default]
+    NoObservation,
+    /// Sorted and deduplicated by the probe; contains only closed enum members.
+    Observed(Vec<T>),
+}
+
+impl<T: Ord> GrammarSet<T> {
+    fn observe(
+        &mut self,
+        grammar: T,
+        retained: &mut u64,
+        maximum: u64,
+    ) -> Result<(), ArchiveError> {
+        let position = match self {
+            Self::NoObservation => 0,
+            Self::Observed(grammars) => match grammars.binary_search(&grammar) {
+                Ok(_) => return Ok(()),
+                Err(position) => position,
+            },
+        };
+        // Include geometric Vec capacity growth and minimum-allocation overhead;
+        // the largest set has just 25 tiny enum members, never source values.
+        *retained = add(*retained, size_of::<T>() as u64 * 2 + 16)?;
+        bounded(*retained, maximum)?;
+        match self {
+            Self::NoObservation => *self = Self::Observed(vec![grammar]),
+            Self::Observed(grammars) => grammars.insert(position, grammar),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ScalarGrammars {
+    pub decimal_strings: GrammarSet<DecimalGrammar>,
+    pub decimal_numbers: GrammarSet<DecimalGrammar>,
+    pub timestamps: GrammarSet<TimestampGrammar>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct NodeSummary {
     /// Key names, with `[]` for array items; literal `[]` keys use `~[]`.
@@ -120,6 +215,7 @@ pub struct NodeSummary {
     pub occurrences: u64,
     pub missing: u64,
     pub types: TypeCounts,
+    pub grammars: ScalarGrammars,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +259,7 @@ impl StructureProbe {
             bounded(retained, limits.max_structure_bytes)?;
             let entry = archive.consume(index, |reader| {
                 let failure = Cell::new(None);
+                let numeric_grammar = Cell::new(DecimalGrammar::Other);
                 let guard = LexicalGuard {
                     inner: BufReader::with_capacity(8192, reader),
                     limits,
@@ -172,6 +269,8 @@ impl StructureProbe {
                     escaped: false,
                     scalar_bytes: 0,
                     number: false,
+                    decimal: DecimalScanner::default(),
+                    numeric_grammar: &numeric_grammar,
                     started: false,
                     root_array: false,
                     record_bytes: 0,
@@ -185,6 +284,7 @@ impl StructureProbe {
                     decoded: 0,
                     retained: &mut retained,
                     tokens: &mut tokens,
+                    numeric_grammar: &numeric_grammar,
                 };
                 let mut deserializer = serde_json::Deserializer::from_reader(guard);
                 let parsed = ShapeSeed {
@@ -255,6 +355,7 @@ struct State<'a> {
     decoded: u64,
     retained: &'a mut u64,
     tokens: &'a mut u64,
+    numeric_grammar: &'a Cell<DecimalGrammar>,
 }
 
 impl State<'_> {
@@ -279,12 +380,15 @@ impl State<'_> {
         self.check(bounded(*self.tokens, self.limits.max_json_tokens))
     }
 
-    fn record<E: de::Error>(&mut self, path: &[String], shape: &ObservedShape) -> Result<(), E> {
+    fn node<E: de::Error>(&mut self, path: &[String]) -> Result<&mut NodeSummary, E> {
         if !self.nodes.contains_key(path) {
-            // Account for duplicated shape keys, path keys, tree nodes and containers.
+            // Account for duplicated keys/paths, trees, containers and the three
+            // grammar-set headers. Enum members are charged before insertion.
             let bytes = path
                 .iter()
-                .try_fold(256u64, |total, key| add(total, 3 * key.len() as u64 + 96))
+                .try_fold(256u64 + 128, |total, key| {
+                    add(total, 3 * key.len() as u64 + 96)
+                })
                 .map_err(|e| self.reject(e))?;
             *self.retained = add(*self.retained, bytes).map_err(|e| self.reject(e))?;
             self.check(bounded(*self.retained, self.limits.max_structure_bytes))?;
@@ -296,7 +400,44 @@ impl State<'_> {
                 },
             );
         }
-        let node = self.nodes.get_mut(path).expect("inserted node");
+        Ok(self.nodes.get_mut(path).expect("inserted node"))
+    }
+
+    fn number<E: de::Error>(&mut self, path: &[String]) -> Result<(), E> {
+        let grammar = self.numeric_grammar.get();
+        self.node::<E>(path)?;
+        let result = self
+            .nodes
+            .get_mut(path)
+            .expect("inserted node")
+            .grammars
+            .decimal_numbers
+            .observe(grammar, self.retained, self.limits.max_structure_bytes);
+        self.check(result)
+    }
+
+    fn string<E: de::Error>(&mut self, path: &[String], value: &str) -> Result<(), E> {
+        self.node::<E>(path)?;
+        let grammars = &mut self.nodes.get_mut(path).expect("inserted node").grammars;
+        let result = grammars
+            .decimal_strings
+            .observe(
+                decimal_grammar(value),
+                self.retained,
+                self.limits.max_structure_bytes,
+            )
+            .and_then(|()| {
+                grammars.timestamps.observe(
+                    timestamp_grammar(value),
+                    self.retained,
+                    self.limits.max_structure_bytes,
+                )
+            });
+        self.check(result)
+    }
+
+    fn record<E: de::Error>(&mut self, path: &[String], shape: &ObservedShape) -> Result<(), E> {
+        let node = self.node(path)?;
         node.occurrences += 1;
         let count = match shape {
             ObservedShape::Null => &mut node.types.null,
@@ -369,6 +510,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_u64<E: de::Error>(self, _: u64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<u64>())?;
+        self.state.number(&self.path)?;
         Ok(ObservedShape::Number {
             integer: true,
             signed: false,
@@ -376,6 +518,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_i64<E: de::Error>(self, _: i64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<i64>())?;
+        self.state.number(&self.path)?;
         Ok(ObservedShape::Number {
             integer: true,
             signed: true,
@@ -383,6 +526,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_f64<E: de::Error>(self, value: f64) -> Result<ObservedShape, E> {
         self.state.scalar(size_of::<f64>())?;
+        self.state.number(&self.path)?;
         Ok(ObservedShape::Number {
             integer: false,
             signed: value.is_sign_negative(),
@@ -390,6 +534,7 @@ impl<'de> Visitor<'de> for ShapeVisitor<'_, '_> {
     }
     fn visit_str<E: de::Error>(self, value: &str) -> Result<ObservedShape, E> {
         self.state.scalar(value.len())?;
+        self.state.string(&self.path, value)?;
         Ok(ObservedShape::String)
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<ObservedShape, A::Error> {
@@ -455,6 +600,188 @@ impl Visitor<'_> for KeySeed<'_, '_> {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum DecimalState {
+    #[default]
+    Leading,
+    Sign,
+    Integer,
+    BarePoint,
+    IntegerPoint,
+    Fraction,
+    Exponent,
+    ExponentSign,
+    ExponentDigits,
+    Trailing,
+    Invalid,
+}
+
+/// Constant-space, transient syntax validation. Deliberately has no Debug or
+/// Serialize implementation. Only its closed classification enters the report.
+#[derive(Default)]
+struct DecimalScanner {
+    state: DecimalState,
+    noncanonical: bool,
+    leading_zero: bool,
+    value: Option<u64>,
+}
+
+impl DecimalScanner {
+    fn first_digit(&mut self, byte: u8) {
+        self.leading_zero = byte == b'0';
+        self.value = Some(u64::from(byte - b'0'));
+        self.state = DecimalState::Integer;
+    }
+
+    fn push(&mut self, byte: u8) {
+        use DecimalState::*;
+        let whitespace = matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+        match self.state {
+            Leading if whitespace => self.noncanonical = true,
+            Leading if matches!(byte, b'+' | b'-') => {
+                self.noncanonical = true;
+                self.state = Sign;
+            }
+            Leading | Sign if byte.is_ascii_digit() => self.first_digit(byte),
+            Leading | Sign if byte == b'.' => {
+                self.noncanonical = true;
+                self.state = BarePoint;
+            }
+            Integer if byte.is_ascii_digit() => {
+                self.noncanonical |= self.leading_zero;
+                self.value = self
+                    .value
+                    .and_then(|value| value.checked_mul(10)?.checked_add(u64::from(byte - b'0')));
+            }
+            Integer if byte == b'.' => {
+                self.noncanonical = true;
+                self.state = IntegerPoint;
+            }
+            BarePoint | IntegerPoint | Fraction if byte.is_ascii_digit() => self.state = Fraction,
+            Integer | IntegerPoint | Fraction if matches!(byte, b'e' | b'E') => {
+                self.noncanonical = true;
+                self.state = Exponent;
+            }
+            Exponent if matches!(byte, b'+' | b'-') => self.state = ExponentSign,
+            Exponent | ExponentSign | ExponentDigits if byte.is_ascii_digit() => {
+                self.state = ExponentDigits;
+            }
+            Integer | IntegerPoint | Fraction | ExponentDigits | Trailing if whitespace => {
+                self.noncanonical = true;
+                self.state = Trailing;
+            }
+            _ => self.state = Invalid,
+        }
+    }
+
+    fn finish(&self) -> DecimalGrammar {
+        use DecimalState::*;
+        if !matches!(
+            self.state,
+            Integer | IntegerPoint | Fraction | ExponentDigits | Trailing
+        ) {
+            DecimalGrammar::Other
+        } else if self.noncanonical {
+            DecimalGrammar::NoncanonicalDecimal
+        } else {
+            match self.value {
+                None => DecimalGrammar::OutOfU64Range,
+                Some(0) => DecimalGrammar::Zero,
+                Some(_) => DecimalGrammar::CanonicalPositiveU64Decimal,
+            }
+        }
+    }
+}
+
+fn decimal_grammar(value: &str) -> DecimalGrammar {
+    let mut scanner = DecimalScanner::default();
+    for byte in value.bytes() {
+        scanner.push(byte);
+    }
+    scanner.finish()
+}
+
+fn calendar_component(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0u32, |value, &byte| {
+        byte.is_ascii_digit()
+            .then(|| value * 10 + u32::from(byte - b'0'))
+    })
+}
+
+fn timestamp_grammar(value: &str) -> TimestampGrammar {
+    calendar_grammar(value.as_bytes()).unwrap_or(TimestampGrammar::Unclassified)
+}
+
+fn calendar_grammar(bytes: &[u8]) -> Option<TimestampGrammar> {
+    let base = bytes.get(..19)?;
+    if base[4] != b'-' || base[7] != b'-' || base[13] != b':' || base[16] != b':' {
+        return None;
+    }
+    let separator = match base[10] {
+        b'T' => TimestampSeparator::UpperT,
+        b' ' => TimestampSeparator::Space,
+        _ => return None,
+    };
+    let year = calendar_component(&base[..4])?;
+    let month = calendar_component(&base[5..7])?;
+    let day = calendar_component(&base[8..10])?;
+    let hour = calendar_component(&base[11..13])?;
+    let minute = calendar_component(&base[14..16])?;
+    let second = calendar_component(&base[17..19])?;
+    let last_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => return None,
+    };
+    if year == 0 || day == 0 || day > last_day || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let mut suffix = &bytes[19..];
+    let precision = if let Some(fraction) = suffix.strip_prefix(b".") {
+        let mut matched = None;
+        for (width, precision) in [
+            (3, TimestampPrecision::Milliseconds),
+            (6, TimestampPrecision::Microseconds),
+            (9, TimestampPrecision::Nanoseconds),
+        ] {
+            if fraction
+                .get(..width)
+                .is_some_and(|digits| digits.iter().all(u8::is_ascii_digit))
+                && !fraction.get(width).is_some_and(u8::is_ascii_digit)
+            {
+                suffix = &fraction[width..];
+                matched = Some(precision);
+                break;
+            }
+        }
+        matched?
+    } else {
+        TimestampPrecision::Seconds
+    };
+    let zone = match suffix {
+        b"" => TimestampZone::Unzoned,
+        b"Z" => TimestampZone::UpperZ,
+        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
+            let hours = calendar_component(&[*h1, *h2])?;
+            let minutes = calendar_component(&[*m1, *m2])?;
+            if hours > 23 || minutes > 59 || (*sign == b'-' && hours == 0 && minutes == 0) {
+                return None;
+            }
+            TimestampZone::ColonOffset
+        }
+        _ => return None,
+    };
+    Some(TimestampGrammar::Calendar {
+        separator,
+        precision,
+        zone,
+    })
+}
+
 /// Bounds the parser's scratch allocation before Serde can allocate a full token.
 /// Six raw bytes may encode one decoded byte (`\u0061`); visitors enforce decoded limits.
 struct LexicalGuard<'a, R> {
@@ -466,6 +793,8 @@ struct LexicalGuard<'a, R> {
     escaped: bool,
     scalar_bytes: u64,
     number: bool,
+    decimal: DecimalScanner,
+    numeric_grammar: &'a Cell<DecimalGrammar>,
     started: bool,
     root_array: bool,
     record_bytes: u64,
@@ -519,9 +848,15 @@ impl<R: Read> LexicalGuard<'_, R> {
                     if !self.number {
                         self.scalar_bytes = 0;
                         self.number = true;
+                        self.decimal = DecimalScanner::default();
                     }
                     self.scalar_bytes = add(self.scalar_bytes, 1)?;
                     bounded(self.scalar_bytes, self.limits.max_scalar_bytes)?;
+                    self.decimal.push(byte);
+                    // The one-byte reader exposes only the current token's
+                    // classification. Delimiters and key strings cannot replace
+                    // it before the corresponding scalar visitor runs.
+                    self.numeric_grammar.set(self.decimal.finish());
                 }
             }
         }
