@@ -355,10 +355,15 @@ impl ProviderPayloadValidator for DiscordPayloadValidator {
         }
         Ok(())
     }
-    fn validate_recipe(&self, _: &RemediationPlan) -> Result<(), AppError> {
-        Err(invalid())
+    fn validate_recipe(&self, plan: &RemediationPlan) -> Result<(), AppError> {
+        super::remediation::validate_plan(plan)
     }
-    fn validate_job(&self, _: &RemediationPlan, _: &ScopedJobRecord) -> Result<(), AppError> {
-        Err(invalid())
+    fn validate_job(&self, plan: &RemediationPlan, job: &ScopedJobRecord) -> Result<(), AppError> {
+        super::remediation::validate_plan(plan)?;
+        job.validate(plan).map_err(|_| invalid())?;
+        if job.next_batch > plan.targets.len() as u64 || job.dirty_refs != plan.targets {
+            return Err(invalid());
+        }
+        Ok(())
     }
 }

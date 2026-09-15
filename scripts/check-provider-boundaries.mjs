@@ -129,7 +129,7 @@ for (const path of rustFiles(sourceRoot)) {
 for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
   if (path.endsWith("_tests.rs") || path.endsWith("/tests.rs")) continue;
   const name = display(path);
-  if (name === "providers/discord/session.rs") {
+  if (name === "providers/discord/session.rs" || name === "providers/discord/http.rs") {
     reject(path,
       /\b(?:std\s*::\s*)?process\s*::|\b(?:Command|TcpListener|UdpSocket|tauri|telegram|Telegram\w*|webbrowser|opener)\b/,
       "Discord session isolation forbids process, browser UI, IPC and Telegram APIs");
