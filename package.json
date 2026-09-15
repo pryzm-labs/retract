@@ -2,7 +2,7 @@
   "name": "retract",
   "private": true,
   "version": "0.1.0",
-  "description": "Local-first Telegram history search, cleanup, and redaction for macOS",
+  "description": "Local-first Telegram and Discord history search, cleanup, and redaction for macOS",
   "license": "MIT",
   "author": "Pryzm Labs",
   "repository": {

@@ -4,7 +4,7 @@
 
 <h1 align="center">Retract</h1>
 
-<p align="center"><strong>Find sensitive Telegram history and remove as much of it as Telegram still permits.</strong></p>
+<p align="center"><strong>Find sensitive chat history and remove as much of it as each service still permits.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-2cbf9b.svg"></a>
@@ -20,7 +20,7 @@
 
 *Synthetic fixture data shown; no real Telegram account or conversation is pictured.*
 
-Retract is a local-first macOS desktop app for searching and cleaning Telegram history. Telegram credentials, sessions, message search, sensitive-data detection, and deletion execution stay on your Mac. There is no Retract cloud service or telemetry.
+Retract is a local-first macOS desktop app for searching and cleaning Telegram and Discord history. Credentials, sessions, imported archives, message search, sensitive-data detection, and deletion execution stay on your Mac. There is no Retract cloud service or telemetry.
 
 ## What Retract can do
 
@@ -33,14 +33,20 @@ Retract is a local-first macOS desktop app for searching and cleaning Telegram h
 - Permanently delete a group only when Telegram reports that the signed-in owner has that capability, through a separate critical action.
 - Resume eligible, previously authorized frozen-ID cleanup batches after a flood wait or restart only under the same verified account/source, without expanding the reviewed target set. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion operations stop after an ambiguous restart and require a new review.
 - Inspect complete cleanup outcomes on demand, including skipped, failed and uncertain results, retry timing, and safe explanations for blocked work.
+- Import a Discord Data Package, search only the messages attributed to that archive's owner, and delete selected exact message IDs after verifying the matching Discord account.
 
-Text, photos, videos, documents, voice messages, albums, captions, and other attachments are deleted with their Telegram message when Telegram accepts the request.
+Text, photos, videos, documents, voice messages, albums, captions, and other attachments are deleted with their Telegram message when Telegram accepts the request. Discord cleanup targets the exact channel/message IDs in the imported package; it does not crawl Discord or delete other users' messages.
 
 ## Important limits
 
 Retract can request only the deletion scope Telegram currently grants your account. It never converts a failed **delete for everyone** operation into **delete only for me**.
 
 Telegram deletion is not global erasure. Forwarded messages, quoted copies, screenshots, downloaded files, exports, notification history, moderation records, backups, and other copies outside Telegram may remain. Sensitive-data detection is heuristic: it can miss data and produce false positives. Retract does not OCR images or inspect document contents.
+
+> [!CAUTION]
+> Discord explicitly says that automating a normal user account (a “self-bot”) is forbidden and can result in account termination. Retract's Discord cleanup is an unofficial, unsupported form of normal-user automation. Use it only if you understand and accept that account risk. See [Discord's self-bot policy](https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots).
+
+Discord deletion is also not guaranteed global erasure. Access may have changed since the archive was created, attachments can remain cached for a period, and legal, safety, backup, quoted, copied, or downloaded records may remain. A successful run means Discord returned success or that the exact message was already absent; an ambiguous response is never reported as confirmed deletion.
 
 ## Install an unsigned preview
 
@@ -74,9 +80,11 @@ npm run tauri dev
 
 Environment variables in [`.env.example`](.env.example) are optional developer and CI overrides—not end-user setup. Do not use `VITE_*` variables for Telegram secrets and never commit an `.env` file.
 
-## Connect Telegram
+## Choose a data source
 
-On first launch, Retract opens **Connect Telegram**. There is no fixture or demo option in the end-user app.
+On first launch, Retract asks you to connect Telegram or import a Discord Data Package. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
+
+### Connect Telegram
 
 1. Sign in to [my.telegram.org](https://my.telegram.org) and open **API development tools**.
 2. Create an application if needed, then copy its numeric API ID and 32-character API hash.
@@ -85,7 +93,23 @@ On first launch, Retract opens **Connect Telegram**. There is no fixture or demo
 
 The API hash, TDLib database key, and encrypted job-store key live in one versioned macOS Keychain vault. Session databases use TDLib encryption in the operating system's app-data directory. The version-3 job store is authenticated to its provider/profile; plans and jobs additionally bind the verified account and source. Telegram message bodies and private filenames are not indexed automatically or stored in Retract's job state. Exact confirmation titles remain encrypted plan data.
 
-The codebase also includes a lazy encrypted archive backend, tested with synthetic data. Discord backend import work is not available to users until the source-selection and remediation UI lands; Discord/X support and archive source switching remain unavailable. First archive use obtains an independent key and upgrades the shared vault to v2 while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the new credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [archive storage and its remaining native/manual gates](docs/ARCHIVE_STORAGE.md).
+### Import and clean Discord history
+
+First request a package in Discord under **User Settings → Data & Privacy → Request your data**. Discord says package generation can take up to 30 days; its [Data Package guide](https://support.discord.com/hc/en-us/articles/360004957991-Your-Discord-Data-Package) explains the contents and current request flow.
+
+1. In Retract, choose **Import Discord package** and select the ZIP. Do not extract it first.
+2. Wait for the local import counter to reach **Archive ready**, then choose the imported account.
+3. Search and privacy-scan the archive before connecting to Discord. Importing alone never contacts Discord or deletes anything.
+4. Open Discord connection settings. Read and acknowledge the unsupported-account-automation warning.
+5. Choose any detected Chrome, Edge, Brave, Arc, Vivaldi, Opera, Chromium, or Firefox installation. Retract opens a new isolated temporary browser profile and observes only a plausible `Authorization` header on an HTTPS `discord.com/api` request. It never reads your normal browser profile.
+6. If your browser is unsupported—or automatic capture does not work—use **Enter token manually**, which is always available. Follow the in-app browser-neutral Developer Tools instructions and paste only the `Authorization` header value, never a password, cookie, or bot token.
+7. Retract verifies `/users/@me` and refuses to continue unless the account ID exactly matches the selected archive owner.
+8. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
+9. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
+
+Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
+
+First archive use obtains an independent key and upgrades the shared vault while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [archive storage details](docs/ARCHIVE_STORAGE.md).
 
 When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. This job migration preserves credential values and TDLib session/profile paths; the separate archive-key upgrade is described above. See the [migration contract](docs/TELEGRAM_CHARACTERIZATION.md#current-encrypted-store-and-migration-contract).
 
@@ -102,6 +126,8 @@ Do not begin with an old or valuable chat. Follow the complete [local live-test 
 5. Review the immutable plan, run it, and have the other participant verify that each Telegram message disappeared.
 
 Stop if the displayed reach is not what you expect. Test chat-wide, leave, administrator, and group-destruction actions only after selected-message deletion succeeds. The full release gate is in [docs/TEST_PLAN.md](docs/TEST_PLAN.md).
+
+For Discord, use a disposable account or harmless message set and accept the account-enforcement risk before testing. Request a fresh archive containing a unique message, import it, verify the connected Discord ID matches, select only that message, and have another participant confirm it is gone. Do not test against an account or history you cannot afford to lose.
 
 ## Verify in Docker
 
@@ -126,13 +152,13 @@ The prune command is interactive and scoped to Retract's named BuildKit caches. 
 ## Security and architecture
 
 - React and TypeScript render the three-pane UI; the webview cannot authorize a destructive operation.
-- Rust freezes plans, rechecks Telegram capabilities, owns confirmations, batches, encrypted state, retries, and cancellation.
+- Rust freezes plans, binds provider/account/source, rechecks live authority where supported, owns confirmations, batches, encrypted state, retries, and cancellation.
 - Every destructive action requires a fresh, single-use Touch ID or Mac login-password grant whose native prompt identifies the backend-frozen chat, sender, message count, and plan token as applicable.
 - TDLib is pinned by source commit and SHA-256, bundled as a native app resource, and checked before use.
 - The webview uses a strict content security policy and a minimal Tauri capability allowlist.
 - Production bundles resolve only the desktop IPC adapter. Synthetic fixture data is compiled only for tests and the dedicated screenshot build.
 
-Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for trust boundaries and residual risks. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Never attach Telegram credentials, sessions, exports, databases, or private screenshots to a public issue.
+Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for trust boundaries and residual risks. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Never attach Telegram or Discord credentials, tokens, sessions, exports, databases, or private screenshots to a public issue.
 
 ## Contributing
 
