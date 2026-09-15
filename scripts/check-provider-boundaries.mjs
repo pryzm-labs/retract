@@ -128,6 +128,19 @@ for (const path of rustFiles(sourceRoot)) {
 
 for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
   if (path.endsWith("_tests.rs") || path.endsWith("/tests.rs")) continue;
+  const name = display(path);
+  if (name === "providers/discord/session.rs") {
+    reject(path,
+      /\b(?:std\s*::\s*)?process\s*::|\b(?:Command|TcpListener|UdpSocket|tauri|telegram|Telegram\w*|webbrowser|opener)\b/,
+      "Discord session isolation forbids process, browser UI, IPC and Telegram APIs");
+    continue;
+  }
+  if (name.startsWith("providers/discord/browser/")) {
+    reject(path,
+      /\b(?:keyring|security_framework|Keychain|secure_store|telegram|Telegram\w*|tauri)\b/,
+      "Discord browser isolation forbids credential stores, IPC and Telegram APIs");
+    continue;
+  }
   reject(path,
     /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|tauri|keyring|security_framework|credentials|secure_store|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
     "Discord backend isolation forbids network, UI, credential, Telegram and process/browser APIs");

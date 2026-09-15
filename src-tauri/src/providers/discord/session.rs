@@ -266,11 +266,12 @@ impl DiscordSessionOwner {
                 return Err(error);
             }
         };
-        if remember && persist {
-            if let Err(error) = self.credential_store.save(&candidate) {
-                self.disconnect();
-                return Err(error);
-            }
+        if remember
+            && persist
+            && let Err(error) = self.credential_store.save(&candidate)
+        {
+            self.disconnect();
+            return Err(error);
         }
 
         let mut data = self.data.lock().map_err(|_| AppError::StateUnavailable)?;
@@ -348,7 +349,7 @@ fn valid_account_id(value: &str) -> bool {
     value.parse::<u64>().is_ok_and(|parsed| parsed > 0) && !value.starts_with('0')
 }
 
-fn valid_user_token(value: &str) -> bool {
+pub(super) fn valid_user_token(value: &str) -> bool {
     (20..=MAX_TOKEN_BYTES).contains(&value.len())
         && value.is_ascii()
         && value

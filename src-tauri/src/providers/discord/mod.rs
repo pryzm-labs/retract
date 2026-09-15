@@ -1,6 +1,7 @@
 //! Backend-only archive normalization and owned import. No usable provider ports.
 // Kept backend-only until a separately reviewed UI/IPC integration.
 #![allow(dead_code)]
+pub(crate) mod browser;
 pub(crate) mod import;
 pub(crate) mod locators;
 pub(crate) mod model;
