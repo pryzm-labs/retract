@@ -527,6 +527,8 @@ fn worker_rejects_oversized_requests_before_a_full_queue() {
                     next_batch: 0,
                 },
                 warnings: vec![],
+                observed_at: source().updated_at,
+                failure_code: None,
             };
             assert_eq!(
                 service.retry_import(&checkpoint).await.err(),

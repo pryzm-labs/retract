@@ -64,8 +64,12 @@ jobs:
       - name: Install locked JavaScript dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Verify synthetic archive and injected vault ownership tests
+      - name: Verify parser, Discord backend, synthetic archive and injected vault ownership tests
         run: |
+          cargo fmt --manifest-path crates/discord-archive/Cargo.toml -- --check
+          cargo test --release --locked --manifest-path crates/discord-archive/Cargo.toml
+          cargo clippy --locked --manifest-path crates/discord-archive/Cargo.toml --all-targets -- -D warnings
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml providers::discord::
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml persistence::archive::
           cargo test --release --locked --manifest-path src-tauri/Cargo.toml secure_store::vault
 

@@ -27,12 +27,10 @@ impl ArchiveStore {
             .ok_or(ArchiveError::InvalidRecord)?;
         self.transaction(|tx| {
             let source = read_source(tx, scope)?;
-            if source.state != SourceState::Preparing || load_run(tx, scope)?.is_some() { return Err(ArchiveError::StaleCursor); }
-            let session = ImportSession { id: Uuid::new_v4(), scope: scope.clone(), fingerprint: source.archive_fingerprint.ok_or(ArchiveError::InvalidRecord)?, schema_profile: source.schema_profile, cancellation: Default::default() };
-            let s = scope_sql(scope);
-            tx.execute("INSERT INTO import_runs(provider, account_id, source_id, run_id, session_id, fingerprint, schema_profile, validation_policy, state) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'importing')",
-                params![s[0], s[1], s[2], Uuid::new_v4().to_string(), session.id.to_string(), session.fingerprint, model::encode(&session.schema_profile)?, validator.validation_policy_key().as_str()]).map_err(storage)?;
-            Ok(session)
+            if source.state != SourceState::Preparing || load_run(tx, scope)?.is_some() {
+                return Err(ArchiveError::StaleCursor);
+            }
+            create_run(tx, &source, validator.validation_policy_key().as_str())
         })
     }
 
@@ -69,9 +67,10 @@ impl ArchiveStore {
             {
                 return Err(ArchiveError::StaleCursor);
             }
-            validate_checkpoint_integrity(tx, &run)?;
+            validate_checkpoint_integrity(tx, &run, false)?;
             run.session_id = Uuid::new_v4();
             run.checkpoint.progress.phase = ImportPhase::Importing;
+            run.checkpoint.failure_code = None;
             save_run(tx, &mut run)?;
             set_source_phase(tx, &run.checkpoint.scope, ImportPhase::Importing)?;
             Ok(ImportSession {
@@ -106,6 +105,30 @@ impl ArchiveStore {
         })
     }
 
+    pub(crate) fn fail_import(
+        &mut self,
+        session: &ImportSession,
+        code: model::ImportFailureCode,
+    ) -> Result<ImportProgress, ArchiveError> {
+        let validator = self
+            .validators
+            .get(&session.scope.provider)
+            .ok_or(ArchiveError::InvalidRecord)?;
+        self.transaction(|tx| {
+            let mut run = active_session(
+                tx,
+                session,
+                validator.validation_policy_key().as_str(),
+                self.import_limits,
+            )?;
+            run.checkpoint.progress.phase = ImportPhase::Failed;
+            run.checkpoint.failure_code = Some(code);
+            save_run(tx, &mut run)?;
+            set_source_phase(tx, &session.scope, ImportPhase::Failed)?;
+            Ok(run.checkpoint.progress)
+        })
+    }
+
     /// Query consumers use this same guard inside their read transaction.
     pub(crate) fn require_ready(&self, scope: &Scope) -> Result<(), ArchiveError> {
         self.transaction(|tx| require_ready(tx, scope))
@@ -123,6 +146,27 @@ impl ArchiveStore {
             self.import_limits,
         )
     }
+}
+
+pub(super) fn create_run(
+    tx: &Transaction<'_>,
+    source: &SourceRecord,
+    policy: &str,
+) -> Result<ImportSession, ArchiveError> {
+    let session = ImportSession {
+        id: Uuid::new_v4(),
+        scope: source.scope(),
+        fingerprint: source
+            .archive_fingerprint
+            .clone()
+            .ok_or(ArchiveError::InvalidRecord)?,
+        schema_profile: source.schema_profile.clone(),
+        cancellation: Default::default(),
+    };
+    let s = scope_sql(&session.scope);
+    tx.execute("INSERT INTO import_runs(provider, account_id, source_id, run_id, session_id, fingerprint, schema_profile, validation_policy, state, observed_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'importing', ?9)",
+        params![s[0], s[1], s[2], Uuid::new_v4().to_string(), session.id.to_string(), session.fingerprint, model::encode(&session.schema_profile)?, policy, source.updated_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)]).map_err(storage)?;
+    Ok(session)
 }
 
 pub(super) fn require_ready(connection: &Connection, scope: &Scope) -> Result<(), ArchiveError> {
@@ -192,11 +236,36 @@ pub(super) fn validate_runs(
         std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
     >,
 ) -> Result<(), ArchiveError> {
+    validate_runs_version(connection, validators, false)
+}
+
+pub(super) fn validate_runs_v1(
+    connection: &Connection,
+    validators: &std::collections::BTreeMap<
+        retract_domain::ProviderKey,
+        std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
+    >,
+) -> Result<(), ArchiveError> {
+    validate_runs_version(connection, validators, true)
+}
+
+fn validate_runs_version(
+    connection: &Connection,
+    validators: &std::collections::BTreeMap<
+        retract_domain::ProviderKey,
+        std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
+    >,
+    legacy: bool,
+) -> Result<(), ArchiveError> {
+    if !legacy {
+        validate_import_identities(connection)?;
+    }
     let mut query = connection.prepare("SELECT s.record_json FROM sources s JOIN import_runs r USING(provider, account_id, source_id)").map_err(storage)?;
     let mut rows = query.query([]).map_err(storage)?;
     while let Some(row) = rows.next().map_err(storage)? {
         let source: SourceRecord = model::decode(&row.get::<_, String>(0).map_err(storage)?)?;
-        let run = load_run(connection, &source.scope())?.ok_or(ArchiveError::InvalidStore)?;
+        let run = load_run_version(connection, &source.scope(), legacy)?
+            .ok_or(ArchiveError::InvalidStore)?;
         let validator = validators
             .get(&source.provider)
             .ok_or(ArchiveError::InvalidRecord)?;
@@ -206,7 +275,7 @@ pub(super) fn validate_runs(
             validator.validation_policy_key().as_str(),
             ImportLimits::default(),
         )?;
-        validate_checkpoint_integrity(connection, &run)?;
+        validate_checkpoint_integrity(connection, &run, legacy)?;
         let expected_state = match run.checkpoint.progress.phase {
             ImportPhase::Importing => SourceState::Preparing,
             ImportPhase::Ready => SourceState::Ready,
@@ -238,7 +307,11 @@ pub(super) fn interrupt_runs(connection: &mut Connection) -> Result<(), ArchiveE
     tx.commit().map_err(storage)
 }
 
-fn validate_checkpoint_integrity(connection: &Connection, run: &Run) -> Result<(), ArchiveError> {
+fn validate_checkpoint_integrity(
+    connection: &Connection,
+    run: &Run,
+    legacy: bool,
+) -> Result<(), ArchiveError> {
     let s = scope_sql(&run.checkpoint.scope);
     let items = connection.query_row("SELECT count(*) FROM content_observations WHERE provider=?1 AND account_id=?2 AND source_id=?3", params![s[0], s[1], s[2]], |row| unsigned(row, 0)).map_err(storage)?;
     if items != run.checkpoint.progress.committed_items {
@@ -274,6 +347,83 @@ fn validate_checkpoint_integrity(connection: &Connection, run: &Run) -> Result<(
         || items != progress.committed_items
         || bytes != progress.committed_bytes
     {
+        return Err(ArchiveError::InvalidStore);
+    }
+    if !legacy {
+        validate_warning_ledger(connection, run)?;
+    }
+    Ok(())
+}
+
+fn validate_import_identities(connection: &Connection) -> Result<(), ArchiveError> {
+    let mut query = connection.prepare("SELECT i.fingerprint, i.schema_profile, i.validation_policy, i.parser_policy, s.record_json, r.schema_profile, r.validation_policy, r.fingerprint FROM archive_import_identities i JOIN sources s USING(provider, account_id, source_id) LEFT JOIN import_runs r USING(provider, account_id, source_id)").map_err(storage)?;
+    let mut rows = query.query([]).map_err(storage)?;
+    while let Some(row) = rows.next().map_err(storage)? {
+        let fingerprint: String = row.get(0).map_err(storage)?;
+        let profile: String = row.get(1).map_err(storage)?;
+        let policy: String = row.get(2).map_err(storage)?;
+        let parser: String = row.get(3).map_err(storage)?;
+        let source: SourceRecord = model::decode(&row.get::<_, String>(4).map_err(storage)?)?;
+        if source.archive_fingerprint.as_deref() != Some(&fingerprint)
+            || model::encode(&source.schema_profile)? != profile
+            || row.get::<_, String>(5).map_err(storage)? != profile
+            || row.get::<_, String>(6).map_err(storage)? != policy
+            || row.get::<_, String>(7).map_err(storage)? != fingerprint
+            || parser.trim().is_empty()
+            || parser.len() > 256
+            || parser.chars().any(char::is_control)
+        {
+            return Err(ArchiveError::InvalidStore);
+        }
+    }
+    Ok(())
+}
+
+fn validate_warning_ledger(connection: &Connection, run: &Run) -> Result<(), ArchiveError> {
+    let s = scope_sql(&run.checkpoint.scope);
+    let mut query = connection.prepare("SELECT d.sequence, d.ordinal, d.code, d.count, r.digest_version FROM import_warning_deltas d JOIN import_batch_receipts r USING(provider, account_id, source_id, run_id, sequence) WHERE d.provider=?1 AND d.account_id=?2 AND d.source_id=?3 AND d.run_id=?4 ORDER BY d.sequence, d.ordinal").map_err(storage)?;
+    let mut rows = query
+        .query(params![s[0], s[1], s[2], run.checkpoint.run_id.to_string()])
+        .map_err(storage)?;
+    let mut totals = std::collections::BTreeMap::<String, u64>::new();
+    let mut sequence = None;
+    let mut ordinal = 0;
+    while let Some(row) = rows.next().map_err(storage)? {
+        let next_sequence = unsigned(row, 0).map_err(storage)?;
+        if sequence != Some(next_sequence) {
+            sequence = Some(next_sequence);
+            ordinal = 0;
+        }
+        let code: String = row.get(2).map_err(storage)?;
+        if row.get::<_, i64>(4).map_err(storage)? != 2
+            || unsigned(row, 1).map_err(storage)? != ordinal
+            || ordinal >= model::MAX_WARNING_CODES as u64
+            || !matches!(
+                code.as_str(),
+                "unknown_conversation_kind" | "missing_optional_context"
+            )
+        {
+            return Err(ArchiveError::InvalidStore);
+        }
+        ordinal += 1;
+        let count = unsigned(row, 3).map_err(storage)?;
+        if count == 0 {
+            return Err(ArchiveError::InvalidStore);
+        }
+        let total = totals.entry(code).or_default();
+        *total = total
+            .checked_add(count)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or(ArchiveError::InvalidStore)?;
+    }
+    let recorded: std::collections::BTreeMap<_, _> = run
+        .checkpoint
+        .warnings
+        .iter()
+        .filter(|w| !matches!(w.code.as_str(), "missing_reply" | "missing_thread"))
+        .map(|w| (w.code.clone(), w.count))
+        .collect();
+    if totals != recorded {
         return Err(ArchiveError::InvalidStore);
     }
     Ok(())
@@ -317,6 +467,14 @@ pub(super) fn load_run(
     connection: &Connection,
     scope: &Scope,
 ) -> Result<Option<Run>, ArchiveError> {
+    load_run_version(connection, scope, false)
+}
+
+fn load_run_version(
+    connection: &Connection,
+    scope: &Scope,
+    legacy: bool,
+) -> Result<Option<Run>, ArchiveError> {
     let s = scope_sql(scope);
     let raw = connection.query_row("SELECT run_id, session_id, fingerprint, schema_profile, validation_policy, revision, state, committed_records, committed_bytes, next_batch FROM import_runs WHERE provider=?1 AND account_id=?2 AND source_id=?3", params![s[0], s[1], s[2]], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, unsigned(row, 5)?, row.get::<_, String>(6)?, unsigned(row, 7)?, unsigned(row, 8)?, unsigned(row, 9)?))
@@ -336,6 +494,25 @@ pub(super) fn load_run(
     else {
         return Ok(None);
     };
+    let (observed_at, failure_code) = if legacy {
+        (
+            read_source(connection, scope)?.updated_at,
+            (state == "failed").then_some(model::ImportFailureCode::IncompleteSource),
+        )
+    } else {
+        let (observed, failure): (String, Option<String>) = connection.query_row("SELECT observed_at, failure_code FROM import_runs WHERE provider=?1 AND account_id=?2 AND source_id=?3", params![s[0], s[1], s[2]], |r| Ok((r.get(0)?, r.get(1)?))).map_err(storage)?;
+        let failure = failure
+            .map(|code| model::decode::<model::ImportFailureCode>(&format!("\"{code}\"")))
+            .transpose()
+            .map_err(|_| ArchiveError::InvalidStore)?;
+        if (state == "failed") != failure.is_some() {
+            return Err(ArchiveError::InvalidStore);
+        }
+        (
+            observed.parse().map_err(|_| ArchiveError::InvalidStore)?,
+            failure,
+        )
+    };
     let mut query = connection.prepare("SELECT code, count FROM import_warnings WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4 ORDER BY code LIMIT 33").map_err(storage)?;
     let warnings = query
         .query_map(params![s[0], s[1], s[2], run_id], |row| {
@@ -349,7 +526,13 @@ pub(super) fn load_run(
         .map_err(storage)?;
     if warnings.len() > model::MAX_WARNING_CODES
         || warnings.iter().any(|warning| {
-            !matches!(warning.code.as_str(), "missing_reply" | "missing_thread")
+            !matches!(
+                warning.code.as_str(),
+                "missing_reply"
+                    | "missing_thread"
+                    | "unknown_conversation_kind"
+                    | "missing_optional_context"
+            ) || (legacy && !matches!(warning.code.as_str(), "missing_reply" | "missing_thread"))
                 || warning.count == 0
         })
     {
@@ -371,6 +554,8 @@ pub(super) fn load_run(
                 next_batch,
             },
             warnings,
+            observed_at,
+            failure_code,
         },
     }))
 }
@@ -383,8 +568,13 @@ pub(super) fn save_run(tx: &Transaction<'_>, run: &mut Run) -> Result<(), Archiv
         .checked_add(1)
         .ok_or(ArchiveError::LimitExceeded)?;
     let p = &run.checkpoint.progress;
-    tx.execute("UPDATE import_runs SET state=?5, committed_records=?6, committed_bytes=?7, next_batch=?8, revision=?9, session_id=?10 WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4",
-        params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), phase_name(p.phase), integer(p.committed_items)?, integer(p.committed_bytes)?, integer(p.next_batch)?, integer(run.checkpoint.revision)?, run.session_id.to_string()]).map_err(storage)?;
+    let failure = run
+        .checkpoint
+        .failure_code
+        .map(|code| model::encode(&code).map(|s| s.trim_matches('"').to_owned()))
+        .transpose()?;
+    tx.execute("UPDATE import_runs SET state=?5, committed_records=?6, committed_bytes=?7, next_batch=?8, revision=?9, session_id=?10, failure_code=?11 WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4",
+        params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), phase_name(p.phase), integer(p.committed_items)?, integer(p.committed_bytes)?, integer(p.next_batch)?, integer(run.checkpoint.revision)?, run.session_id.to_string(), failure]).map_err(storage)?;
     Ok(())
 }
 

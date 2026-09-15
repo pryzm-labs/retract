@@ -14,6 +14,9 @@ fi
 for marker in \
   "Project Cedar launch credentials" \
   "Disposable fixtures" \
+  "invented_owner" \
+  "run_discord_import_benchmark" \
+  "invented.discord.bench@example.invalid" \
   "reset_demo"
 do
   set +e

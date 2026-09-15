@@ -1,3 +1,4 @@
+pub(crate) mod discord;
 pub mod frozen_lifecycle;
 pub mod lifecycle;
 pub mod ports;

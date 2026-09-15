@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use retract_domain::{ProviderResourceRef, ResourceKind, Scope};
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use uuid::Uuid;
 
 use super::{
@@ -20,11 +20,40 @@ impl ArchiveStore {
         &mut self,
         session: &ImportSession,
         sequence: u64,
+        batch: ImportBatch,
+    ) -> Result<ImportProgress, ArchiveError> {
+        self.append(session, sequence, batch, None)
+    }
+
+    pub(crate) fn append_batch_v2(
+        &mut self,
+        session: &ImportSession,
+        sequence: u64,
+        mut batch: model::ImportBatchV2,
+    ) -> Result<ImportProgress, ArchiveError> {
+        batch.bounded_size()?;
+        batch.normalize_provider_fields();
+        self.append(session, sequence, batch.records, Some(batch.warnings))
+    }
+
+    fn append(
+        &mut self,
+        session: &ImportSession,
+        sequence: u64,
         mut batch: ImportBatch,
+        warnings: Option<Vec<model::ImportWarningDelta>>,
     ) -> Result<ImportProgress, ArchiveError> {
         session.cancellation.check()?;
-        let bytes = batch.bounded_size()? as u64;
-        let digest = batch.digest()?;
+        let (bytes, digest, version) = if let Some(warnings) = &warnings {
+            let payload = model::batch_v2_payload(&batch, warnings);
+            (
+                model::encoded_size(&payload, model::MAX_BATCH_BYTES)? as u64,
+                model::digest_serialized(&payload)?,
+                2,
+            )
+        } else {
+            (batch.bounded_size()? as u64, batch.digest()?, 1)
+        };
         let validator = self
             .validators
             .get(&session.scope.provider)
@@ -34,20 +63,23 @@ impl ArchiveStore {
             let s = scope_sql(&session.scope);
             let progress = &run.checkpoint.progress;
             if sequence < progress.next_batch {
-                let receipt = tx.query_row("SELECT digest, committed_records, committed_bytes, next_batch FROM import_batch_receipts WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4 AND sequence=?5",
+                let receipt = tx.query_row("SELECT digest, committed_records, committed_bytes, next_batch, digest_version FROM import_batch_receipts WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4 AND sequence=?5",
                     params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), integer(sequence)?], |row| {
-                        Ok((row.get::<_, String>(0)?, ImportProgress { phase: ImportPhase::Importing, committed_items: unsigned(row, 1)?, committed_bytes: unsigned(row, 2)?, next_batch: unsigned(row, 3)? }))
+                        Ok((row.get::<_, String>(0)?, ImportProgress { phase: ImportPhase::Importing, committed_items: unsigned(row, 1)?, committed_bytes: unsigned(row, 2)?, next_batch: unsigned(row, 3)? }, row.get::<_, i64>(4)?))
                     }).optional().map_err(storage)?.ok_or(ArchiveError::InvalidStore)?;
-                return if receipt.0 == digest { Ok(receipt.1) } else { Err(ArchiveError::StaleCursor) };
+                return if receipt.0 == digest && receipt.2 == version { Ok(receipt.1) } else { Err(ArchiveError::StaleCursor) };
             }
             if sequence != progress.next_batch { return Err(ArchiveError::StaleCursor); }
             let committed_bytes = progress.committed_bytes.checked_add(bytes).ok_or(ArchiveError::LimitExceeded)?;
             if committed_bytes > self.import_limits.bytes { return Err(ArchiveError::LimitExceeded); }
             batch.validate(&session.scope, validator.as_ref())?;
+            if version == 2 { validate_observation_times(&batch, run.checkpoint.observed_at)?; }
             for actor in batch.actors.iter().chain(batch.conversations.iter().flat_map(|c| &c.participants)) {
+                if version == 2 && identical_observation(tx, &session.scope, actor.id.as_uuid(), "actor_observations", actor, |_: &mut retract_domain::ActorRecord| {})? { continue; }
                 upsert_observation(tx, &session.scope, &actor.resource, "actor_observations", &model::encode(actor)?)?;
             }
             for conversation in &batch.conversations {
+                if version == 2 && identical_observation(tx, &session.scope, conversation.id.as_uuid(), "conversation_observations", conversation, |_: &mut retract_domain::ConversationRecord| {})? { continue; }
                 if let Some(parent) = conversation.parent_id { check_reference(tx, &session.scope, parent.as_uuid(), ResourceKind::Conversation)?; }
                 upsert_observation(tx, &session.scope, &conversation.resource, "conversation_observations", &model::encode(conversation)?)?;
             }
@@ -55,6 +87,7 @@ impl ArchiveStore {
             let mut written = BTreeSet::new();
             for content in &mut batch.contents {
                 if !written.insert(content.id) { continue; }
+                if version == 2 && identical_observation(tx, &session.scope, content.id.as_uuid(), "content_observations", content, model::clear_derived_fields)? { continue; }
                 check_reference(tx, &session.scope, content.conversation_id.as_uuid(), ResourceKind::Conversation)?;
                 check_reference(tx, &session.scope, content.author_id.as_uuid(), ResourceKind::Actor)?;
                 if let Some(reply) = content.reply_to { check_reference(tx, &session.scope, reply.as_uuid(), ResourceKind::Content)?; }
@@ -84,8 +117,9 @@ impl ArchiveStore {
                 }
             }
             let progress = ImportProgress { phase: ImportPhase::Importing, committed_items: progress.committed_items.checked_add(new_items).ok_or(ArchiveError::LimitExceeded)?, committed_bytes, next_batch: sequence.checked_add(1).ok_or(ArchiveError::LimitExceeded)? };
-            tx.execute("INSERT INTO import_batch_receipts(provider, account_id, source_id, run_id, sequence, digest, committed_records, committed_bytes, next_batch) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), integer(sequence)?, digest, integer(progress.committed_items)?, integer(progress.committed_bytes)?, integer(progress.next_batch)?]).map_err(storage)?;
+            tx.execute("INSERT INTO import_batch_receipts(provider, account_id, source_id, run_id, sequence, digest, committed_records, committed_bytes, next_batch, digest_version) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), integer(sequence)?, digest, integer(progress.committed_items)?, integer(progress.committed_bytes)?, integer(progress.next_batch)?, version]).map_err(storage)?;
+            if let Some(warnings) = &warnings { append_warnings(tx, &run, sequence, warnings)?; }
             run.checkpoint.progress = progress.clone();
             save_run(tx, &mut run)?;
             Ok(progress)
@@ -101,26 +135,47 @@ impl ArchiveStore {
             .validators
             .get(&session.scope.provider)
             .ok_or(ArchiveError::InvalidRecord)?;
-        let progress = self.transaction_checked(|tx| {
-            let mut run = active_session(tx, session, validator.validation_policy_key().as_str(), self.import_limits)?;
-            let s = scope_sql(&session.scope);
-            let missing = tx.query_row("SELECT EXISTS(SELECT 1 FROM content_observations c
-                WHERE c.provider=?1 AND c.account_id=?2 AND c.source_id=?3 AND (
-                    NOT EXISTS(SELECT 1 FROM conversation_observations v WHERE v.provider=c.provider AND v.account_id=c.account_id AND v.source_id=c.source_id AND v.resource_id=c.conversation_id)
-                    OR NOT EXISTS(SELECT 1 FROM actor_observations a WHERE a.provider=c.provider AND a.account_id=c.account_id AND a.source_id=c.source_id AND a.resource_id=c.author_id)))",
-                params![s[0], s[1], s[2]], |row| row.get::<_, bool>(0)).map_err(storage)?;
-            run.checkpoint.progress.phase = if missing { ImportPhase::Failed } else { ImportPhase::Ready };
-            collect_warnings(tx, &run)?;
-            save_run(tx, &mut run)?;
-            set_source_phase(tx, &session.scope, run.checkpoint.progress.phase)?;
-            Ok(run.checkpoint.progress)
-        }, || session.cancellation.check())?;
+        let progress = self.transaction_checked(
+            |tx| {
+                let mut run = active_session(
+                    tx,
+                    session,
+                    validator.validation_policy_key().as_str(),
+                    self.import_limits,
+                )?;
+                let missing = missing_mandatory_observations(tx, &session.scope)?;
+                run.checkpoint.progress.phase = if missing {
+                    ImportPhase::Failed
+                } else {
+                    ImportPhase::Ready
+                };
+                run.checkpoint.failure_code =
+                    missing.then_some(model::ImportFailureCode::IncompleteSource);
+                collect_warnings(tx, &run)?;
+                save_run(tx, &mut run)?;
+                set_source_phase(tx, &session.scope, run.checkpoint.progress.phase)?;
+                Ok(run.checkpoint.progress)
+            },
+            || session.cancellation.check(),
+        )?;
         if progress.phase == ImportPhase::Failed {
             Err(ArchiveError::IncompleteSource)
         } else {
             Ok(progress)
         }
     }
+}
+
+pub(super) fn missing_mandatory_observations(
+    connection: &Connection,
+    scope: &Scope,
+) -> Result<bool, ArchiveError> {
+    let s = scope_sql(scope);
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM content_observations c
+        WHERE c.provider=?1 AND c.account_id=?2 AND c.source_id=?3 AND (
+            NOT EXISTS(SELECT 1 FROM conversation_observations v WHERE v.provider=c.provider AND v.account_id=c.account_id AND v.source_id=c.source_id AND v.resource_id=c.conversation_id)
+            OR NOT EXISTS(SELECT 1 FROM actor_observations a WHERE a.provider=c.provider AND a.account_id=c.account_id AND a.source_id=c.source_id AND a.resource_id=c.author_id)))",
+        params![s[0], s[1], s[2]], |row| row.get(0)).map_err(storage)
 }
 
 fn upsert_identity(
@@ -164,13 +219,13 @@ fn upsert_observation(
     Ok(())
 }
 
-fn check_reference(
-    tx: &Transaction<'_>,
+pub(super) fn check_reference(
+    connection: &Connection,
     scope: &Scope,
     id: &Uuid,
     kind: ResourceKind,
 ) -> Result<(), ArchiveError> {
-    let stored = tx
+    let stored = connection
         .query_row(
             "SELECT provider, account_id, kind FROM resource_identities WHERE resource_id=?",
             [id.to_string()],
@@ -198,7 +253,7 @@ fn check_reference(
 
 fn collect_warnings(tx: &Transaction<'_>, run: &Run) -> Result<(), ArchiveError> {
     let s = scope_sql(&run.checkpoint.scope);
-    tx.execute("DELETE FROM import_warnings WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4", params![s[0], s[1], s[2], run.checkpoint.run_id.to_string()]).map_err(storage)?;
+    tx.execute("DELETE FROM import_warnings WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4 AND code IN ('missing_reply', 'missing_thread')", params![s[0], s[1], s[2], run.checkpoint.run_id.to_string()]).map_err(storage)?;
     for (code, column, table) in [
         ("missing_reply", "reply_to_id", "content_observations"),
         (
@@ -211,6 +266,85 @@ fn collect_warnings(tx: &Transaction<'_>, run: &Run) -> Result<(), ArchiveError>
             SELECT ?1, ?2, ?3, ?4, ?5, count(*) FROM content_observations c WHERE c.provider=?1 AND c.account_id=?2 AND c.source_id=?3 AND c.{column} IS NOT NULL
             AND NOT EXISTS(SELECT 1 FROM {table} r WHERE r.provider=c.provider AND r.account_id=c.account_id AND r.source_id=c.source_id AND r.resource_id=c.{column}) HAVING count(*) > 0"),
             params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), code]).map_err(storage)?;
+    }
+    Ok(())
+}
+
+fn validate_observation_times(
+    batch: &ImportBatch,
+    observed: chrono::DateTime<chrono::Utc>,
+) -> Result<(), ArchiveError> {
+    if batch
+        .actors
+        .iter()
+        .chain(batch.conversations.iter().flat_map(|c| &c.participants))
+        .any(|a| a.observed_at != observed)
+        || batch
+            .conversations
+            .iter()
+            .any(|c| c.observed_at != observed)
+        || batch.contents.iter().any(|c| c.observed_at != observed)
+    {
+        return Err(ArchiveError::InvalidRecord);
+    }
+    Ok(())
+}
+
+fn identical_observation<T: serde::de::DeserializeOwned + PartialEq>(
+    tx: &Transaction<'_>,
+    scope: &Scope,
+    id: &Uuid,
+    table: &str,
+    input: &T,
+    normalize: impl FnOnce(&mut T),
+) -> Result<bool, ArchiveError> {
+    let s = scope_sql(scope);
+    let stored: Option<String> = tx.query_row(&format!("SELECT record_json FROM {table} WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND resource_id=?4"), params![s[0], s[1], s[2], id.to_string()], |r| r.get(0)).optional().map_err(storage)?;
+    let Some(stored) = stored else {
+        return Ok(false);
+    };
+    let mut record: T = model::decode(&stored)?;
+    normalize(&mut record);
+    if &record != input {
+        return Err(ArchiveError::ConflictingObservation);
+    }
+    Ok(true)
+}
+
+fn append_warnings(
+    tx: &Transaction<'_>,
+    run: &Run,
+    sequence: u64,
+    warnings: &[model::ImportWarningDelta],
+) -> Result<(), ArchiveError> {
+    let s = scope_sql(&run.checkpoint.scope);
+    for (ordinal, warning) in warnings.iter().enumerate() {
+        let count: u64 = tx.query_row("SELECT count FROM import_warnings WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4 AND code=?5", params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), warning.code.as_str()], |r| unsigned(r, 0)).optional().map_err(storage)?.unwrap_or(0);
+        let count = integer(
+            count
+                .checked_add(warning.count)
+                .ok_or(ArchiveError::LimitExceeded)?,
+        )?;
+        tx.execute("INSERT INTO import_warnings VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(provider, account_id, source_id, run_id, code) DO UPDATE SET count=excluded.count", params![s[0], s[1], s[2], run.checkpoint.run_id.to_string(), warning.code.as_str(), count]).map_err(storage)?;
+        tx.execute(
+            "INSERT INTO import_warning_deltas VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                s[0],
+                s[1],
+                s[2],
+                run.checkpoint.run_id.to_string(),
+                integer(sequence)?,
+                ordinal as i64,
+                warning.code.as_str(),
+                integer(warning.count)?
+            ],
+        )
+        .map_err(storage)?;
+    }
+    let count: i64 = tx.query_row("SELECT count(*) FROM import_warnings WHERE provider=?1 AND account_id=?2 AND source_id=?3 AND run_id=?4", params![s[0], s[1], s[2], run.checkpoint.run_id.to_string()], |r| r.get(0)).map_err(storage)?;
+    // Two additional closed codes are reserved for finalization references.
+    if count > (model::MAX_WARNING_CODES - 2) as i64 {
+        return Err(ArchiveError::LimitExceeded);
     }
     Ok(())
 }

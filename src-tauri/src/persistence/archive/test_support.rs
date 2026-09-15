@@ -348,6 +348,8 @@ pub(in crate::persistence::archive) fn sql_snapshot(
                 "import_runs",
                 "import_batch_receipts",
                 "import_warnings",
+                "archive_import_identities",
+                "import_warning_deltas",
             ]
             .into_iter()
             .map(|table| {

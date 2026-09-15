@@ -160,6 +160,18 @@ test("production bundle validator rejects fixture data without nonstandard tools
   }
 });
 
+test("production bundle rejects Discord fixture and opt-in benchmark symbols", () => {
+  const directory = mkdtempSync(join(tmpdir(), "retract-discord-bundle-test-"));
+  try {
+    for (const marker of ["invented_owner", "run_discord_import_benchmark", "invented.discord.bench@example.invalid"]) {
+      writeFileSync(join(directory, "app.js"), `const forbidden = ${JSON.stringify(marker)};`);
+      assert.equal(verifyProductionBundle(directory).status, 1, marker);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("codesign validator requires an ad-hoc signature with hardened runtime", () => {
   const directory = mkdtempSync(join(tmpdir(), "retract-codesign-test-"));
   try {

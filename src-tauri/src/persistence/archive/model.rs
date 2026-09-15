@@ -41,6 +41,135 @@ pub(crate) struct ImportBatch {
     pub contents: Vec<retract_domain::ContentRecord>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct ImportBatchV2 {
+    pub records: ImportBatch,
+    pub warnings: Vec<ImportWarningDelta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImportWarningCode {
+    UnknownConversationKind,
+    MissingOptionalContext,
+}
+
+impl ImportWarningCode {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownConversationKind => "unknown_conversation_kind",
+            Self::MissingOptionalContext => "missing_optional_context",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ImportWarningDelta {
+    pub code: ImportWarningCode,
+    pub count: u64,
+}
+
+impl ImportBatchV2 {
+    pub(crate) fn bounded_size(&self) -> Result<usize, ArchiveError> {
+        self.bounded_size_with(AdmissionLimits::default())
+    }
+
+    pub(super) fn bounded_size_with(&self, limits: AdmissionLimits) -> Result<usize, ArchiveError> {
+        limits.validate()?;
+        if self.warnings.len() > limits.warning_codes {
+            return Err(ArchiveError::LimitExceeded);
+        }
+        for warning in &self.warnings {
+            if warning.count == 0 {
+                return Err(ArchiveError::InvalidRecord);
+            }
+            super::ingest_state::integer(warning.count)?;
+        }
+        if self.records.actors.is_empty()
+            && self.records.conversations.is_empty()
+            && self.records.contents.is_empty()
+        {
+            if self.warnings.is_empty() {
+                return Err(ArchiveError::InvalidRecord);
+            }
+        } else {
+            self.records.bounded_size_with(limits)?;
+        }
+        encoded_size(
+            &batch_v2_payload(&self.records, &self.warnings),
+            limits.bytes,
+        )
+    }
+
+    pub(super) fn normalize_provider_fields(&mut self) {
+        for content in &mut self.records.contents {
+            clear_derived_fields(content);
+        }
+    }
+}
+
+pub(super) fn clear_derived_fields(content: &mut retract_domain::ContentRecord) {
+    content.privacy_findings.clear();
+    content.detector_version = None;
+}
+
+pub(super) fn batch_v2_payload<'a>(
+    records: &'a ImportBatch,
+    warnings: &'a [ImportWarningDelta],
+) -> impl Serialize + 'a {
+    // Domain separation and an explicit version ensure v1 digests remain valid
+    // only under their legacy receipt format. Array order is intentionally kept.
+    ("retract.archive.batch", 2_u8, records, warnings)
+}
+
+/// Backend input only: provider payloads are untrusted and the store owns all
+/// account/source UUIDs and canonical identity resolution. No mutation grant.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NewArchiveImport {
+    pub provider: retract_domain::ProviderKey,
+    pub native_identity: VersionedPayload,
+    pub display_name: String,
+    pub username: Option<String>,
+    pub avatar: Option<VersionedPayload>,
+    pub fingerprint: String,
+    pub schema_profile: VersionedPayload,
+    pub parser_policy: String,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl NewArchiveImport {
+    pub(super) fn bounded_size(&self) -> Result<(), ArchiveError> {
+        encoded_size(&self.native_identity, ENVELOPE_BYTES)?;
+        envelope_bounds(self.avatar.as_ref())?;
+        provenance_bounds(&self.fingerprint, &self.schema_profile)?;
+        if self.parser_policy.trim().is_empty()
+            || self.parser_policy.len() > 256
+            || self.parser_policy.chars().any(char::is_control)
+        {
+            return Err(ArchiveError::InvalidRecord);
+        }
+        encoded_size(self, MAX_BATCH_BYTES)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportDisposition {
+    Start,
+    Ready,
+    Busy,
+    RetryRequired,
+}
+
+#[derive(Debug)]
+pub(crate) struct ArchiveImportResolution {
+    pub account: AccountRecord,
+    pub source: SourceRecord,
+    pub checkpoint: ImportCheckpoint,
+    pub disposition: ImportDisposition,
+    pub session: Option<std::sync::Arc<ImportSession>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ImportSession {
     pub(super) id: uuid::Uuid,
@@ -100,6 +229,19 @@ pub(crate) struct ImportCheckpoint {
     pub revision: u64,
     pub progress: ImportProgress,
     pub warnings: Vec<ImportWarning>,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub failure_code: Option<ImportFailureCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ImportFailureCode {
+    InvalidArchive,
+    UnsupportedProfile,
+    LimitExceeded,
+    InputChanged,
+    IncompleteSource,
+    StorageFailure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -114,6 +256,48 @@ pub(crate) const MAX_SEARCHABLE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_ATTACHMENTS: usize = 100;
 pub(crate) const MAX_WARNING_CODES: usize = 32;
 pub(crate) const MAX_QUEUED_BATCHES: usize = 2;
+
+/// Internal admission parameters for small boundary tests. Production callers
+/// use Default, which draws exclusively from the authoritative named ceilings.
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionLimits {
+    pub records: usize,
+    pub bytes: usize,
+    pub text: usize,
+    pub envelope: usize,
+    pub attachments: usize,
+    pub warning_codes: usize,
+}
+impl Default for AdmissionLimits {
+    fn default() -> Self {
+        Self {
+            records: MAX_BATCH_RECORDS,
+            bytes: MAX_BATCH_BYTES,
+            text: MAX_SEARCHABLE_BYTES,
+            envelope: ENVELOPE_BYTES,
+            attachments: MAX_ATTACHMENTS,
+            warning_codes: MAX_WARNING_CODES,
+        }
+    }
+}
+impl AdmissionLimits {
+    fn validate(self) -> Result<(), ArchiveError> {
+        let ceiling = Self::default();
+        for (value, maximum) in [
+            (self.records, ceiling.records),
+            (self.bytes, ceiling.bytes),
+            (self.text, ceiling.text),
+            (self.envelope, ceiling.envelope),
+            (self.attachments, ceiling.attachments),
+            (self.warning_codes, ceiling.warning_codes),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(ArchiveError::LimitExceeded);
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct ImportLimits {
@@ -134,6 +318,11 @@ impl ImportBatch {
     /// Worker callers can reject a batch before copying or queueing it. No
     /// encoded buffer or detector input is allocated until these bounds pass.
     pub(crate) fn bounded_size(&self) -> Result<usize, ArchiveError> {
+        self.bounded_size_with(AdmissionLimits::default())
+    }
+
+    pub(super) fn bounded_size_with(&self, limits: AdmissionLimits) -> Result<usize, ArchiveError> {
+        limits.validate()?;
         let count = self.conversations.iter().try_fold(
             self.contents
                 .len()
@@ -149,28 +338,28 @@ impl ImportBatch {
         if count == 0 {
             return Err(ArchiveError::InvalidRecord);
         }
-        if count > MAX_BATCH_RECORDS {
+        if count > limits.records {
             return Err(ArchiveError::LimitExceeded);
         }
-        self.item_bounds()?;
-        encoded_size(self, MAX_BATCH_BYTES)
+        self.item_bounds(limits)?;
+        encoded_size(self, limits.bytes)
     }
 
-    fn item_bounds(&self) -> Result<(), ArchiveError> {
+    fn item_bounds(&self, limits: AdmissionLimits) -> Result<(), ArchiveError> {
         for actor in self
             .actors
             .iter()
             .chain(self.conversations.iter().flat_map(|c| &c.participants))
         {
-            resource_bounds(&actor.resource)?;
-            envelope_bounds(actor.avatar.as_ref())?;
+            encoded_size(&actor.resource, limits.envelope)?;
+            envelope_bounds_with(actor.avatar.as_ref(), limits.envelope)?;
         }
         for conversation in &self.conversations {
-            resource_bounds(&conversation.resource)?;
-            envelope_bounds(conversation.provider_metadata.as_ref())?;
+            encoded_size(&conversation.resource, limits.envelope)?;
+            envelope_bounds_with(conversation.provider_metadata.as_ref(), limits.envelope)?;
         }
         for content in &self.contents {
-            if content.attachments.len() > MAX_ATTACHMENTS {
+            if content.attachments.len() > limits.attachments {
                 return Err(ArchiveError::LimitExceeded);
             }
             let searchable_bytes = content.attachments.iter().try_fold(
@@ -181,32 +370,20 @@ impl ImportBatch {
                         .ok_or(ArchiveError::LimitExceeded)
                 },
             )?;
-            if searchable_bytes > MAX_SEARCHABLE_BYTES {
+            if searchable_bytes > limits.text {
                 return Err(ArchiveError::LimitExceeded);
             }
-            resource_bounds(&content.resource)?;
-            envelope_bounds(content.provider_metadata.as_ref())?;
+            encoded_size(&content.resource, limits.envelope)?;
+            envelope_bounds_with(content.provider_metadata.as_ref(), limits.envelope)?;
             for attachment in &content.attachments {
-                envelope_bounds(Some(&attachment.locator))?;
+                envelope_bounds_with(Some(&attachment.locator), limits.envelope)?;
             }
         }
         Ok(())
     }
 
     pub(super) fn digest(&self) -> Result<String, ArchiveError> {
-        struct HashWriter(Sha256);
-        impl Write for HashWriter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.update(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut writer = HashWriter(Sha256::new());
-        serde_json::to_writer(&mut writer, self).map_err(|_| ArchiveError::InvalidRecord)?;
-        Ok(hex(&writer.0.finalize()))
+        digest_serialized(self)
     }
 
     pub(super) fn validate(
@@ -327,8 +504,15 @@ fn resource_bounds(resource: &ProviderResourceRef) -> Result<(), ArchiveError> {
 }
 
 fn envelope_bounds(envelope: Option<&VersionedPayload>) -> Result<(), ArchiveError> {
+    envelope_bounds_with(envelope, ENVELOPE_BYTES)
+}
+
+fn envelope_bounds_with(
+    envelope: Option<&VersionedPayload>,
+    maximum: usize,
+) -> Result<(), ArchiveError> {
     if let Some(envelope) = envelope {
-        encoded_size(envelope, ENVELOPE_BYTES)?;
+        encoded_size(envelope, maximum)?;
     }
     Ok(())
 }
@@ -396,7 +580,23 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub(super) const ENVELOPE_BYTES: usize = 64 * 1024;
+pub(super) fn digest_serialized(value: &impl Serialize) -> Result<String, ArchiveError> {
+    struct HashWriter(Sha256);
+    impl Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut writer, value).map_err(|_| ArchiveError::InvalidRecord)?;
+    Ok(hex(&writer.0.finalize()))
+}
+
+pub(crate) const ENVELOPE_BYTES: usize = 64 * 1024;
 
 pub(super) fn registration_bounds(
     account: &AccountRecord,
@@ -431,7 +631,7 @@ pub(super) fn checkpoint_bounds(checkpoint: &ImportCheckpoint) -> Result<(), Arc
 
 /// Counts the actual JSON encoding without retaining a serialized buffer and
 /// aborts serialization as soon as the approved byte ceiling is exceeded.
-pub(super) fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, ArchiveError> {
+pub(crate) fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, ArchiveError> {
     struct Counter {
         bytes: usize,
         limit: usize,

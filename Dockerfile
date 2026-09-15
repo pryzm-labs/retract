@@ -57,6 +57,7 @@ COPY --chown=retract:retract . .
 RUN --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
     cargo fetch --locked --manifest-path crates/cleaner-domain/Cargo.toml \
     && cargo fetch --locked --manifest-path crates/retract-domain/Cargo.toml \
+    && cargo fetch --locked --manifest-path crates/discord-archive/Cargo.toml \
     && cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
 FROM dependencies AS check-base
@@ -84,11 +85,13 @@ FROM check-base AS checks
 # the host filesystem, Docker's socket, or the network through this build.
 RUN --network=none npm test
 RUN --network=none npm run test:release
+RUN --network=none node --test scripts/check-discord-fixtures.node-test.mjs
 RUN --network=none npm run check:public-repo
 RUN --network=none npm run check:provider-boundaries
 RUN --network=none npm run verify:production-bundle
 RUN --network=none cargo fmt --manifest-path crates/cleaner-domain/Cargo.toml -- --check \
     && cargo fmt --manifest-path crates/retract-domain/Cargo.toml -- --check \
+    && cargo fmt --manifest-path crates/discord-archive/Cargo.toml -- --check \
     && cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
 # Cargo's registry and compiled targets live in named BuildKit caches instead
@@ -101,8 +104,29 @@ RUN --network=none \
     && cargo clippy --offline --locked --manifest-path crates/cleaner-domain/Cargo.toml --all-targets -- -D warnings \
     && cargo test --offline --locked --manifest-path crates/retract-domain/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path crates/retract-domain/Cargo.toml --all-targets -- -D warnings \
+    && cargo test --offline --locked --manifest-path crates/discord-archive/Cargo.toml \
+    && cargo clippy --offline --locked --manifest-path crates/discord-archive/Cargo.toml --all-targets -- -D warnings \
     && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml \
     && cargo clippy --offline --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+# Opt-in support must compile and remain covered while ordinary app builds keep
+# it disabled. The two focused tests use only generated synthetic inputs.
+RUN --network=none \
+    --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
+    --mount=type=cache,id=retract-cargo-target-${TARGETARCH},target=/home/retract/.cache/retract-target,uid=10001,gid=10001,sharing=locked \
+    cargo test --offline --locked --manifest-path src-tauri/Cargo.toml --features discord-import-bench benchmark_ \
+    && cargo clippy --offline --locked --manifest-path src-tauri/Cargo.toml --features discord-import-bench --all-targets -- -D warnings
+
+# Explicit resource run, never part of ordinary packaging. Generated ZIPs and
+# encrypted stores are removed before the layer succeeds; only named compiler
+# caches persist. Export this target with cache-only output.
+FROM check-base AS discord-import-benchmark
+RUN --network=none \
+    --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
+    --mount=type=cache,id=retract-cargo-target-${TARGETARCH},target=/home/retract/.cache/retract-target,uid=10001,gid=10001,sharing=locked \
+    retract_bench_dir=$(mktemp -d) \
+    && cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --features discord-import-bench --example discord_import_bench -- "$retract_bench_dir" \
+    && rmdir "$retract_bench_dir"
 
 # Export this target with --output=type=local to obtain only the reviewed web
 # assets. Native Tauri packages are intentionally produced on their target OS.

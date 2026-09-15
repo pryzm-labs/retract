@@ -5,11 +5,12 @@ use sha2::{Digest, Sha256};
 
 use super::ArchiveError;
 
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 const APPLICATION: &str = "retract.archive-index";
 // Intentional DDL edits require an explicit reviewed fingerprint update.
 const EXPECTED_SCHEMA_HASH: &str =
-    "323d5ed46b977547f54c4fae614e0804d0210ce84d6606d6a73645e8d06d9c8b";
+    "8d4a52cebc217fc7c45956713e9f41a6a0a9d3f6301a861bfda0738af14c0e0d";
+const V1_SCHEMA_HASH: &str = "323d5ed46b977547f54c4fae614e0804d0210ce84d6606d6a73645e8d06d9c8b";
 
 const TABLES: &str = "
 CREATE TABLE schema_migrations (
@@ -107,6 +108,8 @@ CREATE TABLE import_runs (
     committed_records INTEGER NOT NULL DEFAULT 0 CHECK(committed_records >= 0),
     committed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(committed_bytes >= 0),
     next_batch INTEGER NOT NULL DEFAULT 0 CHECK(next_batch >= 0),
+    observed_at TEXT NOT NULL,
+    failure_code TEXT CHECK(failure_code IN ('invalid_archive', 'unsupported_profile', 'limit_exceeded', 'input_changed', 'incomplete_source', 'storage_failure')),
     PRIMARY KEY(provider, account_id, source_id, run_id),
     UNIQUE(provider, account_id, source_id),
     FOREIGN KEY(provider, account_id, source_id) REFERENCES sources(provider, account_id, source_id) ON DELETE CASCADE
@@ -117,6 +120,7 @@ CREATE TABLE import_batch_receipts (
     committed_records INTEGER NOT NULL CHECK(committed_records >= 0),
     committed_bytes INTEGER NOT NULL CHECK(committed_bytes >= 0),
     next_batch INTEGER NOT NULL CHECK(next_batch > 0),
+    digest_version INTEGER NOT NULL DEFAULT 1 CHECK(digest_version IN (1, 2)),
     PRIMARY KEY(provider, account_id, source_id, run_id, sequence),
     FOREIGN KEY(provider, account_id, source_id, run_id) REFERENCES import_runs(provider, account_id, source_id, run_id) ON DELETE CASCADE
 ) STRICT;
@@ -132,6 +136,25 @@ CREATE TABLE cleanup_tasks (
     removed_items INTEGER NOT NULL DEFAULT 0 CHECK(removed_items >= 0),
     state TEXT NOT NULL CHECK(state IN ('pending', 'completed'))
 ) STRICT;
+CREATE TABLE archive_import_identities (
+    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL UNIQUE,
+    fingerprint TEXT NOT NULL, schema_profile TEXT NOT NULL, parser_policy TEXT NOT NULL,
+    validation_policy TEXT NOT NULL,
+    PRIMARY KEY(provider, account_id, fingerprint, schema_profile, parser_policy, validation_policy),
+    FOREIGN KEY(provider, account_id, source_id) REFERENCES sources(provider, account_id, source_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE import_warning_deltas (
+    provider TEXT NOT NULL, account_id TEXT NOT NULL, source_id TEXT NOT NULL, run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 32),
+    code TEXT NOT NULL CHECK(code IN ('unknown_conversation_kind', 'missing_optional_context')),
+    count INTEGER NOT NULL CHECK(count > 0),
+    PRIMARY KEY(provider, account_id, source_id, run_id, sequence, ordinal),
+    FOREIGN KEY(provider, account_id, source_id, run_id, sequence) REFERENCES import_batch_receipts(provider, account_id, source_id, run_id, sequence) ON DELETE CASCADE
+) STRICT;
+CREATE TRIGGER import_observed_at_immutable BEFORE UPDATE OF observed_at ON import_runs
+WHEN new.observed_at != old.observed_at BEGIN
+    SELECT RAISE(ABORT, 'archive observation time');
+END;
 -- Cleanup provenance must be established while the source exists, then survive
 -- its logical deletion so later compaction can update the same tombstone.
 CREATE TRIGGER cleanup_scope_insert BEFORE INSERT ON cleanup_tasks BEGIN
@@ -241,6 +264,18 @@ END;
 }
 
 pub(super) fn validate(connection: &Connection) -> Result<(), ArchiveError> {
+    validate_version(connection, VERSION, EXPECTED_SCHEMA_HASH)
+}
+
+pub(super) fn validate_v1(connection: &Connection) -> Result<(), ArchiveError> {
+    validate_version(connection, 1, V1_SCHEMA_HASH)
+}
+
+fn validate_version(
+    connection: &Connection,
+    version: i64,
+    expected_hash: &str,
+) -> Result<(), ArchiveError> {
     let mut query = connection
         .prepare("SELECT version, application, schema_hash FROM schema_migrations")
         .map_err(|_| ArchiveError::UnsupportedSchema)?;
@@ -256,9 +291,9 @@ pub(super) fn validate(connection: &Connection) -> Result<(), ArchiveError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ArchiveError::InvalidStore)?;
     if rows.len() != 1
-        || rows[0].0 != VERSION
+        || rows[0].0 != version
         || rows[0].1 != APPLICATION
-        || rows[0].2 != EXPECTED_SCHEMA_HASH
+        || rows[0].2 != expected_hash
         || rows[0].2 != schema_hash(connection)?
     {
         return Err(ArchiveError::UnsupportedSchema);

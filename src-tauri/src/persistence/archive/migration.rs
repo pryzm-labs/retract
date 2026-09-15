@@ -1,5 +1,5 @@
-//! Guarded encrypted candidate plumbing. No production predecessor is enabled.
-//! A candidate never authorizes recovery or replaces an accepted active store.
+//! Guarded encrypted candidate plumbing for the authenticated v1 predecessor.
+//! Only a fully validated candidate can atomically replace an accepted original.
 
 use std::{
     fs::{self, File},
@@ -26,6 +26,16 @@ pub(super) fn migrate(
     store::validate_parent(path)?;
     store::validate_artifacts(path)?;
     let _lock = store::acquire_lock(&store::sidecar(path, ".lock"))?;
+    migrate_locked(path, key, validate_old, populate, validate_candidate)
+}
+
+fn migrate_locked(
+    path: &Path,
+    key: &ArchiveKey,
+    validate_old: impl FnOnce(&Connection) -> Result<(), ArchiveError>,
+    populate: impl FnOnce(&Connection, &mut Connection) -> Result<(), ArchiveError>,
+    validate_candidate: impl FnOnce(&Connection) -> Result<(), ArchiveError>,
+) -> Result<(), ArchiveError> {
     require_clean(path)?;
     let candidate = store::sidecar(path, ".migration");
     if artifact_exists(&candidate)? {
@@ -44,6 +54,11 @@ pub(super) fn migrate(
         let mut new = codec::open_keyed(&candidate, key, false)?;
         schema::initialize(&mut new)?;
         populate(old, &mut new)?;
+        // Reopen after population so validation sees durable candidate state,
+        // including copied FTS shadow data, never a virtual-table write cache.
+        codec::validate_connection_settings(&new)?;
+        new.close().map_err(|_| ArchiveError::StorageFailure)?;
+        let new = codec::open_keyed(&candidate, key, false)?;
         validate_candidate(&new)?;
         validate_encrypted_candidate(&new)?;
         new.execute(
@@ -72,9 +87,193 @@ pub(super) fn migrate(
     sync_parent(path)
 }
 
+/// Called only while ArchiveStore owns the process lock. The v1 original is
+/// authenticated without recovery or writes; all modifications target a new,
+/// keyed candidate. The ordinary migration validator gates its sole rename.
+pub(super) fn upgrade_v1(
+    path: &Path,
+    key: &ArchiveKey,
+    validators: &std::collections::BTreeMap<
+        retract_domain::ProviderKey,
+        std::sync::Arc<dyn crate::persistence::ProviderPayloadValidator>,
+    >,
+) -> Result<(), ArchiveError> {
+    migrate_locked(
+        path,
+        key,
+        |old| {
+            schema::validate_v1(old)?;
+            validate_sqlite_indexes(old)?;
+            store::validate_registrations(old, validators)?;
+            super::ingest_state::validate_runs_v1(old, validators)
+        },
+        populate_v2,
+        |new| {
+            store::validate_registrations(new, validators)?;
+            super::ingest_state::validate_runs(new, validators)?;
+            super::migration_validation::validate(new, validators)
+        },
+    )
+}
+
+fn populate_v2(old: &Connection, new: &mut Connection) -> Result<(), ArchiveError> {
+    use super::ingest_state::storage;
+    let tx = new.transaction().map_err(storage)?;
+    // Tombstones deliberately outlive their sources. Disable only their insert
+    // provenance trigger on this empty candidate and restore its exact DDL in
+    // the same transaction, before mandatory schema fingerprint validation.
+    let cleanup_trigger: String = tx
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='cleanup_scope_insert'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    tx.execute_batch("DROP TRIGGER cleanup_scope_insert")
+        .map_err(storage)?;
+    for table in [
+        "accounts",
+        "sources",
+        "resource_identities",
+        "conversation_observations",
+        "actor_observations",
+        "content_observations",
+        "attachments",
+        "privacy_findings",
+        "import_runs",
+        "import_batch_receipts",
+        "import_warnings",
+        "cleanup_tasks",
+    ] {
+        let mut query = old
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .map_err(storage)?;
+        let width = query.column_count();
+        let columns = query.column_names().join(", ");
+        let placeholders = vec!["?"; width].join(", ");
+        let extra = if table == "import_runs" {
+            ", observed_at, failure_code"
+        } else {
+            ""
+        };
+        let values_extra = if table == "import_runs" { ", ?, ?" } else { "" };
+        let mut insert = tx
+            .prepare(&format!(
+                "INSERT INTO {table}({columns}{extra}) VALUES({placeholders}{values_extra})"
+            ))
+            .map_err(storage)?;
+        let mut rows = query.query([]).map_err(storage)?;
+        while let Some(row) = rows.next().map_err(storage)? {
+            let mut values = (0..width)
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            if table == "import_runs" {
+                let source_id: String = row.get(2).map_err(storage)?;
+                let observed: String = old.query_row("SELECT json_extract(record_json, '$.updatedAt') FROM sources WHERE source_id=?", [source_id], |r| r.get(0)).map_err(storage)?;
+                values.push(observed.into());
+                values.push(if row.get::<_, String>(9).map_err(storage)? == "failed" {
+                    "incomplete_source".to_owned().into()
+                } else {
+                    rusqlite::types::Value::Null
+                });
+            }
+            insert
+                .execute(rusqlite::params_from_iter(values))
+                .map_err(storage)?;
+        }
+        drop(rows);
+        // Verify every original column, including row keys/generations, without
+        // retaining the corpus or exposing SQL through the worker boundary.
+        let mut copied = tx
+            .prepare(&format!("SELECT {columns} FROM {table} ORDER BY rowid"))
+            .map_err(storage)?;
+        let mut original_rows = query.query([]).map_err(storage)?;
+        let mut copied_rows = copied.query([]).map_err(storage)?;
+        while let Some(original) = original_rows.next().map_err(storage)? {
+            let copy = copied_rows
+                .next()
+                .map_err(storage)?
+                .ok_or(ArchiveError::InvalidStore)?;
+            for i in 0..width {
+                if original
+                    .get::<_, rusqlite::types::Value>(i)
+                    .map_err(storage)?
+                    != copy.get::<_, rusqlite::types::Value>(i).map_err(storage)?
+                {
+                    return Err(ArchiveError::InvalidStore);
+                }
+            }
+        }
+        if copied_rows.next().map_err(storage)?.is_some() {
+            return Err(ArchiveError::InvalidStore);
+        }
+    }
+    tx.execute_batch(&cleanup_trigger).map_err(storage)?;
+    tx.commit().map_err(storage)?;
+    // Preserve the old FTS index, not a regenerated substitute. Copy after all
+    // content-trigger writes commit; reopen before the ordinary FTS integrity
+    // command verifies postings, row IDs, columns and document token counts.
+    // These four shadow tables have identical authenticated v1/v2 DDL.
+    let tx = new.transaction().map_err(storage)?;
+    for (table, order) in [
+        ("content_fts_data", "id"),
+        ("content_fts_idx", "segid, term"),
+        ("content_fts_docsize", "id"),
+        ("content_fts_config", "k"),
+    ] {
+        tx.execute(&format!("DELETE FROM {table}"), [])
+            .map_err(storage)?;
+        let mut query = old
+            .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
+            .map_err(storage)?;
+        let width = query.column_count();
+        let mut insert = tx
+            .prepare(&format!(
+                "INSERT INTO {table} VALUES({})",
+                vec!["?"; width].join(",")
+            ))
+            .map_err(storage)?;
+        let mut rows = query.query([]).map_err(storage)?;
+        while let Some(row) = rows.next().map_err(storage)? {
+            let values = (0..width)
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            insert
+                .execute(rusqlite::params_from_iter(values))
+                .map_err(storage)?;
+        }
+    }
+    tx.commit().map_err(storage)
+}
+
+fn validate_sqlite_indexes(connection: &Connection) -> Result<(), ArchiveError> {
+    // Unlike quick_check, this also checks expression/index entries against
+    // table records (including the conversation-parent JSON expression index).
+    let mut query = connection
+        .prepare("PRAGMA integrity_check")
+        .map_err(super::ingest_state::storage)?;
+    let mut rows = query.query([]).map_err(super::ingest_state::storage)?;
+    let row = rows
+        .next()
+        .map_err(super::ingest_state::storage)?
+        .ok_or(ArchiveError::InvalidStore)?;
+    if row
+        .get::<_, String>(0)
+        .map_err(super::ingest_state::storage)?
+        != "ok"
+        || rows.next().map_err(super::ingest_state::storage)?.is_some()
+    {
+        return Err(ArchiveError::InvalidStore);
+    }
+    Ok(())
+}
+
 fn validate_encrypted_candidate(connection: &Connection) -> Result<(), ArchiveError> {
     codec::validate_connection_settings(connection)?;
     schema::validate(connection)?;
+    validate_sqlite_indexes(connection)?;
     let corrupt = connection
         .prepare("PRAGMA cipher_integrity_check")
         .map_err(|_| ArchiveError::InvalidStore)?

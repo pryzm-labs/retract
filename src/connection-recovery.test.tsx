@@ -63,7 +63,9 @@ describe("connection bootstrap and replacement recovery", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     render(<App />);
-    expect(await screen.findByText("Connect Telegram")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "Connect Telegram" })).toBeVisible()
+    );
     expect(screen.queryByText("Workspace not ready")).not.toBeInTheDocument();
   });
 

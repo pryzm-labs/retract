@@ -1,6 +1,6 @@
 # Archive storage
 
-Retract contains an internal encrypted archive repository and a lazy, bounded backend service. This is backend foundation only: no real archive importer, Discord/X support, source-switching UI, background indexing, or new destructive command is enabled. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database.
+Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a backend-only Discord importer. Discord remains unavailable to users: no production import command, source-switching UI, remediation UI or background import registration is enabled. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database.
 
 ## Native dependency
 
@@ -90,3 +90,67 @@ The Linux arm64 Docker run at reviewed code commit `08a67cc3deb595cd6d4f27664467
 | Sampled total disk high, including rollback journal | 498,728,136 |
 
 This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The benchmark was refreshed once after the final fix review because both admission and schema changed; it is not part of standard packaging or recurring gates. Native/manual verification remains separate.
+
+## Discord backend acceptance
+
+The importer accepts the single frozen `discord.data_package.messages_json` v1 profile described in the [design](superpowers/specs/2026-09-07-discord-archive-import-design.md) and [synthetic provenance manifest](../src-tauri/test-fixtures/discord-import/manifest.json). Its interpretation is deliberately narrow: account-owned sent messages, canonical `u64` IDs, unzoned calendar text checked against the message Snowflake, opaque channel types represented as `Other`, and empty or one inert HTTPS attachment reference. It does not fetch/open links, authenticate an account, expose remediation, infer a complete conversation, or certify unrelated ZIP payload CRCs.
+
+Schema v2 preserves the frozen encrypted v1 artifact, its DDL hash, legacy receipts and existing observations. Import identity resolution, warning receipts, fixed failures, hidden incomplete sources and explicit deterministic retries use the same store and worker as indexed queries/removal. Input identity is checked using the retained regular-file descriptor and two complete hashes. This detects ordinary changes; it is not a guarantee against a malicious same-user race. Cancellation/shutdown retain and drain the owned blocking task before archive/credential shutdown.
+
+The generated benchmark runs exactly 10,000 and 100,000 records through the actual reader, normalizer, import owner, encrypted archive owner, paged query and source-removal service:
+
+```sh
+docker buildx build --platform linux/arm64 --target discord-import-benchmark --output type=cacheonly --progress plain .
+```
+
+The non-default `discord-import-bench` example accepts one empty canonical private temporary directory, validates ownership/mode/symlinks, and accepts no archive path, credentials or corpus-size override. It generates four deterministic stored ZIP entries with one record buffered at a time. It verifies every message and stable pagination ordering, email findings and indexed hits, closes/reopens the encrypted store, confirms identical-import reuse without reparsing, removes the source, and verifies the source is gone. Generated inputs/stores are removed and the Docker target verifies that its temporary directory is empty before removing it. Named Cargo caches hold compilation output only; the target exports no runnable image.
+
+Raw ZIP bytes, decoded entry bytes (the sum of uncompressed generated entry payloads), accepted normalized bytes and disk lengths are separate measurements. Physical parser read bytes include repeated inspection/typed reads; hashing bytes include two passes. Disk high-water values are sampled every 10 ms, count DB, sidecars, nested temporary files and the generated ZIP, and may miss transient peaks. RSS is Linux `VmHWM`, a cumulative whole-process high water including generation, runtime, workers, sampler, query, reopen and removal. The 100k result shares a process with the earlier 10k run; its RSS is not an independent per-corpus peak. The benchmark uses stored ZIPs and one small-record channel, not a compression throughput or worst-case-record workload. Neither this comparison nor the source quota establishes million-record performance. Classic ZIP/selection/token/retained budgets may bind before the higher storage quotas.
+
+### Ceiling coverage
+
+All production ceilings remain unchanged. `ArchiveLimits::default`, archive model constants and `ImportLimits::default` are authoritative. Parser options reject zero or increases; private `AdmissionLimits` draws from existing storage constants and permits only smaller positive limits for the same production admission path. Existing exact-boundary tests remain alongside the small-limit checks.
+
+| Resource | Production ceiling | Evidence (synthetic tests) |
+| --- | --- | --- |
+| ZIP bytes; directory bytes/count | 4 GiB; 32 MiB / 100,000 | `every_declared_limit_is_enforced_before_consumption` |
+| Entry path bytes/components | 1,024 / 16 | Same injected preflight test; unsafe/collision/range tests |
+| Entry/all-declared/pass-expanded bytes | 2 GiB / 16 GiB / 4 GiB | Declared-limit tests; repeated-consumption observed-byte and lying-size tests |
+| Expansion ratio; nonempty zero-compressed | 1,000:1; reject | `zero_compressed_nonempty_and_excessive_ratio_are_rejected` |
+| JSON depth/scalar/token | 64 / 1 MiB / 1,000,000 | Structure, profile and typed-reader injected ignored-field tests |
+| Raw/decoded record | 8 MiB / 2 MiB | Structure/reader raw/decoded tests with positive reset controls |
+| Display/selected contexts | 4 KiB / 40,000 selected entries | Exact UTF-8 display tests; selection/profile/forged-inspection tests |
+| Retained structure/headers | 32 MiB accounted | Cross-record unique keys, incremental grammar members, pre-allocation/growth and retained-budget handoff tests |
+| Batch count/encoded bytes | 500 / 4 MiB | `injected_admission_limits_cover_every_batch_item_and_warning_ceiling`; exact count/byte boundary tests |
+| Text/envelope/attachments | 1 MiB / 64 KiB / 100 | Same small admission test; nested item and synchronous pre-queue rejection tests |
+| Queued batches | 2 | Real worker tests hold both slots and cancel/reject before allocation |
+| Query text/page/resolve | 4 KiB / 200 / 200 | Query boundary/cursor/resolve tests and full-queue admission tests |
+| Source distinct items/accepted input | 1,000,000 / 2 GiB | Injected item/byte quotas across updates, cancellation, replay and retry |
+| Warning entries/counts/failure codes | 32 / signed SQLite range / closed enums | Small warning admission; zero/overflow/replay/unknown-code and fixed-failure tests |
+| File identity/size/content | Retained regular file; exact before/after identity/hash | Symlink/special/change/replacement/hard-link and coordinator cancellation tests |
+
+The named 40,000 context ceiling currently bounds all selected evidence entries (`2 + 2 * channels`), so it conservatively admits at most 19,999 paired channels. All ZIP64 forms remain rejected; classic ZIP's representable count can bind before the 100,000 entry ceiling. Retained structure is conservative allocation accounting, not measured RSS.
+
+### Observed Discord benchmark
+
+The ARM64 Docker run on 2026-09-10, build `aaeycmix7jeyhaq956hjcp6ho`, used the unoptimized dev profile with debug information disabled, UID 10001 and no network after locked dependency fetch. Both complete corpora passed all pagination, findings/search, reopen/reuse and removal assertions. Neither corpus reported a sampling error; temporary-file high water was zero and the generated directory cleanup succeeded.
+
+| Measurement | 10,000 records | 100,000 records |
+| --- | ---: | ---: |
+| Raw ZIP bytes | 1,343,670 | 13,430,670 |
+| Decoded entry bytes | 1,343,114 | 13,430,114 |
+| Accepted normalized bytes | 10,526,027 | 105,246,707 |
+| Committed batches | 21 | 201 |
+| Whole-process RSS after import, bytes | 69,029,888 | 70,479,872 |
+| Whole-process final RSS, bytes | 70,479,872 | 73,781,248 |
+| Exact DB after import / sampled DB high, bytes | 39,567,360 | 394,801,152 |
+| Sampled sidecar high, bytes | 39,624,840 | 395,722,896 |
+| Sampled total disk high, bytes (includes ZIP) | 80,535,870 | 803,954,718 |
+| Exact DB after removal/shutdown, bytes | 258,048 | 270,336 |
+| Generation, seconds | 0.045 | 0.451 |
+| Inspection/hash/import/final verification, seconds | 11.309 | 141.089 |
+| Full pagination/findings/indexed query, seconds | 0.340 | 3.073 |
+| Reopen/repeat/full pagination, seconds | 0.909 | 9.152 |
+| Source removal/shutdown, seconds | 2.159 | 34.958 |
+
+The tenfold input increase added about 1.45 MB to cumulative RSS at the import boundary, rather than tracking the added transcript bytes. Together with the typed reader's bounded-allocation test and one-record generator, this is evidence against whole-transcript materialization for this corpus; it is not a universal memory bound. Sidecar peaks include rollback journals and compound transaction/removal work, with zero sidecars at the reported quiescent boundaries. The benchmark removes the only source in each store; the earlier archive-storage benchmark separately measures removal with surviving sources.

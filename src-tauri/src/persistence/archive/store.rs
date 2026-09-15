@@ -49,6 +49,69 @@ impl Drop for ProcessLock {
 }
 
 impl ArchiveStore {
+    pub(crate) fn resolve_or_register_import(
+        &self,
+        input: model::NewArchiveImport,
+    ) -> Result<model::ArchiveImportResolution, ArchiveError> {
+        use super::ingest_state::{load_run, scope_sql, storage};
+        use model::{ArchiveImportResolution, ImportDisposition, ImportPhase};
+        input.bounded_size()?;
+        let validator = self
+            .validators
+            .get(&input.provider)
+            .ok_or(ArchiveError::InvalidRecord)?;
+        let policy = validator.validation_policy_key();
+        self.transaction(|tx| {
+            // This non-persisted placeholder satisfies the neutral record shape
+            // for provider validation. Allocate a real UUID only after lookup.
+            let mut account = AccountRecord {
+                id: uuid::Uuid::from_u128(1).try_into().map_err(|_| ArchiveError::InvalidRecord)?,
+                provider: input.provider.clone(), native_identity: input.native_identity.clone(),
+                display_name: input.display_name.clone(), username: input.username.clone(), avatar: input.avatar.clone(),
+                connection_state: ConnectionState::Disconnected, created_at: input.observed_at, last_seen_at: input.observed_at,
+            };
+            let native = model::validate_archive_account(&account, validator.as_ref())?;
+            let previous: Option<String> = tx.query_row("SELECT record_json FROM accounts WHERE provider=?1 AND canonical_identity=?2", (input.provider.as_str(), native.as_canonical_str()), |r| r.get(0)).optional().map_err(storage)?;
+            if let Some(encoded) = previous {
+                account = model::decode(&encoded)?;
+                if account.provider != input.provider || model::validate_archive_account(&account, validator.as_ref())? != native { return Err(ArchiveError::InvalidStore); }
+            } else {
+                account.id = uuid::Uuid::new_v4().try_into().map_err(|_| ArchiveError::InvalidRecord)?;
+                if model::validate_archive_account(&account, validator.as_ref())? != native { return Err(ArchiveError::InvalidRecord); }
+                tx.execute("INSERT INTO accounts VALUES(?1, ?2, ?3, ?4)", (account.provider.as_str(), account.id.as_uuid().to_string(), native.as_canonical_str(), model::encode(&account)?)).map_err(storage)?;
+            }
+            let profile = model::encode(&input.schema_profile)?;
+            let existing: Option<String> = tx.query_row("SELECT source_id FROM archive_import_identities WHERE provider=?1 AND account_id=?2 AND fingerprint=?3 AND schema_profile=?4 AND parser_policy=?5 AND validation_policy=?6", rusqlite::params![input.provider.as_str(), account.id.as_uuid().to_string(), input.fingerprint, profile, input.parser_policy, policy.as_str()], |r| r.get(0)).optional().map_err(storage)?;
+            if let Some(id) = existing {
+                let scope = Scope { provider: input.provider.clone(), account_id: account.id, source_id: super::ingest_state::uuid(&id)?.try_into().map_err(|_| ArchiveError::InvalidStore)? };
+                let source = super::ingest_state::read_source(tx, &scope)?;
+                model::validate_registration(&account, &source, validator.as_ref())?;
+                let run = load_run(tx, &scope)?.ok_or(ArchiveError::InvalidStore)?;
+                super::ingest_state::check_provenance(&source, &input.fingerprint, &input.schema_profile)?;
+                super::ingest_state::validate_run(tx, &run, policy.as_str(), self.import_limits)?;
+                let disposition = match run.checkpoint.progress.phase {
+                    ImportPhase::Ready => ImportDisposition::Ready,
+                    ImportPhase::Importing => ImportDisposition::Busy,
+                    _ => ImportDisposition::RetryRequired,
+                };
+                return Ok(ArchiveImportResolution { account, source, checkpoint: run.checkpoint, disposition, session: None });
+            }
+            let source = SourceRecord {
+                id: uuid::Uuid::new_v4().try_into().map_err(|_| ArchiveError::InvalidRecord)?,
+                account_id: account.id, provider: input.provider, kind: retract_domain::SourceKind::ArchiveImport,
+                state: SourceState::Preparing, archive_fingerprint: Some(input.fingerprint), schema_profile: input.schema_profile,
+                imported_at: None, updated_at: input.observed_at, warnings: vec![],
+            };
+            model::validate_registration(&account, &source, validator.as_ref())?;
+            let s = scope_sql(&source.scope());
+            tx.execute("INSERT INTO sources VALUES(?1, ?2, ?3, ?4)", rusqlite::params![s[0], s[1], s[2], model::encode(&source)?]).map_err(storage)?;
+            tx.execute("INSERT INTO archive_import_identities VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)", rusqlite::params![s[0], s[1], s[2], source.archive_fingerprint, profile, input.parser_policy, policy.as_str()]).map_err(storage)?;
+            let session = super::ingest_state::create_run(tx, &source, policy.as_str())?;
+            let checkpoint = load_run(tx, &source.scope())?.ok_or(ArchiveError::InvalidStore)?.checkpoint;
+            Ok(ArchiveImportResolution { account, source, checkpoint, disposition: ImportDisposition::Start, session: Some(Arc::new(session)) })
+        })
+    }
+
     pub(crate) fn open(
         path: PathBuf,
         key: ArchiveKey,
@@ -86,11 +149,23 @@ impl ArchiveStore {
             return Err(ArchiveError::InvalidStore);
         }
         if !is_new {
+            let mut old_schema = false;
             preflight::validate_existing(&path, &key, |connection| {
-                schema::validate(connection)?;
+                match schema::validate(connection) {
+                    Ok(()) => (),
+                    Err(ArchiveError::UnsupportedSchema) => {
+                        schema::validate_v1(connection)?;
+                        old_schema = true;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
                 validate_registrations(connection, &validators)?;
                 super::ingest_state::validate_runs(connection, &validators)
             })?;
+            if old_schema {
+                super::migration::upgrade_v1(&path, &key, &validators)?;
+            }
         }
         let mut connection = open_keyed(&path, &key, false)?;
         if is_new {
@@ -223,7 +298,7 @@ impl ArchiveStore {
     }
 }
 
-fn validate_registrations(
+pub(super) fn validate_registrations(
     connection: &Connection,
     validators: &BTreeMap<ProviderKey, Arc<dyn ProviderPayloadValidator>>,
 ) -> Result<(), ArchiveError> {

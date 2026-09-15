@@ -14,10 +14,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 archive-bench = []
+discord-import-bench = []
 
 [[example]]
 name = "archive_storage_bench"
 required-features = ["archive-bench"]
+
+[[example]]
+name = "discord_import_bench"
+required-features = ["discord-import-bench"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -28,8 +33,10 @@ async-trait = "0.1"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 cleaner-domain = { path = "../crates/cleaner-domain" }
+discord-archive = { path = "../crates/discord-archive" }
 retract-domain = { path = "../crates/retract-domain" }
 futures-util = "0.3"
+percent-encoding = "2"
 libloading = "0.9.0"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +46,7 @@ tauri = { version = "2", features = [] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

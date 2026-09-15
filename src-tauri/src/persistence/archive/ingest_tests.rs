@@ -467,6 +467,94 @@ fn record_limit_includes_embedded_participants_and_all_explicit_types() {
 }
 
 #[test]
+fn injected_admission_limits_cover_every_batch_item_and_warning_ceiling() {
+    use super::model::AdmissionLimits;
+    let input = batch("one", "tiny");
+    let defaults = AdmissionLimits::default();
+    let bytes = serde_json::to_vec(&input).unwrap().len();
+    assert!(
+        input
+            .bounded_size_with(AdmissionLimits {
+                records: 3,
+                bytes,
+                text: 4,
+                ..defaults
+            })
+            .is_ok()
+    );
+    for limits in [
+        AdmissionLimits {
+            records: 2,
+            ..defaults
+        },
+        AdmissionLimits {
+            bytes: bytes - 1,
+            ..defaults
+        },
+        AdmissionLimits {
+            text: 3,
+            ..defaults
+        },
+        AdmissionLimits {
+            envelope: 1,
+            ..defaults
+        },
+    ] {
+        assert_eq!(
+            input.bounded_size_with(limits),
+            Err(ArchiveError::LimitExceeded)
+        );
+    }
+    let mut attached = input.clone();
+    attached.contents[0].attachments = vec![attachment("a")];
+    assert!(
+        attached
+            .bounded_size_with(AdmissionLimits {
+                attachments: 1,
+                text: 5,
+                ..defaults
+            })
+            .is_ok()
+    );
+    attached.contents[0].attachments.push(attachment("b"));
+    assert_eq!(
+        attached.bounded_size_with(AdmissionLimits {
+            attachments: 1,
+            ..defaults
+        }),
+        Err(ArchiveError::LimitExceeded)
+    );
+    let warned = super::ImportBatchV2 {
+        records: input,
+        warnings: vec![
+            super::ImportWarningDelta {
+                code: super::ImportWarningCode::UnknownConversationKind,
+                count: 1,
+            },
+            super::ImportWarningDelta {
+                code: super::ImportWarningCode::MissingOptionalContext,
+                count: 1,
+            },
+        ],
+    };
+    assert!(
+        warned
+            .bounded_size_with(AdmissionLimits {
+                warning_codes: 2,
+                ..defaults
+            })
+            .is_ok()
+    );
+    assert_eq!(
+        warned.bounded_size_with(AdmissionLimits {
+            warning_codes: 1,
+            ..defaults
+        }),
+        Err(ArchiveError::LimitExceeded)
+    );
+}
+
+#[test]
 fn encoded_batch_limit_accepts_four_mib_and_rejects_the_next_byte() {
     let fixture = Fixture::new();
     let mut store = registered(&fixture);

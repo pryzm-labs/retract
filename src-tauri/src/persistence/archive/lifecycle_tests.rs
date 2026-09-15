@@ -101,15 +101,15 @@ fn lifecycle_queued_settings_cannot_recreate_during_archive_drain_or_after_closu
         let gate = Arc::new(Gate::default());
         let _release = Release(gate.clone());
         let blocking = gate.clone();
-        let application = RuntimeState {
-            service: tokio::sync::RwLock::new(ProviderService::setup()),
-            archives: ArchiveOwner::with_opener(move || {
+        let application = RuntimeState::with_archives(
+            ProviderService::setup(),
+            ArchiveOwner::with_opener(move || {
                 let mut store = ArchiveStore::open(path.clone(), key(), validators())?;
                 let hook = blocking.clone();
                 store.before_commit = Some(Box::new(move || hook.wait()));
                 Ok(store)
             }),
-        };
+        );
         let archive = application.archives.open().await.unwrap();
         archive.register_source(&account(), &source()).await.unwrap();
         let session = archive.begin_import(&source().scope()).await.unwrap();
