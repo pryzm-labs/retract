@@ -1,6 +1,6 @@
 import type { ActiveContext, ScopedResourceRef, Uuid } from "./providers/identity";
 import type { IntentDescriptor } from "./providers/contract";
-import type { AppSnapshot, ConnectionSettings, JobRecord, PlanOperation, PlanView, SearchRequest, SearchResponse, SaveConnectionSettingsRequest, SaveConnectionSettingsResult, ChatSummary } from "./types";
+import type { AppSnapshot, ConnectionSettings, JobRecord, PlanOperation, PlanView, SearchRequest, SearchResponse, SaveConnectionSettingsRequest, SaveConnectionSettingsResult, ChatSummary, DiscordSource, DiscordImportStatus, DiscordSessionStatus, DiscordBrowser } from "./types";
 export type AuthCommand = "submit_phone" | "submit_email_address" | "submit_email_code" | "submit_code" | "submit_password";
 export interface RetractApi {
   isDesktop(): boolean;
@@ -22,4 +22,15 @@ export interface RetractApi {
   authorizePlan(plan: PlanView): Promise<void>;
   jobs(context: ActiveContext): Promise<JobRecord[]>;
   cancelJob(jobId: Uuid, context: ActiveContext): Promise<JobRecord>;
+  discordSources(context: ActiveContext | null): Promise<DiscordSource[]>;
+  selectDiscordSource(scope: import("./providers/identity").Scope, context: ActiveContext | null): Promise<AppSnapshot>;
+  startDiscordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
+  discordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
+  cancelDiscordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
+  discordSession(context: ActiveContext): Promise<DiscordSessionStatus>;
+  discordBrowsers(context: ActiveContext): Promise<DiscordBrowser[]>;
+  connectDiscordBrowser(browserId: string, remember: boolean, riskAcknowledged: boolean, context: ActiveContext): Promise<DiscordSessionStatus>;
+  cancelDiscordBrowser(context: ActiveContext): Promise<void>;
+  submitDiscordToken(token: string, remember: boolean, riskAcknowledged: boolean, context: ActiveContext): Promise<DiscordSessionStatus>;
+  forgetDiscordSession(context: ActiveContext): Promise<DiscordSessionStatus>;
 }

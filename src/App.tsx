@@ -7,6 +7,8 @@ import { AuthGate } from "./components/AuthGate";
 import { BrandLogo } from "./components/BrandLogo";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ConnectionSettingsDialog } from "./components/ConnectionSettingsDialog";
+import { DiscordConnectionDialog } from "./components/DiscordConnectionDialog";
+import { SourceSetupDialog } from "./components/SourceSetupDialog";
 import { ImpactPanel } from "./components/ImpactPanel";
 import { messageKey, ResultsList } from "./components/ResultsList";
 import { type ContentFilter, contentKindsForFilter, type DateFilter, SearchToolbar } from "./components/SearchToolbar";
@@ -33,6 +35,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [connectionSettings, setConnectionSettings] = useState<ConnectionSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sourceSetupOpen, setSourceSetupOpen] = useState(false);
+  const [discordConnectionOpen, setDiscordConnectionOpen] = useState(false);
   const [results, setResults] = useState<SearchResponse>({ messages: [], returned: 0, truncated: false });
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [query, setQuery] = useState("");
@@ -46,6 +50,7 @@ export default function App() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState("");
   const [selectedMessages, setSelectedMessages] = useState<Map<string, MessageSnapshot>>(new Map());
+  const [completedDiscordMessageKeys, setCompletedDiscordMessageKeys] = useState<Set<string>>(new Set());
   const [plan, setPlan] = useState<PlanView | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncingCatalog, setSyncingCatalog] = useState(false);
@@ -81,6 +86,7 @@ export default function App() {
       setBusyLabel(null);
       setSelectedChatId(null);
       setSelectedMessages(new Map());
+      setCompletedDiscordMessageKeys(new Set());
       setPlan(null);
       setResults({ messages: [], returned: 0, truncated: false });
       setSettlingRemovalChatIds(new Set());
@@ -92,6 +98,13 @@ export default function App() {
     currentContext.current = next.context;
     setSnapshot(next);
     setJobs(next.context ? next.recentJobs.filter(job => sameScope(job.scope, next.context!.scope)) : []);
+    if (next.context?.scope.provider === "discord") {
+      setCompletedDiscordMessageKeys(new Set(next.recentJobs
+        .filter(job => job.status === "completed" && sameScope(job.scope, next.context!.scope))
+        .flatMap(job => job.dirtyRefs)
+        .filter(ref => ref.resource.resourceKind === "content")
+        .map(refKey)));
+    }
     setCatalogProgress(next.catalog);
     setStartupError(null);
   }, []);
@@ -132,7 +145,7 @@ export default function App() {
         const settings = await api.connectionSettings(next.context);
         if (capturedEpoch !== epoch.current) return;
         setConnectionSettings(settings);
-        if (!settings.setupComplete) setSettingsOpen(true);
+        if (!settings.setupComplete) setSourceSetupOpen(true);
       }
       if (next.context && next.identity.state === "ready" && !catalogSyncStarted.current) {
         catalogSyncStarted.current = true;
@@ -154,7 +167,7 @@ export default function App() {
         const settings = await api.connectionSettings(next.context);
         if (disposed || capturedEpoch !== epoch.current) return;
         setConnectionSettings(settings);
-        if (!settings.setupComplete) setSettingsOpen(true);
+        if (!settings.setupComplete) setSourceSetupOpen(true);
         if (next.context && next.identity.state === "ready") {
           catalogSyncStarted.current = true;
           void loadSnapshot(next.context);
@@ -293,7 +306,12 @@ export default function App() {
           }
           pendingRemovalJobs.current.delete(job.id);
         }
-        if (finished.length) refreshAffectedChatsInBackground(finished.flatMap(job => job.dirtyRefs), removedRefs);
+        if (finished.length && context.scope.provider === "discord") {
+          const completed = finished.filter(job => job.status === "completed").flatMap(job => job.dirtyRefs).filter(ref => ref.resource.resourceKind === "content").map(refKey);
+          if (completed.length) setCompletedDiscordMessageKeys(current => new Set([...current, ...completed]));
+        } else if (finished.length) {
+          refreshAffectedChatsInBackground(finished.flatMap(job => job.dirtyRefs), removedRefs);
+        }
         tracked = new Set(next.filter(job => job.status === "queued" || job.status === "running").map(job => job.id));
       } catch (error) { if (!disposed && capturedEpoch === epoch.current) showError(error, setToast); }
       finally { pending = false; }
@@ -304,6 +322,7 @@ export default function App() {
   useEffect(() => {
     const context = snapshot?.context;
     if (!activeChatRef || !context) return;
+    if (context.scope.provider === "discord") return;
     const capturedEpoch = epoch.current, key = refKey(activeChatRef);
     let disposed = false;
     void api.intents([activeChatRef], context).then(intents => {
@@ -348,11 +367,12 @@ export default function App() {
   };
 
   const toggleMessage = (message: MessageSnapshot) => {
+    if (completedDiscordMessageKeys.has(messageKey(message))) return;
     setSelectedMessages((current) => {
       const next = new Map(current);
       const album = message.albumId == null
         ? [message]
-        : results.messages.filter((candidate) => sameScope(candidate.scope, message.scope) && candidate.chatId === message.chatId && candidate.albumId === message.albumId);
+        : results.messages.filter((candidate) => !completedDiscordMessageKeys.has(messageKey(candidate)) && sameScope(candidate.scope, message.scope) && candidate.chatId === message.chatId && candidate.albumId === message.albumId);
       const albumIsSelected = album.every((candidate) => next.has(messageKey(candidate)));
       for (const candidate of album) {
         const key = messageKey(candidate);
@@ -366,8 +386,9 @@ export default function App() {
   const toggleAll = () => {
     setSelectedMessages((current) => {
       const next = new Map(current);
-      const allCurrentSelected = results.messages.length > 0 && results.messages.every((message) => next.has(messageKey(message)));
-      for (const message of results.messages) {
+      const selectable = results.messages.filter(message => !completedDiscordMessageKeys.has(messageKey(message)));
+      const allCurrentSelected = selectable.length > 0 && selectable.every((message) => next.has(messageKey(message)));
+      for (const message of selectable) {
         const key = messageKey(message);
         if (allCurrentSelected) next.delete(key);
         else next.set(key, message);
@@ -485,7 +506,8 @@ export default function App() {
 
   const executePlan = async (acknowledged: boolean, typedTitle: string | null) => {
     if (!plan) return;
-    const generation = beginAction("Starting Telegram cleanup…");
+    const discord = plan.context.scope.provider === "discord";
+    const generation = beginAction(discord ? "Starting Discord cleanup…" : "Starting Telegram cleanup…");
     if (generation === null) return;
     let refreshAfterExecution: ScopedResourceRef[] = [];
     let removedAfterExecution: ScopedResourceRef[] = [];
@@ -501,6 +523,9 @@ export default function App() {
       }
       if (generation !== actionGeneration.current) return;
       setJobs((current) => [job, ...current.filter((candidate) => candidate.id !== job.id)]);
+      if (discord && job.status === "completed") {
+        setCompletedDiscordMessageKeys(current => new Set([...current, ...job.dirtyRefs.filter(ref => ref.resource.resourceKind === "content").map(refKey)]));
+      }
       if ((job.status === "queued" || job.status === "running") && operationRemovesChat(plan.operation)) {
         pendingRemovalJobs.current.set(job.id, job.dirtyRefs);
         setSettlingRemovalChatIds((current) => new Set([...current, ...job.dirtyRefs.map(refKey)]));
@@ -518,14 +543,14 @@ export default function App() {
               ? "Chat removed from this view."
               : "Removing this chat for your account… It is locked until Telegram finishes."
           : job.status === "completed"
-            ? "Deletion completed. Syncing the local view…"
-            : "Deletion job started. Every batch will be capability-checked again."
+            ? discord ? "Discord deletion completed. The archived record remains marked as deleted or absent." : "Deletion completed. Syncing the local view…"
+            : discord ? "Discord deletion job started. Exact archive IDs remain locked while it runs." : "Deletion job started. Every batch will be capability-checked again."
       });
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
     } finally {
       endAction(generation);
-      if (generation === actionGeneration.current && refreshAfterExecution.length > 0) {
+      if (!discord && generation === actionGeneration.current && refreshAfterExecution.length > 0) {
         refreshAffectedChatsInBackground(refreshAfterExecution, removedAfterExecution);
       }
     }
@@ -541,7 +566,7 @@ export default function App() {
       const next = await api.jobs(context);
       if (generation === actionGeneration.current) {
         setJobs(next);
-        setToast({ tone: "success", message: "Cancellation requested. The current Telegram call may finish; no later batch will start." });
+        setToast({ tone: "success", message: `Cancellation requested. The current ${context.scope.provider === "discord" ? "Discord" : "Telegram"} call may finish; no later batch will start.` });
       }
     } catch (error) {
       if (generation === actionGeneration.current) showError(error, setToast);
@@ -549,6 +574,30 @@ export default function App() {
       endAction(generation);
     }
   };
+
+  const selectDiscordSource = useCallback((next: AppSnapshot) => {
+    setSourceSetupOpen(false);
+    publish(next);
+    if (next.context) {
+      catalogSyncStarted.current = true;
+      void loadSnapshot(next.context);
+      setDiscordConnectionOpen(true);
+    }
+  }, [publish, loadSnapshot]);
+
+  const sourceError = useCallback((error: unknown) => showError(error, setToast), []);
+
+  const sourceDialog = sourceSetupOpen && connectionSettings ? (
+    <SourceSetupDialog
+      context={snapshot?.context ?? null}
+      telegramConfigured={connectionSettings.setupComplete}
+      required={!connectionSettings.setupComplete && !snapshot?.context}
+      onClose={() => setSourceSetupOpen(false)}
+      onTelegram={() => { setSourceSetupOpen(false); setSettingsOpen(true); }}
+      onSelected={selectDiscordSource}
+      onError={sourceError}
+    />
+  ) : null;
 
   if (startupError) {
     return <div className="app-loading"><section className="loading-card"><h1>Workspace not ready</h1><p role="alert">{startupError}</p><button onClick={() => { setStartupError(null); void refreshAuth(true); }}>Retry</button></section></div>;
@@ -560,8 +609,12 @@ export default function App() {
     );
   }
 
+  if (sourceSetupOpen && !snapshot.context) {
+    return <div className="app-loading">{sourceDialog}</div>;
+  }
+
   if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {
-    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section></div>;
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => setSourceSetupOpen(true)}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
   }
 
   if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
@@ -575,6 +628,7 @@ export default function App() {
         {connectionSettings && settingsOpen && (
           <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
         )}
+        {sourceDialog}
       </>
     );
   }
@@ -587,15 +641,18 @@ export default function App() {
         scope={scope}
         chatQuery={chatQuery}
         accountLabel={snapshot.accountLabel}
+        provider={snapshot.context?.scope.provider === "discord" ? "discord" : "telegram"}
         pendingRemovalChatIds={pendingRemovalChatIds}
         onChatQueryChange={setChatQuery}
         onSelectChat={setSelectedChatId}
         onScopeChange={setScope}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => snapshot.context?.scope.provider === "discord" ? setDiscordConnectionOpen(true) : setSettingsOpen(true)}
+        onOpenSources={() => setSourceSetupOpen(true)}
       />
 
       <main className="main-column">
         <SearchToolbar
+          provider={snapshot.context?.scope.provider === "discord" ? "discord" : "telegram"}
           query={query}
           direction={direction}
           contentFilter={contentFilter}
@@ -611,9 +668,11 @@ export default function App() {
           onPrivacyScanChange={setPrivacyScan}
         />
         <ResultsList
+          provider={snapshot.context?.scope.provider === "discord" ? "discord" : "telegram"}
           messages={results.messages}
           chats={chats}
           selectedKeys={new Set(selectedMessages.keys())}
+          completedKeys={completedDiscordMessageKeys}
           loading={searching}
           refreshing={refreshingCatalog}
           query={query}
@@ -647,6 +706,10 @@ export default function App() {
 
       {connectionSettings && settingsOpen && (
         <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
+      )}
+      {sourceDialog}
+      {snapshot.context?.scope.provider === "discord" && discordConnectionOpen && (
+        <DiscordConnectionDialog context={snapshot.context} onClose={() => setDiscordConnectionOpen(false)} onReady={() => { setDiscordConnectionOpen(false); setToast({ tone: "success", message: "Discord account verified for this archive." }); }} onError={sourceError} />
       )}
 
       {toast && (

@@ -1,5 +1,6 @@
 //! Latest-value diagnostics contain counters and closed states, never source data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum DiscordImportPhase {
     Inspecting,
     Hashing,
@@ -11,7 +12,8 @@ pub(crate) enum DiscordImportPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DiscordImportProgress {
     pub phase: DiscordImportPhase,
     pub inventory_entries: Option<u64>,

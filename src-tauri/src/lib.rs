@@ -31,6 +31,10 @@ pub(crate) struct RuntimeState {
     pub(crate) service: RwLock<Arc<ProviderService>>,
     pub(crate) archives: Arc<persistence::archive::ArchiveOwner>,
     pub(crate) discord_imports: providers::discord::import::DiscordImportOwner,
+    pub(crate) discord_session: Arc<providers::discord::session::DiscordSessionOwner>,
+    pub(crate) discord_capture:
+        std::sync::Mutex<Option<providers::discord::browser::CaptureCancellation>>,
+    pub(crate) application_root: std::path::PathBuf,
 }
 impl RuntimeState {
     /// Application exit owns the credential-clear callback; tests inject it.
@@ -39,6 +43,7 @@ impl RuntimeState {
         let current = self.service.write().await;
         current.shutdown().await;
         self.discord_imports.shutdown().await;
+        self.discord_session.shutdown();
         self.archives.shutdown().await;
         clear_cached_secrets();
         // Queued settings can acquire coordination only after all stores are
@@ -59,11 +64,28 @@ impl RuntimeState {
         archives: persistence::archive::ArchiveOwner,
     ) -> Self {
         let archives = Arc::new(archives);
+        let discord_session = Arc::new(
+            providers::discord::session::DiscordSessionOwner::production()
+                .expect("Discord HTTP client configuration is static"),
+        );
         Self {
             service: RwLock::new(service),
             discord_imports: providers::discord::import::DiscordImportOwner::new(archives.clone()),
             archives,
+            discord_session,
+            discord_capture: std::sync::Mutex::new(None),
+            application_root: std::path::PathBuf::new(),
         }
+    }
+
+    fn application(
+        service: Arc<ProviderService>,
+        archives: persistence::archive::ArchiveOwner,
+        application_root: std::path::PathBuf,
+    ) -> Self {
+        let mut state = Self::with_archives(service, archives);
+        state.application_root = application_root;
+        state
     }
 }
 
@@ -114,27 +136,34 @@ fn create_service<R: tauri::Runtime>(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let application = compatibility::commands_v2::register(tauri::Builder::default())
-        .setup(|app| {
-            // Failed configuration/connection keeps the setup surface reachable;
-            // no placeholder account, live store or executor is manufactured.
-            let root = app.path().app_local_data_dir();
-            let archives = match &root {
-                Ok(root) => persistence::archive::ArchiveOwner::application(root.clone()),
-                Err(_) => persistence::archive::ArchiveOwner::unavailable(),
-            };
-            let service = root
-                .map_err(|_| error::AppError::StatePersistenceFailed)
-                .and_then(secure_store::bind_application_root)
-                .and_then(|_| create_service(app.handle()))
-                .unwrap_or_else(|error| {
-                    ProviderService::failed(providers::telegram::diagnostics::boundary_error(error))
-                });
-            app.manage(Arc::new(RuntimeState::with_archives(service, archives)));
-            Ok(())
-        })
-        .build(tauri::generate_context!())
-        .expect("failed to build Retract");
+    let application = compatibility::commands_v2::register(
+        tauri::Builder::default().plugin(tauri_plugin_dialog::init()),
+    )
+    .setup(|app| {
+        // Failed configuration/connection keeps the setup surface reachable;
+        // no placeholder account, live store or executor is manufactured.
+        let root = app.path().app_local_data_dir();
+        let application_root = root.as_ref().ok().cloned().unwrap_or_default();
+        let archives = match &root {
+            Ok(root) => persistence::archive::ArchiveOwner::application(root.clone()),
+            Err(_) => persistence::archive::ArchiveOwner::unavailable(),
+        };
+        let service = root
+            .map_err(|_| error::AppError::StatePersistenceFailed)
+            .and_then(secure_store::bind_application_root)
+            .and_then(|_| create_service(app.handle()))
+            .unwrap_or_else(|error| {
+                ProviderService::failed(providers::telegram::diagnostics::boundary_error(error))
+            });
+        app.manage(Arc::new(RuntimeState::application(
+            service,
+            archives,
+            application_root,
+        )));
+        Ok(())
+    })
+    .build(tauri::generate_context!())
+    .expect("failed to build Retract");
     let shutdown_started = Arc::new(AtomicBool::new(false));
     application.run(move |app, event| {
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event

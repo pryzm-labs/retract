@@ -1,7 +1,7 @@
 [package]
 name = "retract"
 version = "0.1.0"
-description = "Local-first Telegram history search, cleanup, and redaction for macOS"
+description = "Local-first Telegram and Discord history search, cleanup, and redaction for macOS"
 authors = ["Pryzm Labs"]
 edition = "2024"
 license = "MIT"
@@ -44,6 +44,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+libc = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }

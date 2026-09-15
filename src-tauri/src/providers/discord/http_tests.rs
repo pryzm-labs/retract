@@ -40,6 +40,24 @@ fn server(
     (format!("http://{address}/api/v10/"), handle)
 }
 
+fn sequence_server(statuses: &[&str]) -> (String, thread::JoinHandle<usize>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let statuses = statuses.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let handle = thread::spawn(move || {
+        for status in &statuses {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let _ = socket.read(&mut request).unwrap();
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            socket.write_all(response.as_bytes()).unwrap();
+        }
+        statuses.len()
+    });
+    (format!("http://{address}/api/v10/"), handle)
+}
+
 fn run_delete(
     status: &str,
     headers: &[(&str, &str)],
@@ -126,4 +144,42 @@ fn invalid_ids_and_preflight_cancellation_never_open_a_connection() {
         runtime.block_on(client.delete("1", "2", TOKEN, &AtomicBool::new(true))),
         Err(DiscordDeleteError::Cancelled)
     );
+}
+
+#[test]
+fn server_failures_retry_a_bounded_number_of_times_and_end_uncertain() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (base, recovered) = sequence_server(&["503 Service Unavailable", "204 No Content"]);
+    let client = DiscordDeleteClient::for_test(&base).unwrap();
+    assert_eq!(
+        runtime.block_on(client.delete(
+            "9007199254741101",
+            "1985931830091579393",
+            TOKEN,
+            &AtomicBool::new(false),
+        )),
+        Ok(DeleteOutcome::Deleted)
+    );
+    assert_eq!(recovered.join().unwrap(), 2);
+
+    let (base, exhausted) = sequence_server(&[
+        "503 Service Unavailable",
+        "503 Service Unavailable",
+        "503 Service Unavailable",
+    ]);
+    let client = DiscordDeleteClient::for_test(&base).unwrap();
+    assert_eq!(
+        runtime.block_on(client.delete(
+            "9007199254741101",
+            "1985931830091579393",
+            TOKEN,
+            &AtomicBool::new(false),
+        )),
+        Err(DiscordDeleteError::Ambiguous)
+    );
+    assert_eq!(exhausted.join().unwrap(), 3);
 }

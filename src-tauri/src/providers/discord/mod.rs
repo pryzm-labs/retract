@@ -1,7 +1,8 @@
-//! Backend-only archive normalization and owned import. No usable provider ports.
-// Kept backend-only until a separately reviewed UI/IPC integration.
+//! Discord archive import, query, account-bound sign-in, and reviewed remediation.
 #![allow(dead_code)]
+pub(crate) mod application;
 pub(crate) mod browser;
+pub(crate) mod commands;
 pub(crate) mod http;
 pub(crate) mod import;
 pub(crate) mod locators;

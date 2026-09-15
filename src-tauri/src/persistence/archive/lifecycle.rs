@@ -517,6 +517,12 @@ mod discord_tests {
                     ),
                     archives: archives.clone(),
                     discord_imports: imports,
+                    discord_session: Arc::new(
+                        crate::providers::discord::session::DiscordSessionOwner::production()
+                            .unwrap(),
+                    ),
+                    discord_capture: std::sync::Mutex::new(None),
+                    application_root: std::path::PathBuf::new(),
                 };
                 let handle = application
                     .discord_imports

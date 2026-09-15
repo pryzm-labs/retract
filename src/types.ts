@@ -221,3 +221,46 @@ export interface SaveConnectionSettingsResult {
   connectionSettings: ConnectionSettings;
   snapshot: AppSnapshot;
 }
+
+export interface DiscordSource {
+  scope: Scope;
+  accountLabel: string;
+  username: string | null;
+  importedAt: string | null;
+  warningCount: number;
+}
+
+export interface DiscordImportProgress {
+  phase: "inspecting" | "hashing" | "registering" | "importing" | "verifying" | "ready" | "cancelled" | "failed";
+  inventoryEntries: number | null;
+  processedEntries: number;
+  totalBytes: number | null;
+  hashedBytes: number;
+  readBytes: number;
+  parsedRecords: number;
+  totalRecords: number | null;
+  committedItems: number;
+  committedBytes: number;
+  committedBatches: number;
+  warnings: number;
+}
+
+export interface DiscordImportStatus {
+  active: boolean;
+  progress: DiscordImportProgress | null;
+  sources: DiscordSource[];
+}
+
+export interface DiscordSessionStatus {
+  state: "disconnected" | "verifying" | "ready";
+  accountId: string | null;
+  username: string | null;
+  displayName: string | null;
+  remembered: boolean;
+}
+
+export interface DiscordBrowser {
+  id: string;
+  displayName: string;
+  family: "chromium_cdp" | "firefox_bidi";
+}

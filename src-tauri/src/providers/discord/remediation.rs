@@ -93,10 +93,15 @@ impl DiscordRemediationIo {
         })
     }
 
-    fn check_context(&self, context: &ActiveContext) -> Result<(), SafeError> {
+    fn check_scope(&self, context: &ActiveContext) -> Result<(), SafeError> {
         if context != &self.context {
             return Err(safe(ErrorCode::StaleContext));
         }
+        Ok(())
+    }
+
+    fn check_context(&self, context: &ActiveContext) -> Result<(), SafeError> {
+        self.check_scope(context)?;
         self.session
             .with_token(&self.owner_user_id, |_| ())
             .map_err(|_| safe(ErrorCode::AuthenticationRequired))
@@ -163,7 +168,7 @@ impl DiscordRemediationIo {
 #[async_trait]
 impl FrozenProviderIo for DiscordRemediationIo {
     fn check(&self, context: &ActiveContext) -> Result<(), SafeError> {
-        self.check_context(context)
+        self.check_scope(context)
     }
 
     async fn describe(

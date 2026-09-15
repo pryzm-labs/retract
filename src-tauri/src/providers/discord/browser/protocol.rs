@@ -1,11 +1,28 @@
 use serde_json::Value;
 use std::collections::HashMap;
+use std::ops::Deref;
 use zeroize::Zeroizing;
 
 use crate::error::AppError;
 use crate::providers::discord::session::valid_user_token;
 
 const MAX_TRACKED_REQUESTS: usize = 4096;
+
+struct SensitiveJson(Value);
+
+impl Deref for SensitiveJson {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SensitiveJson {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
+}
 
 pub(crate) struct CapturedAuthorization(Zeroizing<String>);
 
@@ -29,7 +46,7 @@ impl ProtocolParser {
         &mut self,
         event: &str,
     ) -> Result<Option<CapturedAuthorization>, AppError> {
-        let value: Value = serde_json::from_str(event).map_err(|_| malformed_event())?;
+        let value = SensitiveJson(serde_json::from_str(event).map_err(|_| malformed_event())?);
         match value.get("method").and_then(Value::as_str) {
             Some("Network.requestWillBeSent") => {
                 let params = value.get("params").ok_or_else(malformed_event)?;
@@ -74,7 +91,7 @@ impl ProtocolParser {
         &mut self,
         event: &str,
     ) -> Result<Option<CapturedAuthorization>, AppError> {
-        let value: Value = serde_json::from_str(event).map_err(|_| malformed_event())?;
+        let value = SensitiveJson(serde_json::from_str(event).map_err(|_| malformed_event())?);
         if value.get("method").and_then(Value::as_str) != Some("network.beforeRequestSent") {
             return Ok(None);
         }
@@ -139,4 +156,13 @@ fn is_discord_api_url(raw: &str) -> bool {
 
 fn malformed_event() -> AppError {
     AppError::InvalidRequest("Browser authentication event was malformed".into())
+}
+
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(value) => zeroize::Zeroize::zeroize(value),
+        Value::Array(values) => values.iter_mut().for_each(zeroize_json),
+        Value::Object(values) => values.values_mut().for_each(zeroize_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }

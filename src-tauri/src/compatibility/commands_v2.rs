@@ -186,6 +186,17 @@ pub fn register<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         submit_auth_v2,
         retry_identity_v2,
         get_connection_settings_v2,
-        save_connection_settings_v2
+        save_connection_settings_v2,
+        crate::providers::discord::commands::list_sources_v2,
+        crate::providers::discord::commands::select_archive_v2,
+        crate::providers::discord::commands::start_discord_import_v2,
+        crate::providers::discord::commands::get_discord_import_v2,
+        crate::providers::discord::commands::cancel_discord_import_v2,
+        crate::providers::discord::commands::get_discord_session_v2,
+        crate::providers::discord::commands::discover_discord_browsers_v2,
+        crate::providers::discord::commands::start_discord_browser_auth_v2,
+        crate::providers::discord::commands::cancel_discord_browser_auth_v2,
+        crate::providers::discord::commands::submit_discord_token_v2,
+        crate::providers::discord::commands::forget_discord_session_v2
     ])
 }

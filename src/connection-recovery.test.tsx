@@ -64,8 +64,10 @@ describe("connection bootstrap and replacement recovery", () => {
     });
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Connect Telegram" })).toBeVisible()
+      expect(screen.getByRole("heading", { name: "Choose what to clean up" })).toBeVisible()
     );
+    fireEvent.click(screen.getByRole("button", { name: /Telegram/ }));
+    expect(await screen.findByRole("heading", { name: "Connect Telegram" })).toBeVisible();
     expect(screen.queryByText("Workspace not ready")).not.toBeInTheDocument();
   });
 

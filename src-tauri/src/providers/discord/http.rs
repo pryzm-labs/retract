@@ -12,6 +12,7 @@ use super::session::valid_user_token;
 const DISCORD_API: &str = "https://discord.com/api/v10/";
 const MAX_RATE_LIMIT_BODY: usize = 4096;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+const MAX_TRANSIENT_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeleteOutcome {
@@ -39,6 +40,7 @@ pub(crate) struct DiscordDeleteClient {
     base: url::Url,
     minimum_channel_interval: Duration,
     minimum_account_interval: Duration,
+    transient_retry_base: Duration,
     channel_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     channel_deadlines: Mutex<HashMap<String, Instant>>,
     account_deadline: Mutex<Option<Instant>>,
@@ -83,6 +85,11 @@ impl DiscordDeleteClient {
             } else {
                 Duration::from_millis(50)
             },
+            transient_retry_base: if minimum_channel_interval.is_zero() {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(500)
+            },
             channel_locks: Mutex::new(HashMap::new()),
             channel_deadlines: Mutex::new(HashMap::new()),
             account_deadline: Mutex::new(None),
@@ -118,32 +125,40 @@ impl DiscordDeleteClient {
                 .clone()
         };
         let _channel_guard = channel_lock.lock().await;
-        self.wait_for_global(cancelled).await?;
-        self.wait_for_account(cancelled).await?;
-        self.wait_for_channel(channel_id, cancelled).await?;
-        check_cancelled(cancelled)?;
-
         let endpoint = self
             .base
             .join(&format!("channels/{channel_id}/messages/{message_id}"))
             .map_err(|_| DiscordDeleteError::InvalidTarget)?;
-        let response = self
-            .client
-            .delete(endpoint)
-            .header(reqwest::header::AUTHORIZATION, token)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(|_| DiscordDeleteError::Ambiguous)?;
-        match response.status().as_u16() {
-            204 => Ok(DeleteOutcome::Deleted),
-            404 => Ok(DeleteOutcome::AlreadyAbsent),
-            401 => Err(DiscordDeleteError::Authentication),
-            403 => Err(DiscordDeleteError::Permission),
-            429 => self.rate_limit(response).await,
-            500..=599 => Err(DiscordDeleteError::Transient),
-            _ => Err(DiscordDeleteError::Permanent),
+        for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
+            self.wait_for_global(cancelled).await?;
+            self.wait_for_account(cancelled).await?;
+            self.wait_for_channel(channel_id, cancelled).await?;
+            check_cancelled(cancelled)?;
+
+            let response = self
+                .client
+                .delete(endpoint.clone())
+                .header(reqwest::header::AUTHORIZATION, token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .send()
+                .await;
+            match response {
+                Ok(response) => match response.status().as_u16() {
+                    204 => return Ok(DeleteOutcome::Deleted),
+                    404 => return Ok(DeleteOutcome::AlreadyAbsent),
+                    401 => return Err(DiscordDeleteError::Authentication),
+                    403 => return Err(DiscordDeleteError::Permission),
+                    429 => return self.rate_limit(response).await,
+                    500..=599 if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
+                    500..=599 => return Err(DiscordDeleteError::Ambiguous),
+                    _ => return Err(DiscordDeleteError::Permanent),
+                },
+                Err(_) if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
+                Err(_) => return Err(DiscordDeleteError::Ambiguous),
+            }
+            self.wait_for_transient_retry(attempt, cancelled).await?;
         }
+        Err(DiscordDeleteError::Ambiguous)
     }
 
     async fn wait_for_global(&self, cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
@@ -155,11 +170,11 @@ impl DiscordDeleteClient {
     }
 
     async fn wait_for_account(&self, cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
-        let deadline = *self.account_deadline.lock().await;
-        if let Some(deadline) = deadline {
+        let mut deadline = self.account_deadline.lock().await;
+        if let Some(deadline) = *deadline {
             wait_until(deadline, cancelled).await?;
         }
-        *self.account_deadline.lock().await = Some(Instant::now() + self.minimum_account_interval);
+        *deadline = Some(Instant::now() + self.minimum_account_interval);
         Ok(())
     }
 
@@ -172,11 +187,29 @@ impl DiscordDeleteClient {
         if let Some(deadline) = deadline {
             wait_until(deadline, cancelled).await?;
         }
+        let jitter = if self.minimum_channel_interval.is_zero() {
+            Duration::ZERO
+        } else {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            Duration::from_millis(u64::from(nanos % 251))
+        };
         self.channel_deadlines.lock().await.insert(
             channel_id.to_owned(),
-            Instant::now() + self.minimum_channel_interval,
+            Instant::now() + self.minimum_channel_interval + jitter,
         );
         Ok(())
+    }
+
+    async fn wait_for_transient_retry(
+        &self,
+        attempt: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<(), DiscordDeleteError> {
+        let multiplier = 1_u32 << u32::try_from(attempt).unwrap_or(0).min(8);
+        wait_duration(self.transient_retry_base * multiplier, cancelled).await
     }
 
     async fn rate_limit(
@@ -233,4 +266,11 @@ async fn wait_until(deadline: Instant, cancelled: &AtomicBool) -> Result<(), Dis
         };
         tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
     }
+}
+
+async fn wait_duration(
+    duration: Duration,
+    cancelled: &AtomicBool,
+) -> Result<(), DiscordDeleteError> {
+    wait_until(Instant::now() + duration, cancelled).await
 }
