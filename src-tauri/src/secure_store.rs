@@ -41,6 +41,11 @@ use vault::{VAULT_ACCOUNT, VaultCache, VaultIo};
 #[cfg(target_os = "macos")]
 static MAC_VAULT: OnceLock<VaultCache> = OnceLock::new();
 
+pub(crate) struct StoredDiscordSecret {
+    pub(crate) account_id: String,
+    pub(crate) token: Zeroizing<String>,
+}
+
 #[cfg(test)]
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecureJobStore {
@@ -261,6 +266,47 @@ pub fn save_telegram_api_hash(_data_dir: &std::path::Path, value: &str) -> Resul
     MAC_VAULT
         .get_or_init(VaultCache::application)
         .save_api_hash(&mut MacVaultIo, value)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn load_discord_credential() -> Result<Option<StoredDiscordSecret>, AppError> {
+    MAC_VAULT
+        .get_or_init(VaultCache::application)
+        .discord_credential(&mut MacVaultIo)
+        .map(|credential| {
+            credential.map(|(account_id, token)| StoredDiscordSecret { account_id, token })
+        })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn save_discord_credential(account_id: &str, token: &str) -> Result<(), AppError> {
+    MAC_VAULT
+        .get_or_init(VaultCache::application)
+        .save_discord_credential(&mut MacVaultIo, account_id, token)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn forget_discord_credential() -> Result<(), AppError> {
+    MAC_VAULT
+        .get_or_init(VaultCache::application)
+        .forget_discord_credential(&mut MacVaultIo)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn load_discord_credential() -> Result<Option<StoredDiscordSecret>, AppError> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn save_discord_credential(_account_id: &str, _token: &str) -> Result<(), AppError> {
+    Err(AppError::SecureStore(
+        "persistent Discord credentials are not available on this platform".into(),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn forget_discord_credential() -> Result<(), AppError> {
+    Ok(())
 }
 
 /// Loaded only when an archive operation first needs its independent key.
@@ -875,7 +921,10 @@ mod tests {
             telegram_api_hash: Some("0123456789abcdef0123456789abcdef".into()),
             tdlib_database_key: Some([0x2a; KEY_LENGTH]),
             job_store_key: Some([0x7c; KEY_LENGTH]),
-            ..SecretVault::default()
+            content_index_key: None,
+            discord_credential: None,
+            version_two: false,
+            version_three: false,
         };
         let encoded = encode_secret_vault(&expected).unwrap();
         let decoded = decode_secret_vault(&encoded).unwrap();
@@ -891,7 +940,10 @@ mod tests {
             telegram_api_hash: Some("0123456789abcdef0123456789abcdef".into()),
             tdlib_database_key: Some([0x2a; KEY_LENGTH]),
             job_store_key: None,
-            ..SecretVault::default()
+            content_index_key: None,
+            discord_credential: None,
+            version_two: false,
+            version_three: false,
         };
         let encoded = encode_secret_vault(&expected).unwrap();
         assert!(decode_secret_vault(&encoded[..encoded.len() - 1]).is_err());

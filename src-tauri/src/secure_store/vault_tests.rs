@@ -163,6 +163,72 @@ fn keychain_vault_archive_use_is_lazy_and_reuses_one_verified_key() {
 }
 
 #[test]
+fn keychain_vault_discord_credential_is_opt_in_account_bound_and_forget_preserves_keys() {
+    let cache = VaultCache::default();
+    let mut io = MemoryVaultIo::from_bytes(V1_ALL);
+    assert!(cache.discord_credential(&mut io).unwrap().is_none());
+    assert_eq!(io.write_count(), 0);
+
+    cache
+        .save_discord_credential(
+            &mut io,
+            "9007199254741001",
+            "synthetic.discord.token-value_123456789",
+        )
+        .unwrap();
+    let credential = cache.discord_credential(&mut io).unwrap().unwrap();
+    assert_eq!(credential.0, "9007199254741001");
+    assert_eq!(
+        credential.1.as_str(),
+        "synthetic.discord.token-value_123456789"
+    );
+    assert_eq!(
+        cache.named_key(&mut io, "tdlib-database").unwrap(),
+        [b'*'; 32]
+    );
+    assert_eq!(
+        cache.named_key(&mut io, "encrypted-job-store").unwrap(),
+        [b'|'; 32]
+    );
+
+    cache.forget_discord_credential(&mut io).unwrap();
+    assert!(cache.discord_credential(&mut io).unwrap().is_none());
+    assert_eq!(
+        cache.named_key(&mut io, "tdlib-database").unwrap(),
+        [b'*'; 32]
+    );
+    assert_eq!(
+        cache.named_key(&mut io, "encrypted-job-store").unwrap(),
+        [b'|'; 32]
+    );
+}
+
+#[test]
+fn keychain_vault_discord_credential_rejects_bad_account_token_and_unknown_v3_entry() {
+    let cache = VaultCache::default();
+    let mut io = MemoryVaultIo::from_bytes(V1_ALL);
+    for (account, token) in [
+        ("01", "synthetic.discord.token-value_123456789"),
+        ("9007199254741001", "Bot not-a-user-token"),
+        ("9007199254741001", "bad token"),
+    ] {
+        assert!(
+            cache
+                .save_discord_credential(&mut io, account, token)
+                .is_err()
+        );
+    }
+    assert_eq!(io.write_count(), 0);
+
+    let unknown = [&b"RTRCTV3\x01"[..], b"\x07unknown\x00\x01x"].concat();
+    let cache = VaultCache::default();
+    let mut io = MemoryVaultIo::from_bytes(&unknown);
+    assert!(cache.discord_credential(&mut io).is_err());
+    assert_eq!(io.persisted().unwrap(), unknown);
+    assert_eq!(io.write_count(), 0);
+}
+
+#[test]
 fn keychain_vault_rejected_archive_write_preserves_cached_telegram_secrets() {
     let cache = VaultCache::default();
     let mut io = MemoryVaultIo::from_bytes(V1_ALL);
