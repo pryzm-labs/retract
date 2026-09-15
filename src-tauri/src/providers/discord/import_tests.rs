@@ -7,7 +7,7 @@ use crate::persistence::archive::{
 use retract_domain::{ContentRecord, PrivacyKind, SourceState};
 use std::{
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -46,8 +46,13 @@ fn runtime() -> tokio::runtime::Runtime {
         .build()
         .unwrap()
 }
+pub(crate) fn canonical_test_file(path: &Path) -> PathBuf {
+    fs::canonicalize(path.parent().unwrap())
+        .unwrap()
+        .join(path.file_name().unwrap())
+}
 fn archive(path: &Path) -> Arc<ArchiveOwner> {
-    let path = path.to_owned();
+    let path = canonical_test_file(path);
     Arc::new(ArchiveOwner::with_opener(move || {
         ArchiveStore::open(
             path.clone(),
@@ -60,6 +65,22 @@ fn archive(path: &Path) -> Arc<ArchiveOwner> {
         )
     }))
 }
+
+#[test]
+fn discord_import_test_archive_uses_a_canonical_fixture_parent() {
+    runtime().block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let alias = directory.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let archives = archive(&alias.join("content.db"));
+
+        archives.open().await.unwrap();
+        archives.shutdown().await;
+    });
+}
+
 fn selected(path: &Path, bytes: &[u8]) -> File {
     fs::write(path, bytes).unwrap();
     File::open(path).unwrap()
@@ -309,7 +330,7 @@ fn discord_import_installation_precedes_parser_and_key_work_and_stable_hardlinks
         let file = selected(&path, FROZEN);
         fs::hard_link(&path, dir.path().join("stable-link.zip")).unwrap();
         let key_installed = installed.clone();
-        let archive_path = dir.path().join("content.db");
+        let archive_path = canonical_test_file(&dir.path().join("content.db"));
         let archives = Arc::new(ArchiveOwner::with_opener(move || {
             assert!(key_installed.load(Ordering::Acquire));
             ArchiveStore::open(
@@ -514,7 +535,7 @@ fn discord_import_pre_registration_storage_loss_is_not_user_cancellation() {
         for stop_owner in [false, true] {
             runtime().block_on(async {
                 let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("content.db");
+                let path = canonical_test_file(&dir.path().join("content.db"));
                 let calls = Arc::new(AtomicUsize::new(0));
                 let opened = calls.clone();
                 let archives = Arc::new(ArchiveOwner::with_opener(move || {

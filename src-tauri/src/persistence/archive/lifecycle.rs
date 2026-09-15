@@ -126,7 +126,7 @@ mod discord_tests {
 
     use super::super::worker_tests::{Gate, Release, runtime};
     use crate::providers::discord::import::{DiscordImportError, DiscordImportOwner, TestPoint};
-    use crate::providers::discord::import_tests::ImportTestLaunch;
+    use crate::providers::discord::import_tests::{ImportTestLaunch, canonical_test_file};
     use crate::providers::discord::progress::DiscordImportPhase;
     use std::{
         fs::{self, File},
@@ -137,7 +137,7 @@ mod discord_tests {
     #[test]
     fn discord_import_pending_registration_worker_loss_does_not_report_cancelled() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("content.db");
+        let path = canonical_test_file(&directory.path().join("content.db"));
         let selected = directory.path().join("selected.zip");
         fs::write(&selected, ZIP).unwrap();
         let gate = Arc::new(Gate::default());
@@ -195,7 +195,7 @@ mod discord_tests {
     #[test]
     fn discord_import_pending_retry_worker_loss_is_storage_failure_before_session_binding() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("content.db");
+        let path = canonical_test_file(&directory.path().join("content.db"));
         let selected = directory.path().join("selected.zip");
         fs::write(
             &selected,
@@ -292,7 +292,7 @@ mod discord_tests {
         use super::super::{ImportBatchV2, ImportWarningCode, ImportWarningDelta};
         use sha2::{Digest, Sha256};
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("content.db");
+        let path = canonical_test_file(&directory.path().join("content.db"));
         let selected = directory.path().join("selected.zip");
         fs::write(
             &selected,
@@ -339,7 +339,7 @@ mod discord_tests {
     fn discord_import_cancel_during_commit_rolls_back_and_full_queue_cancels_without_late_writes() {
         for full_queue in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("content.db");
+            let path = canonical_test_file(&directory.path().join("content.db"));
             let selected = directory.path().join("selected.zip");
             fs::write(&selected, ZIP).unwrap();
             let gate = Arc::new(Gate::default());
@@ -411,7 +411,7 @@ mod discord_tests {
     fn discord_import_disk_full_and_finalization_failure_keep_partial_source_hidden() {
         for finalization in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("content.db");
+            let path = canonical_test_file(&directory.path().join("content.db"));
             let selected = directory.path().join("selected.zip");
             fs::write(
                 &selected,
@@ -488,7 +488,7 @@ mod discord_tests {
             TestPoint::BeforeFinish,
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("content.db");
+            let path = canonical_test_file(&directory.path().join("content.db"));
             let selected = directory.path().join("selected.zip");
             fs::write(&selected, ZIP).unwrap();
             let gate = Arc::new(Gate::default());
@@ -564,7 +564,7 @@ mod discord_tests {
     #[test]
     fn discord_import_shutdown_during_key_open_retains_worker_and_clears_only_after_lock_release() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("content.db");
+        let path = canonical_test_file(&directory.path().join("content.db"));
         let selected = directory.path().join("selected.zip");
         fs::write(&selected, ZIP).unwrap();
         let gate = Arc::new(Gate::default());
