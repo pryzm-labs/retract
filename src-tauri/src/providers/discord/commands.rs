@@ -291,15 +291,16 @@ pub(crate) async fn get_discord_session_v2(
 ) -> Result<Value, SafeError> {
     validate_version(&request)?;
     let request: BootstrapRequest<Empty> = decode(request)?;
-    runtime
-        .service
-        .read()
+    let owner = expected_owner(&runtime, request.context.as_ref()).await?;
+    let status = runtime
+        .discord_session
+        .load_remembered(&owner)
         .await
-        .check_optional(request.context.as_ref())?;
+        .map_err(crate::error::boundary_error)?;
     encode(BootstrapResponse {
         contract_version: 2,
         context: runtime.service.read().await.context(),
-        payload: runtime.discord_session.status(),
+        payload: status,
     })
 }
 

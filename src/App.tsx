@@ -73,6 +73,9 @@ export default function App() {
   const catalogSyncStarted = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const pendingRemovalJobs = useRef(new Map<string, ScopedResourceRef[]>());
+  const discordSessionGeneration = snapshot?.context?.scope.provider === "discord"
+    ? snapshot.context.sessionGeneration
+    : null;
 
   const publish = useCallback((next: AppSnapshot) => {
     if (!sameContext(currentContext.current, next.context)) {
@@ -179,6 +182,24 @@ export default function App() {
     })();
     return () => { disposed = true; epoch.current += 1; };
   }, [publish, loadSnapshot]);
+
+  useEffect(() => {
+    const context = snapshot?.context;
+    if (!context || context.scope.provider !== "discord" || !discordSessionGeneration) return;
+    const capturedEpoch = epoch.current;
+    let disposed = false;
+    void api.discordSession(context).then(status => {
+      if (!disposed && capturedEpoch === epoch.current) {
+        setDiscordConnectionOpen(status.state !== "ready");
+      }
+    }).catch(error => {
+      if (!disposed && capturedEpoch === epoch.current) {
+        setDiscordConnectionOpen(true);
+        showError(error, setToast, "The saved Discord token could not be restored");
+      }
+    });
+    return () => { disposed = true; };
+  }, [discordSessionGeneration]);
 
   useEffect(() => {
     if (!snapshot || snapshot.identity.state === "failed" || (snapshot.context && !syncingCatalog && snapshot.catalog.phase === "ready")) return;
@@ -593,7 +614,6 @@ export default function App() {
     if (next.context) {
       catalogSyncStarted.current = true;
       void loadSnapshot(next.context);
-      setDiscordConnectionOpen(true);
     }
   }, [publish, loadSnapshot]);
 

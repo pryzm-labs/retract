@@ -35,7 +35,7 @@ describe("Retract desktop UI", () => {
     expect(screen.queryByRole("button", { name: /Reset demo fixtures/i })).not.toBeInTheDocument();
   });
 
-  it("fences Telegram work and resets filters when switching to an imported Discord source", async () => {
+  it("fences Telegram work and skips reconnection when a Discord session is already ready", async () => {
     const telegramSnapshot = await api.snapshot(fixtureContext);
     const telegramSearch = api.search.bind(api);
     const telegramSnapshotRead = api.snapshot.bind(api);
@@ -94,7 +94,7 @@ describe("Retract desktop UI", () => {
     let rejectStaleSearch: ((reason: Error) => void) | null = null;
 
     vi.spyOn(api, "discordImport").mockResolvedValue(readyImport);
-    vi.spyOn(api, "discordSession").mockResolvedValue({ state: "ready", accountId: "42", username: "owner", displayName: "Archive Owner", remembered: false });
+    vi.spyOn(api, "discordSession").mockResolvedValue({ state: "ready", accountId: "42", username: "owner", displayName: "Archive Owner", remembered: true });
     vi.spyOn(api, "discordBrowsers").mockResolvedValue([]);
     vi.spyOn(api, "snapshot").mockImplementation(context => context.scope.provider === sourceScope.provider
       ? Promise.resolve(discordSnapshot)
@@ -125,6 +125,7 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Imported Discord message")).toBeInTheDocument();
     expect(screen.queryByText("This action belongs to a different account or source.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Anyone" })).toHaveClass("is-active");
+    expect(screen.queryByRole("heading", { name: "Connect the matching Discord account" })).not.toBeInTheDocument();
   });
 
   it("rediscovers the native provider before listing imported Discord sources", async () => {
