@@ -16,6 +16,12 @@ use crate::persistence::{ProviderPayloadValidator, VerifiedNativeAccountIdentity
 
 use super::ArchiveError;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArchiveSourceEntry {
+    pub account: AccountRecord,
+    pub source: SourceRecord,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RemovalOutcome {
     pub removed_items: u64,

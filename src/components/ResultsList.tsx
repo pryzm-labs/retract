@@ -4,9 +4,11 @@ import type { ChatSummary, MessageSnapshot, SensitiveDataKind } from "../types";
 import { Avatar, ContentIcon, contentLabel, formatCompactDate, plural } from "./common";
 
 interface ResultsListProps {
+  provider: "telegram" | "discord";
   messages: MessageSnapshot[];
   chats: ChatSummary[];
   selectedKeys: Set<string>;
+  completedKeys: Set<string>;
   loading: boolean;
   refreshing: boolean;
   query: string;
@@ -18,15 +20,16 @@ interface ResultsListProps {
 
 export const messageKey = (message: Pick<MessageSnapshot, "scope" | "messageId">) => resourceKey(message.scope, "content", message.messageId);
 
-export function ResultsList({ messages, chats, selectedKeys, loading, refreshing, query, privacyScan, truncated, onToggle, onToggleAll }: ResultsListProps) {
+export function ResultsList({ provider, messages, chats, selectedKeys, completedKeys, loading, refreshing, query, privacyScan, truncated, onToggle, onToggleAll }: ResultsListProps) {
   const chatMap = new Map(chats.map((chat) => [resourceKey(chat.scope, "conversation", chat.id), chat]));
-  const allSelected = messages.length > 0 && messages.every((message) => selectedKeys.has(messageKey(message)));
+  const selectable = messages.filter(message => !completedKeys.has(messageKey(message)));
+  const allSelected = selectable.length > 0 && selectable.every((message) => selectedKeys.has(messageKey(message)));
 
   return (
     <section className="results-section" aria-label="Search results">
       <div className="results-header">
         <label className="select-all">
-          <input type="checkbox" checked={allSelected} onChange={onToggleAll} disabled={messages.length === 0} />
+          <input type="checkbox" checked={allSelected} onChange={onToggleAll} disabled={selectable.length === 0} />
           <span className="custom-checkbox">{allSelected && <Check size={12} />}</span>
           <span>{loading ? "Searching…" : plural(messages.length, "result")}</span>
         </label>
@@ -37,7 +40,7 @@ export function ResultsList({ messages, chats, selectedKeys, loading, refreshing
 
       <div className="message-list" aria-busy={loading}>
         {loading && messages.length === 0 && (
-          <div className="center-state"><LoaderCircle className="spin" size={24} /><p>{privacyScan ? "Scanning message history locally for sensitive information…" : "Searching local and Telegram indexes…"}</p></div>
+          <div className="center-state"><LoaderCircle className="spin" size={24} /><p>{privacyScan ? "Scanning message history locally for sensitive information…" : provider === "discord" ? "Searching the local Discord archive…" : "Searching local and Telegram indexes…"}</p></div>
         )}
         {!loading && messages.length === 0 && (
           <div className="center-state">
@@ -49,15 +52,16 @@ export function ResultsList({ messages, chats, selectedKeys, loading, refreshing
         {messages.map((message) => {
           const key = messageKey(message);
           const checked = selectedKeys.has(key);
+          const completed = completedKeys.has(key);
           const chat = chatMap.get(resourceKey(message.scope, "conversation", message.chatId));
           return (
-            <article className={`message-row ${checked ? "is-selected" : ""}`} key={key}>
-              <label className="message-check" aria-label={`Select message from ${message.senderName}`}>
-                <input type="checkbox" checked={checked} onChange={() => onToggle(message)} />
+            <article className={`message-row ${checked ? "is-selected" : ""} ${completed ? "is-complete" : ""}`} key={key}>
+              <label className="message-check">
+                <input type="checkbox" aria-label={`Select message from ${message.senderName}`} checked={checked} disabled={completed} onChange={() => onToggle(message)} />
                 <span className="custom-checkbox">{checked && <Check size={12} />}</span>
               </label>
               <Avatar name={message.senderName} seed={avatarSeed(message.senderId)} size={35} />
-              <button type="button" className="message-body" onClick={() => onToggle(message)}>
+              <button type="button" className="message-body" disabled={completed} onClick={() => onToggle(message)}>
                 <span className="message-meta">
                   <strong>{message.senderName}</strong>
                   <span className="meta-dot">·</span>
@@ -75,7 +79,7 @@ export function ResultsList({ messages, chats, selectedKeys, loading, refreshing
                   ))}
                 </span>
               </button>
-              <ReachBadge reach={message.deletionReach} />
+              <ReachBadge provider={provider} reach={message.deletionReach} completed={completed} />
             </article>
           );
         })}
@@ -101,12 +105,13 @@ function privacyFindingLabel(finding: SensitiveDataKind): string {
   return labels[finding];
 }
 
-function ReachBadge({ reach }: { reach: MessageSnapshot["deletionReach"] }) {
-  const copy = reach === "everyone" ? "Everyone" : reach === "self_only" ? "Only you" : "Protected";
-  const title = reach === "everyone"
-    ? "Telegram currently allows this message and its attached media to be deleted for all chat members. Externally saved copies are outside Telegram’s control."
+function ReachBadge({ provider, reach, completed }: { provider: "telegram" | "discord"; reach: MessageSnapshot["deletionReach"]; completed: boolean }) {
+  const copy = completed ? "Deleted / absent" : reach === "everyone" ? "Everyone" : reach === "self_only" ? "Only you" : "Protected";
+  const title = completed ? "Discord confirmed deletion or reported that this exact archived message was already absent."
+    : reach === "everyone"
+    ? provider === "discord" ? "This exact owner-authored archive message is eligible for Discord deletion after matching-account verification." : "Telegram currently allows this message and its attached media to be deleted for all chat members. Externally saved copies are outside Telegram’s control."
     : reach === "self_only"
       ? "This message could only be removed from your own history. Retract will not silently do that."
-      : "Telegram does not currently allow this account to delete the message.";
-  return <span className={`reach-badge reach-${reach}`} title={title}><span />{copy}</span>;
+      : provider === "discord" ? "This archived item is not eligible for Discord deletion." : "Telegram does not currently allow this account to delete the message.";
+  return <span className={`reach-badge reach-${completed ? "complete" : reach}`} title={title}><span />{copy}</span>;
 }

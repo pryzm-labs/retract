@@ -1,7 +1,8 @@
 import type { RetractApi } from "../api-contract";
 import type { AppSnapshot, PlanOperation } from "../types";
 import { array, decodeBootstrap, decodeContext, decodeContent, decodeConversation, decodeEnvelope, decodeError, decodeIntents, decodeJob, decodePlan, decodeRefs, invalid, object, nullable, recordRef, text, type IntentDescriptor } from "./contract";
-import { contentView, conversationView, decodeSettings, jobView, planView, searchFilters, snapshotView } from "./telegram";
+import { contentView, conversationView, decodeSettings, jobView, planView, searchFilters, snapshotView as telegramSnapshotView } from "./telegram";
+import { decodeDiscordBrowser, decodeDiscordImport, decodeDiscordSession, decodeDiscordSource, discordContentView, discordConversationView, discordSearchFilters, discordSnapshotView } from "./discord";
 import { refKey, sameScope, type ActiveContext, type ScopedResourceRef } from "./identity";
 export type Transport = (command: string, request: unknown) => Promise<unknown>;
 export class ProviderApiError extends Error {
@@ -27,6 +28,9 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     catch (error) { if (error instanceof Error) throw error; throw new ProviderApiError(decodeError(error)); }
   }
   async function active(command: string, payload: unknown, context: ActiveContext) { decodeContext(context); return decodeEnvelope(await call(command, payload, context), context).payload; }
+  const snapshotView = (response: ReturnType<typeof decodeBootstrap>) => response.context?.scope.provider === "discord" ? discordSnapshotView(response) : telegramSnapshotView(response);
+  const projectConversation = (record: ReturnType<typeof decodeConversation>) => record.scope.provider === "discord" ? discordConversationView(record) : conversationView(record);
+  const projectContent = (record: ReturnType<typeof decodeContent>) => record.scope.provider === "discord" ? discordContentView(record) : contentView(record);
   async function intents(targets: ScopedResourceRef[], context: ActiveContext): Promise<IntentDescriptor[]> { decodeRefs(targets, context.scope); return decodeIntents(await active("get_intents_v2", { actionId: "", targets, actor: null }, context)); }
   async function prepare(targets: ScopedResourceRef[], operation: PlanOperation, actor: ScopedResourceRef | null, context: ActiveContext) {
     const catalog = await intents(targets, context);
@@ -49,11 +53,12 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     },
     search: async (request, context) => {
       decodeRefs(request.conversations, context.scope, "conversation");
-      const p = object(await active("search_messages_v2", { query: request.query, conversations: request.conversations, filters: searchFilters(request), limit: request.limit }, context));
+      const filters = context.scope.provider === "discord" ? discordSearchFilters(request) : searchFilters(request);
+      const p = object(await active("search_messages_v2", { query: request.query, conversations: request.conversations, filters, limit: request.limit }, context));
       const records = array(p.items, item => decodeContent(item, context.scope));
       decodeRefs(records.map(recordRef), context.scope, "content");
       const nextCursor = nullable(p.nextCursor, text);
-      return { messages: records.map(contentView), returned: records.length, truncated: nextCursor !== null || records.length >= request.limit };
+      return { messages: records.map(projectContent), returned: records.length, truncated: nextCursor !== null || records.length >= request.limit };
     },
     refreshChats: async (conversations, context) => {
       decodeRefs(conversations, context.scope, "conversation");
@@ -61,7 +66,7 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
       const records = array(await active("refresh_chats_v2", { conversations }, context), item => decodeConversation(item, context.scope));
       decodeRefs(records.map(recordRef), context.scope);
       if (records.some(r => !requested.has(refKey(recordRef(r))))) return invalid();
-      return records.map(conversationView);
+      return records.map(projectConversation);
     },
     intents,
     prepareSelection: async (messageRefs, context) => { decodeRefs(messageRefs, context.scope, "content"); return planView(decodePlan(await active("prepare_selection_v2", { messageRefs }, context), context.scope), context); },
@@ -77,7 +82,18 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
       if (job.planId !== plan.id || !sameScope(job.scope, plan.context.scope)) return invalid(); return jobView(job);
     },
     jobs: async context => array(await active("get_jobs_v2", {}, context), decodeJob).map(jobView),
-    cancelJob: async (jobId, context) => { const job = decodeJob(await active("cancel_job_v2", { jobId }, context)); if (job.id !== jobId || !sameScope(job.scope, context.scope)) return invalid(); return jobView(job); }
+    cancelJob: async (jobId, context) => { const job = decodeJob(await active("cancel_job_v2", { jobId }, context)); if (job.id !== jobId || !sameScope(job.scope, context.scope)) return invalid(); return jobView(job); },
+    discordSources: async context => array(decodeEnvelope(await call("list_sources_v2", {}, context), context, true).payload, decodeDiscordSource),
+    selectDiscordSource: async (scope, context) => snapshotView(decodeBootstrap(await call("select_archive_v2", { scope }, context))),
+    startDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("start_discord_import_v2", {}, context), context, true).payload),
+    discordImport: async context => decodeDiscordImport(decodeEnvelope(await call("get_discord_import_v2", {}, context), context, true).payload),
+    cancelDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("cancel_discord_import_v2", {}, context), context, true).payload),
+    discordSession: async context => decodeDiscordSession(await active("get_discord_session_v2", {}, context)),
+    discordBrowsers: async context => array(await active("discover_discord_browsers_v2", {}, context), decodeDiscordBrowser),
+    connectDiscordBrowser: async (browserId, remember, riskAcknowledged, context) => decodeDiscordSession(await active("start_discord_browser_auth_v2", { browserId, remember, riskAcknowledged }, context)),
+    cancelDiscordBrowser: async context => { object(await active("cancel_discord_browser_auth_v2", {}, context)); },
+    submitDiscordToken: async (token, remember, riskAcknowledged, context) => decodeDiscordSession(await active("submit_discord_token_v2", { token, remember, riskAcknowledged }, context)),
+    forgetDiscordSession: async context => decodeDiscordSession(await active("forget_discord_session_v2", {}, context))
   };
   return api;
 }

@@ -157,6 +157,58 @@ impl VaultCache {
         })
     }
 
+    pub(super) fn discord_credential(
+        &self,
+        io: &mut impl VaultIo,
+    ) -> Result<Option<(String, Zeroizing<String>)>, AppError> {
+        self.with_ready(io, |ready, _| {
+            Ok(ready.vault.discord_credential.as_ref().map(|credential| {
+                (
+                    credential.account_id.clone(),
+                    Zeroizing::new(credential.token.clone()),
+                )
+            }))
+        })
+    }
+
+    pub(super) fn save_discord_credential(
+        &self,
+        io: &mut impl VaultIo,
+        account_id: &str,
+        token: &str,
+    ) -> Result<(), AppError> {
+        if !valid_discord_account_id(account_id) || !valid_discord_token(token) {
+            return Err(AppError::SecureStore(
+                "Discord credential is malformed".into(),
+            ));
+        }
+        self.with_ready(io, |ready, io| {
+            reconcile(ready, io)?;
+            let mut candidate = ready.vault.clone();
+            candidate.discord_credential.zeroize();
+            candidate.discord_credential = Some(DiscordVaultCredential {
+                account_id: account_id.to_owned(),
+                token: token.to_owned(),
+            });
+            candidate.version_three = true;
+            commit(ready, io, candidate)
+        })
+    }
+
+    pub(super) fn forget_discord_credential(&self, io: &mut impl VaultIo) -> Result<(), AppError> {
+        self.with_ready(io, |ready, io| {
+            reconcile(ready, io)?;
+            if ready.vault.discord_credential.is_none() {
+                return Ok(());
+            }
+            let mut candidate = ready.vault.clone();
+            candidate.discord_credential.zeroize();
+            candidate.discord_credential = None;
+            candidate.version_three = true;
+            commit(ready, io, candidate)
+        })
+    }
+
     // This key has no consumer until the archive store is integrated.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn archive_key(&self, io: &mut impl VaultIo) -> Result<[u8; KEY_LENGTH], AppError> {
@@ -301,6 +353,7 @@ fn commit(
 
 pub(super) const VAULT_MAGIC: &[u8; 7] = b"RTRCTV1";
 const VAULT_V2_MAGIC: &[u8; 7] = b"RTRCTV2";
+const VAULT_V3_MAGIC: &[u8; 7] = b"RTRCTV3";
 const VAULT_API_HASH: u8 = 1 << 0;
 const VAULT_TDLIB_DATABASE_KEY: u8 = 1 << 1;
 const VAULT_JOB_STORE_KEY: u8 = 1 << 2;
@@ -312,7 +365,15 @@ pub(super) struct SecretVault {
     pub(super) tdlib_database_key: Option<[u8; KEY_LENGTH]>,
     pub(super) job_store_key: Option<[u8; KEY_LENGTH]>,
     pub(super) content_index_key: Option<[u8; KEY_LENGTH]>,
+    pub(super) discord_credential: Option<DiscordVaultCredential>,
     pub(super) version_two: bool,
+    pub(super) version_three: bool,
+}
+
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub(super) struct DiscordVaultCredential {
+    account_id: String,
+    token: String,
 }
 
 pub(super) fn encode_secret_vault(vault: &SecretVault) -> Result<Zeroizing<Vec<u8>>, AppError> {
@@ -324,6 +385,9 @@ pub(super) fn encode_secret_vault(vault: &SecretVault) -> Result<Zeroizing<Vec<u
         return Err(AppError::SecureStore(
             "Keychain vault contains a malformed Telegram API hash".into(),
         ));
+    }
+    if vault.version_three || vault.discord_credential.is_some() {
+        return encode_namespaced_v3_vault(vault);
     }
     if vault.version_two || vault.content_index_key.is_some() {
         return encode_namespaced_vault(vault);
@@ -355,6 +419,9 @@ pub(super) fn encode_secret_vault(vault: &SecretVault) -> Result<Zeroizing<Vec<u
 }
 
 pub(super) fn decode_secret_vault(encoded: &[u8]) -> Result<SecretVault, AppError> {
+    if encoded.starts_with(VAULT_V3_MAGIC) {
+        return decode_namespaced_v3_vault(encoded);
+    }
     if encoded.starts_with(VAULT_V2_MAGIC) {
         return decode_namespaced_vault(encoded);
     }
@@ -458,6 +525,8 @@ fn decode_namespaced_vault(encoded: &[u8]) -> Result<SecretVault, AppError> {
         tdlib_database_key: None,
         job_store_key: None,
         content_index_key: None,
+        discord_credential: None,
+        version_three: false,
     };
     let mut seen = [false; 4];
     let mut cursor = 8;
@@ -498,4 +567,160 @@ fn decode_namespaced_vault(encoded: &[u8]) -> Result<SecretVault, AppError> {
 
 pub(super) fn valid_api_hash(value: &str) -> bool {
     value.len() == KEY_LENGTH && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+const DISCORD_VAULT_NAME: &str = "discord/session";
+const MAX_DISCORD_TOKEN_BYTES: usize = 1024;
+const MAX_V3_BYTES: usize = 1536;
+
+fn encode_namespaced_v3_vault(vault: &SecretVault) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    let mut entries: Vec<(&str, Zeroizing<Vec<u8>>)> = Vec::with_capacity(5);
+    if let Some(value) = &vault.telegram_api_hash {
+        entries.push((VAULT_NAMES[0], Zeroizing::new(value.as_bytes().to_vec())));
+    }
+    if let Some(value) = &vault.tdlib_database_key {
+        entries.push((VAULT_NAMES[1], Zeroizing::new(value.to_vec())));
+    }
+    if let Some(value) = &vault.job_store_key {
+        entries.push((VAULT_NAMES[2], Zeroizing::new(value.to_vec())));
+    }
+    if let Some(value) = &vault.content_index_key {
+        entries.push((VAULT_NAMES[3], Zeroizing::new(value.to_vec())));
+    }
+    if let Some(credential) = &vault.discord_credential {
+        if !valid_discord_account_id(&credential.account_id)
+            || !valid_discord_token(&credential.token)
+        {
+            return Err(invalid_vault());
+        }
+        let account_len =
+            u16::try_from(credential.account_id.len()).map_err(|_| invalid_vault())?;
+        let mut value = Zeroizing::new(Vec::with_capacity(
+            2 + credential.account_id.len() + credential.token.len(),
+        ));
+        value.extend_from_slice(&account_len.to_be_bytes());
+        value.extend_from_slice(credential.account_id.as_bytes());
+        value.extend_from_slice(credential.token.as_bytes());
+        entries.push((DISCORD_VAULT_NAME, value));
+    }
+
+    let mut encoded = Zeroizing::new(Vec::with_capacity(MAX_V3_BYTES));
+    encoded.extend_from_slice(VAULT_V3_MAGIC);
+    encoded.push(u8::try_from(entries.len()).map_err(|_| invalid_vault())?);
+    for (name, value) in entries {
+        encoded.push(u8::try_from(name.len()).map_err(|_| invalid_vault())?);
+        encoded.extend_from_slice(name.as_bytes());
+        encoded.extend_from_slice(
+            &u16::try_from(value.len())
+                .map_err(|_| invalid_vault())?
+                .to_be_bytes(),
+        );
+        encoded.extend_from_slice(&value);
+    }
+    if encoded.len() > MAX_V3_BYTES {
+        return Err(invalid_vault());
+    }
+    Ok(encoded)
+}
+
+fn decode_namespaced_v3_vault(encoded: &[u8]) -> Result<SecretVault, AppError> {
+    if encoded.len() < 8 || encoded.len() > MAX_V3_BYTES || encoded[7] > 5 {
+        return Err(invalid_vault());
+    }
+    let all_names = [
+        VAULT_NAMES[0],
+        VAULT_NAMES[1],
+        VAULT_NAMES[2],
+        VAULT_NAMES[3],
+        DISCORD_VAULT_NAME,
+    ];
+    let mut seen = [false; 5];
+    let mut vault = SecretVault::default();
+    vault.version_two = true;
+    vault.version_three = true;
+    let mut cursor = 8;
+    for _ in 0..encoded[7] {
+        let name_len = usize::from(*encoded.get(cursor).ok_or_else(invalid_vault)?);
+        cursor += 1;
+        let name_end = cursor.checked_add(name_len).ok_or_else(invalid_vault)?;
+        let name = encoded.get(cursor..name_end).ok_or_else(invalid_vault)?;
+        cursor = name_end;
+        let index = all_names
+            .iter()
+            .position(|expected| expected.as_bytes() == name)
+            .ok_or_else(invalid_vault)?;
+        if seen[index] {
+            return Err(invalid_vault());
+        }
+        seen[index] = true;
+        let length_bytes: [u8; 2] = encoded
+            .get(cursor..cursor + 2)
+            .ok_or_else(invalid_vault)?
+            .try_into()
+            .map_err(|_| invalid_vault())?;
+        cursor += 2;
+        let value_len = usize::from(u16::from_be_bytes(length_bytes));
+        let value_end = cursor.checked_add(value_len).ok_or_else(invalid_vault)?;
+        let value = encoded.get(cursor..value_end).ok_or_else(invalid_vault)?;
+        cursor = value_end;
+        match index {
+            0 => {
+                let hash = std::str::from_utf8(value).map_err(|_| invalid_vault())?;
+                if !valid_api_hash(hash) {
+                    return Err(invalid_vault());
+                }
+                vault.telegram_api_hash = Some(hash.to_owned());
+            }
+            1 if value.len() == KEY_LENGTH => {
+                vault.tdlib_database_key = Some(value.try_into().map_err(|_| invalid_vault())?);
+            }
+            2 if value.len() == KEY_LENGTH => {
+                vault.job_store_key = Some(value.try_into().map_err(|_| invalid_vault())?);
+            }
+            3 if value.len() == KEY_LENGTH => {
+                vault.content_index_key = Some(value.try_into().map_err(|_| invalid_vault())?);
+            }
+            4 => {
+                let account_len_bytes: [u8; 2] = value
+                    .get(..2)
+                    .ok_or_else(invalid_vault)?
+                    .try_into()
+                    .map_err(|_| invalid_vault())?;
+                let account_len = usize::from(u16::from_be_bytes(account_len_bytes));
+                let account_end = 2_usize.checked_add(account_len).ok_or_else(invalid_vault)?;
+                let account_id =
+                    std::str::from_utf8(value.get(2..account_end).ok_or_else(invalid_vault)?)
+                        .map_err(|_| invalid_vault())?;
+                let token =
+                    std::str::from_utf8(value.get(account_end..).ok_or_else(invalid_vault)?)
+                        .map_err(|_| invalid_vault())?;
+                if !valid_discord_account_id(account_id) || !valid_discord_token(token) {
+                    return Err(invalid_vault());
+                }
+                vault.discord_credential = Some(DiscordVaultCredential {
+                    account_id: account_id.to_owned(),
+                    token: token.to_owned(),
+                });
+            }
+            _ => return Err(invalid_vault()),
+        }
+    }
+    if cursor != encoded.len() {
+        return Err(invalid_vault());
+    }
+    Ok(vault)
+}
+
+fn valid_discord_account_id(value: &str) -> bool {
+    value.parse::<u64>().is_ok_and(|parsed| parsed > 0) && !value.starts_with('0')
+}
+
+fn valid_discord_token(value: &str) -> bool {
+    (20..=MAX_DISCORD_TOKEN_BYTES).contains(&value.len())
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| !byte.is_ascii_whitespace() && !byte.is_ascii_control())
+        && !value.starts_with("Bot ")
+        && !value.starts_with("Bearer ")
 }

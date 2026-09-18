@@ -24,6 +24,7 @@ pub(super) fn reserve_command_slot(service: &ArchiveService) -> impl Drop + '_ {
 }
 
 enum Command {
+    ReadySources(Reply<Vec<model::ArchiveSourceEntry>>),
     ResolveImport(
         Box<model::NewArchiveImport>,
         Reply<model::ArchiveImportResolution>,
@@ -116,6 +117,9 @@ impl ArchiveService {
                     break;
                 }
                 match command {
+                    Command::ReadySources(reply) => {
+                        let _ = reply.send(store.ready_sources());
+                    }
                     Command::ResolveImport(input, reply) => {
                         let _ = reply.send(store.resolve_or_register_import(*input));
                     }
@@ -217,6 +221,12 @@ impl ArchiveService {
         let (send, receive) = oneshot::channel();
         permit.send(command(send));
         receive.await.map_err(|_| ArchiveError::Cancelled)?
+    }
+
+    pub(crate) async fn ready_sources(
+        &self,
+    ) -> Result<Vec<model::ArchiveSourceEntry>, ArchiveError> {
+        self.request(Command::ReadySources).await
     }
 
     pub(crate) async fn register_source(

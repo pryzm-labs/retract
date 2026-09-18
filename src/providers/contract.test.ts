@@ -84,6 +84,11 @@ describe("record validation through the actual search and job adapters", () => {
     await expect(api.jobs(lifecycleContext)).rejects.toThrow();
     expect(invoke).toHaveBeenLastCalledWith("get_jobs_v2", { request: { contractVersion: 2, context: fixture.context, payload: {} } });
   });
+  it("accepts content refs as dirty refs for item-level provider jobs", () => {
+    const job = wireJob(fixture.job);
+    job.dirtyRefs = [wireMessage(fixture.messages[0])];
+    expect(decodeJob(job).dirtyRefs[0].resource.resourceKind).toBe("content");
+  });
   it("rejects unsolicited targeted refresh records without widening to a catalog", async () => {
     vi.mocked(invoke).mockResolvedValue({ contractVersion: 2, context: fixture.syntheticContext, payload: [] });
     await expect(api.refreshChats([decodeRef(fixture.dirtyRefs[0])], lifecycleContext)).rejects.toThrow();

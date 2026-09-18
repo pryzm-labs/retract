@@ -1,6 +1,6 @@
 # Archive storage
 
-Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a backend-only Discord importer. Discord remains unavailable to users: no production import command, source-switching UI, remediation UI or background import registration is enabled. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database.
+Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a production Discord Data Package importer. The source-selection UI can import, search, privacy-scan, and remediate exact owner-authored Discord message IDs after a matching live account is verified. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database. Other archive providers remain unavailable.
 
 ## Native dependency
 
@@ -26,7 +26,7 @@ A failed first open remains cached for the application lifetime to avoid repeate
 
 Shutdown permanently prevents new archive work, cancels unstarted commands and drains each tracked repository before zeroizing cached secrets and releasing credential ownership. Cancelling an open or shutdown waiter does not lose the worker's completion handle. Cache clearing is terminal: a late settings request cannot reacquire the lease. Cancellation of an import sets its shared signal before waiting for a queue slot; queued batches and the in-flight pre-commit check observe it. Already committed progress is retained.
 
-Quit **all older Retract copies before first archive use**. An already-running older binary cannot be made to honor the new lease. First archive-key creation lazily upgrades the same consolidated Keychain item from v1 to namespaced v2 while preserving Telegram secret values. Unknown versions are never overwritten; vault-format downgrades are unsupported, and deleting/restoring older vault bytes is not a recovery procedure. The archive key is never accepted through IPC, environment variables or a user-supplied production path.
+Quit **all older Retract copies before first archive use**. An already-running older binary cannot be made to honor the new lease. First archive-key creation lazily upgrades the same consolidated Keychain item from v1 to namespaced v2 while preserving Telegram secret values; explicitly remembering a Discord token upgrades it to v3. Unknown versions are never overwritten; vault-format downgrades are unsupported, and deleting/restoring older vault bytes is not a recovery procedure. Archive keys are never accepted through IPC, environment variables or a user-supplied production path.
 
 ## Repository and interrupted-file safety
 

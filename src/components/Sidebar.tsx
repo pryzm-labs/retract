@@ -22,11 +22,13 @@ interface SidebarProps {
   scope: ChatScope;
   chatQuery: string;
   accountLabel: string;
+  provider: "telegram" | "discord";
   pendingRemovalChatIds: Set<string>;
   onChatQueryChange: (value: string) => void;
   onSelectChat: (id: string | null) => void;
   onScopeChange: (scope: ChatScope) => void;
   onOpenSettings: () => void;
+  onOpenSources: () => void;
 }
 
 export function Sidebar({
@@ -35,11 +37,13 @@ export function Sidebar({
   scope,
   chatQuery,
   accountLabel,
+  provider,
   pendingRemovalChatIds,
   onChatQueryChange,
   onSelectChat,
   onScopeChange,
-  onOpenSettings
+  onOpenSettings,
+  onOpenSources
 }: SidebarProps) {
   const lowered = chatQuery.trim().toLowerCase();
   const visibleChats = chats.filter((chat) => {
@@ -55,14 +59,14 @@ export function Sidebar({
       <div className="brand-row">
         <BrandLogo />
         <span className="brand-name">Retract</span>
-        <span className="runtime-pill">TELEGRAM</span>
+        <span className="runtime-pill">{provider.toUpperCase()}</span>
       </div>
 
-      <button className="account-switcher" type="button" aria-label="Current account">
+      <button className="account-switcher" type="button" aria-label="Switch data source" onClick={onOpenSources}>
         <Avatar name={accountLabel} seed={3} size={30} />
         <span className="account-copy">
           <strong>{accountLabel}</strong>
-          <small>Telegram account</small>
+          <small>{provider === "discord" ? "Discord archive" : "Telegram account"}</small>
         </span>
         <ChevronsUpDown size={15} aria-hidden="true" />
       </button>

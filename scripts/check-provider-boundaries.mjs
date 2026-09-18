@@ -128,6 +128,31 @@ for (const path of rustFiles(sourceRoot)) {
 
 for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
   if (path.endsWith("_tests.rs") || path.endsWith("/tests.rs")) continue;
+  const name = display(path);
+  if (name === "providers/discord/session.rs" || name === "providers/discord/http.rs") {
+    reject(path,
+      /\b(?:std\s*::\s*)?process\s*::|\b(?:Command|TcpListener|UdpSocket|tauri|telegram|Telegram\w*|webbrowser|opener)\b/,
+      "Discord session isolation forbids process, browser UI, IPC and Telegram APIs");
+    continue;
+  }
+  if (name === "providers/discord/commands.rs") {
+    reject(path,
+      /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|security_framework|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
+      "Discord IPC must use reviewed owners instead of direct network, credential, Telegram or process APIs");
+    continue;
+  }
+  if (name === "providers/discord/application.rs") {
+    reject(path,
+      /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|tauri|security_framework|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
+      "Discord application composition must use provider ports instead of direct I/O");
+    continue;
+  }
+  if (name.startsWith("providers/discord/browser/")) {
+    reject(path,
+      /\b(?:keyring|security_framework|Keychain|secure_store|telegram|Telegram\w*|tauri)\b/,
+      "Discord browser isolation forbids credential stores, IPC and Telegram APIs");
+    continue;
+  }
   reject(path,
     /\b(?:reqwest|hyper|ureq|curl|surf|isahc|TcpStream|TcpListener|UdpSocket|tauri|keyring|security_framework|credentials|secure_store|Keychain|telegram|Telegram\w*|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
     "Discord backend isolation forbids network, UI, credential, Telegram and process/browser APIs");
@@ -136,12 +161,13 @@ for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
 // start/retry are visible only within providers::discord; launch/handle creation
 // stay private. RuntimeState may construct and drain an inert owner, but aliases,
 // command placement and #[path] cannot grant access to those private methods.
-// These checks prevent accidental widening and direct IPC coupling. They do not
+// These checks prevent accidental widening and unreviewed IPC coupling. They do not
 // resolve Rust imports, cfg branches, module paths, macros or inherited aliases.
 const publicItem = "\\bpub(?:\\s*\\([^)]*\\))?\\s+";
 const ipc = /\btauri\b|#\s*\[\s*command\b|\bgenerate_handler\s*!|\binvoke_handler\s*\(/;
 for (const path of rustFiles(resolve(sourceRoot, "providers/discord"))) {
   const name = display(path);
+  if (name === "providers/discord/commands.rs") continue;
   const code = rustCode(readFileSync(path, "utf8"));
   if (ipc.test(code)) failures.push(name + ": Discord modules cannot host IPC");
   if (name === "providers/discord/import.rs") {
@@ -171,8 +197,9 @@ for (const path of rustFiles(sourceRoot)) {
     name.startsWith("compatibility/") || name === "providers/registry.rs" ||
     /#\s*\[\s*(?:tauri\s*::\s*)?command\b|\bgenerate_handler\s*!|\binvoke_handler\s*\(/.test(code);
   const directEntryRegistration = name === "lib.rs" && /\b\w*discord\w*\s*::\s*register\b/i.test(code);
-  if ((commandSource && /\b\w*discord\w*\b/i.test(code)) || directEntryRegistration) {
-    failures.push(name + ": Discord importer is backend-only and cannot enter commands or provider registration");
+  const directDiscordCapability = /\bdiscord_imports\b|\bdiscord\b[^;]*\b(?:import|session|browser|http|remediation|application)\b|\bdiscord\s*::\s*\*/.test(code);
+  if ((commandSource && directDiscordCapability) || directEntryRegistration) {
+    failures.push(name + ": Discord capabilities may enter IPC only through the reviewed provider command adapter");
   }
 }
 
@@ -213,9 +240,9 @@ if (existsSync(archiveManifest)) {
 }
 
 if (failures.length > 0) {
-  console.error("Telegram provider boundary check failed:");
+  console.error("Provider boundary check failed:");
   for (const failure of failures) console.error(`- ${failure}`);
   process.exitCode = 1;
 } else {
-  console.log("Telegram provider boundaries are valid.");
+  console.log("Provider boundaries are valid.");
 }

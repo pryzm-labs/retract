@@ -90,8 +90,8 @@ test("Discord parent cannot publish coordinator wrappers or re-exports", () => {
   }
 });
 
-test("Discord modules cannot host command attributes or handler registration", () => {
-  for (const name of ["nested/tests.rs", "mod.rs", "import.rs", "commands.rs"]) {
+test("Discord modules outside the reviewed command adapter cannot host IPC", () => {
+  for (const name of ["nested/tests.rs", "mod.rs", "import.rs"]) {
     for (const source of ["builder.invoke_handler(router);", "generate_handler![load];", "#[tauri::command] fn load() {}", "use tauri::command as exposed; #[exposed] fn load() {}"]) {
       const root = fixture();
       write(root, `providers/discord/${name}`, source);
@@ -117,16 +117,26 @@ test("private capability methods coexist with crate-visible inert lifecycle meth
   assert.equal(check(root).status, 0);
 });
 
-test("Discord importer remains unavailable to commands and provider registration", () => {
+test("Discord capabilities remain unavailable outside the reviewed command adapter", () => {
   for (const name of ["commands.rs", "commands/archive.rs", "providers/registry.rs"]) {
     for (const source of ["use crate::providers::discord::import::DiscordImportOwner;", "use crate::providers::{discord::import};", "owner.discord_imports.start(file).await;"]) {
       const root = fixture();
       write(root, name, source);
       const result = check(root);
       assert.equal(result.status, 1, `${name}: ${source}`);
-      assert.match(result.stderr, /Discord importer is backend-only/);
+      assert.match(result.stderr, /reviewed provider command adapter/);
     }
   }
+});
+
+test("reviewed Discord command adapter can invoke the owned importer without direct I/O", () => {
+  const root = fixture();
+  write(root, "providers/discord/commands.rs", `
+    use tauri::State;
+    #[tauri::command]
+    async fn start(runtime: State<'_, RuntimeState>) { runtime.discord_imports.start(file).await; }
+  `);
+  assert.equal(check(root).status, 0);
 });
 
 test("actual compatibility IPC modules reject Discord owner access through RuntimeState", () => {
@@ -141,25 +151,28 @@ test("actual compatibility IPC modules reject Discord owner access through Runti
     `);
     const result = check(root);
     assert.equal(result.status, 1, name);
-    assert.match(result.stderr, /Discord importer is backend-only/);
+    assert.match(result.stderr, /reviewed provider command adapter/);
   }
 });
 
-test("actual handler registration locations reject Discord command exposure", () => {
+test("handler registration rejects direct Discord capability access", () => {
   for (const name of ["compatibility/commands_v2.rs", "lib.rs", "ipc/registration.rs"]) {
     for (const source of [
-      "fn register(builder: Builder) { builder.invoke_handler(tauri::generate_handler![import_discord_v2]); }",
-      "fn register(builder: Builder) { builder.invoke_handler(discord_commands::dispatch); }",
-      "#[tauri::command] async fn discord_import_v2() {}",
       "#[tauri::command] async fn import_archive(runtime: State<'_, Arc<RuntimeState>>) { runtime.discord_imports.start(file).await; }",
     ]) {
       const root = fixture();
       write(root, name, source);
       const result = check(root);
       assert.equal(result.status, 1, `${name}: ${source}`);
-      assert.match(result.stderr, /Discord importer is backend-only/);
+      assert.match(result.stderr, /reviewed provider command adapter/);
     }
   }
+});
+
+test("compatibility router may register reviewed Discord command functions", () => {
+  const root = fixture();
+  write(root, "compatibility/commands_v2.rs", "fn register(builder: Builder) { builder.invoke_handler(tauri::generate_handler![crate::providers::discord::commands::start_discord_import_v2]); }");
+  assert.equal(check(root).status, 0);
 });
 
 test("lib entry point cannot delegate registration to a Discord command module", () => {
@@ -167,7 +180,7 @@ test("lib entry point cannot delegate registration to a Discord command module",
   write(root, "lib.rs", "pub fn run() { let app = discord_commands::register(tauri::Builder::default()); }");
   const result = check(root);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Discord importer is backend-only/);
+  assert.match(result.stderr, /reviewed provider command adapter/);
 });
 
 test("IPC guard permits inert owner lifecycle, documentation, literals and test-only modules", () => {

@@ -57,6 +57,21 @@ const readme = readFileSync(resolve(root, "README.md"), "utf8");
 for (const reference of ["assets/retract-icon.png", "docs/images/retract-overview.png"]) {
   if (!readme.includes(reference)) errors.push(`README must reference ${reference}`);
 }
+for (const disclosure of [
+  "automating a normal user account",
+  "isolated temporary browser profile",
+  "Enter token manually",
+  "memory-only session",
+  "DELETE DISCORD MESSAGES",
+  "https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots"
+]) {
+  if (!readme.includes(disclosure)) errors.push(`README must contain Discord disclosure/setup text: ${disclosure}`);
+}
+
+const dockerfile = readFileSync(resolve(root, "Dockerfile"), "utf8");
+if (/^\s+(?:chromium|firefox|google-chrome|microsoft-edge)(?:\s|\\)/m.test(dockerfile)) {
+  errors.push("Docker checks must not install or cache browser binaries");
+}
 
 const privacyInstruction = /do not (?:attach|upload|include)[^\n]*(?:chat exports|credentials|session files|unredacted conversations)/i;
 for (const form of ["bug_report.yml", "feature_request.yml"]) {

@@ -49,6 +49,38 @@ impl Drop for ProcessLock {
 }
 
 impl ArchiveStore {
+    pub(crate) fn ready_sources(&self) -> Result<Vec<model::ArchiveSourceEntry>, ArchiveError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ArchiveError::StorageFailure)?;
+        let mut query = connection
+            .prepare("SELECT a.record_json, s.record_json FROM sources s JOIN accounts a ON a.account_id=s.account_id AND a.provider=s.provider ORDER BY s.source_id")
+            .map_err(|_| ArchiveError::StorageFailure)?;
+        let mut rows = query.query([]).map_err(|_| ArchiveError::StorageFailure)?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().map_err(|_| ArchiveError::StorageFailure)? {
+            let account: AccountRecord = model::decode(
+                &row.get::<_, String>(0)
+                    .map_err(|_| ArchiveError::InvalidStore)?,
+            )?;
+            let source: SourceRecord = model::decode(
+                &row.get::<_, String>(1)
+                    .map_err(|_| ArchiveError::InvalidStore)?,
+            )?;
+            if source.state != SourceState::Ready {
+                continue;
+            }
+            let validator = self
+                .validators
+                .get(&source.provider)
+                .ok_or(ArchiveError::InvalidStore)?;
+            model::validate_registration(&account, &source, validator.as_ref())?;
+            entries.push(model::ArchiveSourceEntry { account, source });
+        }
+        Ok(entries)
+    }
+
     pub(crate) fn resolve_or_register_import(
         &self,
         input: model::NewArchiveImport,

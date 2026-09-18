@@ -38,6 +38,7 @@ export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogP
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const operation = hasFamiliarShape(plan) ? plan.operation : null;
+  const discord = plan.context.scope.provider === "discord";
   const titleRequired = plan.confirmation.exactText !== null;
   const titleMatches = !titleRequired || typedTitle === plan.confirmation.exactText;
   const critical = plan.confirmation.tier === "critical";
@@ -102,7 +103,9 @@ export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogP
               ? "Only messages sent by your account in this group will be removed for everyone. Your membership and every other participant’s messages remain. Attached media and captions are removed with their message; externally saved copies are outside Telegram’s control."
             : operation === "delete_by_sender"
               ? `Telegram will remove every message sent by ${plan.targetSenderName} in “${plan.chatTitle}”. This can affect far more messages than the current search results.`
-            : "Only the messages in this frozen plan that still pass a live capability check will be removed. Attached media and captions are removed with their message; externally saved copies are outside Telegram’s control."}
+            : discord
+              ? "Retract will delete only the exact Discord message IDs attributed to you in the imported archive. Discord may rate-limit or reject normal-user automation, and externally saved copies remain outside Retract’s control."
+              : "Only the messages in this frozen plan that still pass a live capability check will be removed. Attached media and captions are removed with their message; externally saved copies are outside Telegram’s control."}
       </p>
 
       <ActionEffects descriptors={plan.steps.map(step => step.descriptor)} targetCounts={plan.steps.map(step => step.targets.length)} label="Ordered plan effects" />
@@ -139,7 +142,7 @@ export function ConfirmDialog({ plan, busy, onClose, onConfirm }: ConfirmDialogP
       {plan.confirmation.acknowledgementRequired && <label className="irreversible-check">
         <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />
         <span className="custom-checkbox">{acknowledged && <Check size={12} />}</span>
-        <span>{operation === "clear_history_and_leave" ? "I understand this attempts complete history revocation before removing my membership and local entry." : operation === "delete_all_messages_and_leave" ? "I understand Retract will attempt to revoke every frozen eligible message before leaving and removing my local entry." : operation === "leave_chat" ? "I understand Retract will try to revoke my frozen outgoing messages, then remove my membership and remaining copy." : operation === "remove_chat_for_self" ? "I understand this deletes only my history and chat-list entry, not anyone else’s copy." : "I understand that accepted Telegram deletions cannot be undone."}</span>
+        <span>{discord ? "I understand Discord does not officially support normal-user automation, and accepted deletions cannot be undone." : operation === "clear_history_and_leave" ? "I understand this attempts complete history revocation before removing my membership and local entry." : operation === "delete_all_messages_and_leave" ? "I understand Retract will attempt to revoke every frozen eligible message before leaving and removing my local entry." : operation === "leave_chat" ? "I understand Retract will try to revoke my frozen outgoing messages, then remove my membership and remaining copy." : operation === "remove_chat_for_self" ? "I understand this deletes only my history and chat-list entry, not anyone else’s copy." : "I understand that accepted Telegram deletions cannot be undone."}</span>
       </label>}
 
       <div className="dialog-actions">

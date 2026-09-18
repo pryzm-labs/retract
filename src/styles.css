@@ -287,8 +287,11 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 .message-row { min-height: 81px; display: grid; grid-template-columns: 18px 36px minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-bottom: 4px; padding: 11px 14px; border: 1px solid transparent; border-radius: 11px; background: var(--surface); transition: background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .14s ease; }
 .message-row:hover { border-color: var(--line-soft); background: var(--surface-elevated); box-shadow: var(--shadow-soft); transform: translateY(-1px); }
 .message-row.is-selected { border-color: rgba(34,125,101,.18); background: var(--green-soft); box-shadow: inset 3px 0 0 var(--green); }
+.message-row.is-complete { opacity: .68; border-color: rgba(34,125,101,.14); }
+.message-row.is-complete:hover { transform: none; box-shadow: none; }
 .message-check { align-self: center; cursor: pointer; }
 .message-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
+.message-body:disabled, .message-row.is-complete .message-check { cursor: default; }
 .message-meta { max-width: 100%; display: flex; align-items: center; gap: 5px; color: #78858a; font-size: 9.75px; white-space: nowrap; overflow: hidden; }
 .message-meta strong { color: #344149; font-size: 10.75px; font-weight: 700; }
 .meta-dot { color: #b0b8bb; }
@@ -305,6 +308,8 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 .reach-self_only { color: #956c2c; }
 .reach-self_only > span { background: #d1993c; }
 .reach-none > span { background: #aeb7ba; }
+.reach-complete { color: #28765f; }
+.reach-complete > span { background: #39a984; }
 
 .center-state { height: 100%; min-height: 280px; display: grid; place-content: center; justify-items: center; color: #879398; text-align: center; }
 .center-state h2 { margin: 12px 0 5px; color: #47545a; font-size: 14px; }
@@ -408,6 +413,44 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 .confirm-button.critical { background: var(--red); }
 .confirm-button.critical:hover:not(:disabled) { background: var(--red-deep); }
 .confirm-button:disabled { background: #c8cecf; color: #eef0f0; cursor: not-allowed; }
+
+.source-setup-dialog, .discord-connection-dialog { position: relative; width: min(610px, calc(100vw - 40px)); max-height: calc(100dvh - 40px); margin: auto; padding: 28px; overflow: auto; border: 1px solid #d7dede; border-radius: 16px; background: #fff; color: var(--text); box-shadow: var(--shadow); }
+.source-setup-dialog::backdrop, .discord-connection-dialog::backdrop { background: rgba(16, 25, 29, .62); backdrop-filter: blur(5px); }
+.source-setup-dialog h2, .discord-connection-dialog h2 { margin: 2px 36px 0 0; font-size: 22px; letter-spacing: -.035em; }
+.source-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 19px 0; }
+.source-choice, .available-sources button, .browser-options button { display: flex; align-items: center; gap: 11px; min-height: 62px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }
+.source-choice:hover, .available-sources button:hover, .browser-options button:hover { border-color: var(--green); background: var(--green-soft); }
+.source-choice > span, .available-sources button > span, .discord-session-ready > span { min-width: 0; display: grid; gap: 3px; flex: 1; }
+.source-choice strong, .available-sources strong, .discord-session-ready strong { font-size: 11px; }
+.source-choice small, .available-sources small, .discord-session-ready small { color: var(--muted); font-size: 9px; }
+.available-sources { display: grid; gap: 8px; margin-top: 20px; }
+.available-sources > p { margin-bottom: 2px; }
+.available-sources button { width: 100%; min-height: 52px; }
+.discord-import-progress, .discord-session-ready { display: flex; align-items: center; gap: 10px; margin: 14px 0; padding: 12px; border: 1px solid rgba(45,139,112,.25); border-radius: 10px; background: var(--green-soft); color: var(--green-deep); }
+.discord-import-progress > span { flex: 1; display: grid; gap: 3px; }
+.discord-import-progress strong { font-size: 10px; }
+.discord-import-progress small { color: var(--muted); font-size: 9px; }
+.discord-import-progress button, .discord-session-ready button { display: flex; align-items: center; gap: 5px; border: 0; background: transparent; color: currentColor; font-size: 9px; font-weight: 700; cursor: pointer; }
+.source-privacy-note { margin: 18px 0 0; color: var(--muted); font-size: 9px; }
+.risk-disclosure { display: flex; align-items: flex-start; gap: 10px; margin: 18px 0 12px; padding: 12px; border: 1px solid rgba(188,139,46,.3); border-radius: 10px; background: var(--amber-soft); color: #765d2c; }
+.risk-disclosure svg { flex: 0 0 auto; }
+.risk-disclosure p { margin: 0; font-size: 10px; line-height: 1.5; }
+.browser-options, .manual-token-form { display: grid; gap: 8px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+.browser-options > p, .manual-token-form > p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.browser-options button { min-height: 40px; padding: 0 12px; }
+.browser-options button span { flex: 1; }
+.manual-token-form label { display: grid; gap: 6px; color: var(--muted); font-size: 9px; }
+.secret-input { height: 40px; display: grid; grid-template-columns: 20px 1fr 32px; align-items: center; padding: 0 8px; border: 1px solid var(--field-border); border-radius: 9px; background: var(--field-bg); color: var(--muted); }
+.secret-input:focus-within { border-color: var(--green); outline: 3px solid var(--accent-glow); }
+.secret-input input { min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--field-text); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.secret-input button { display: grid; place-items: center; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.manual-token-form .remember-secret { display: flex; align-items: center; gap: 7px; }
+.manual-token-form .confirm-button { justify-self: end; }
+.manual-token-help { margin-top: 14px; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.manual-token-help summary { color: var(--text); font-weight: 650; cursor: pointer; }
+.manual-token-help ol { margin: 8px 0 0; padding-left: 19px; }
+.manual-token-help code { color: var(--green-deep); font: inherit; }
+.browser-options .cancel-browser-auth { justify-content: center; min-height: 32px; border-color: var(--line); color: var(--muted); }
 
 .toast { position: fixed; z-index: 10; left: 50%; bottom: 22px; transform: translateX(-50%); max-width: min(520px, calc(100vw - 40px)); min-height: 42px; display: grid; grid-template-columns: 18px minmax(0,1fr) 22px; align-items: center; gap: 8px; padding: 8px 9px 8px 12px; border: 1px solid #cfdbd7; border-radius: 10px; background: rgba(249,252,251,.97); color: #3d514a; box-shadow: 0 10px 30px rgba(25,40,34,.16); font-size: 10px; }
 .toast-success > svg { color: var(--green); }
@@ -519,6 +562,8 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
   .chat-action.danger:hover { background: #462b2c; border-color: #774342; }
   .job-row { border-color: var(--line-soft); }
   .confirm-dialog { background: #293134; border-color: #465155; }
+  .source-setup-dialog, .discord-connection-dialog { background: #293134; border-color: #465155; }
+  .risk-disclosure { color: #e1c784; }
   .connection-dialog { background: #293134; border-color: #465155; }
   .connection-fields { background: #222a2d; border-color: #414c50; }
   .connection-fields input[type="text"], .connection-fields input[type="password"] { background: var(--field-bg); border-color: var(--field-border); }

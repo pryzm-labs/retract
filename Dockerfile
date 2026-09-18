@@ -83,6 +83,8 @@ FROM check-base AS checks
 # Every project-controlled build/test command runs non-root and without a
 # network. Dependency code may execute here, but it cannot reach credentials,
 # the host filesystem, Docker's socket, or the network through this build.
+# Discord browser tests use synthetic protocol/process fixtures. No browser
+# binary or browser profile is installed, copied into, or cached by this image.
 RUN --network=none npm test
 RUN --network=none npm run test:release
 RUN --network=none node --test scripts/check-discord-fixtures.node-test.mjs

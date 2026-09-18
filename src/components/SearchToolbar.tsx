@@ -13,6 +13,7 @@ export const contentKindsForFilter: Record<ContentFilter, ContentKind[]> = {
 };
 
 interface SearchToolbarProps {
+  provider: "telegram" | "discord";
   query: string;
   direction: MessageDirection;
   contentFilter: ContentFilter;
@@ -29,6 +30,7 @@ interface SearchToolbarProps {
 }
 
 export function SearchToolbar({
+  provider,
   query,
   direction,
   contentFilter,
@@ -116,7 +118,7 @@ export function SearchToolbar({
       </div>
       {privacyScan && (
         <p className="privacy-scan-note" role="status">
-          Scanning message text, captions, filenames, contact cards, and Telegram location messages across the current scope. Review false positives; pixels inside photos and external copies are not inspected.
+          {provider === "discord" ? "Scanning imported message text and attachment names across this Discord archive." : "Scanning message text, captions, filenames, contact cards, and Telegram location messages across the current scope."} Review false positives; pixels inside photos and external copies are not inspected.
         </p>
       )}
     </header>

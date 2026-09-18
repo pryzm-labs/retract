@@ -55,8 +55,8 @@
       "../vendor/sqlcipher/OPENSSL-LICENSE.txt": "licenses/OpenSSL-LICENSE.txt"
     },
     "category": "Utility",
-    "shortDescription": "Local-first Telegram history cleanup",
-    "longDescription": "Search and remove Telegram history using explicit, capability-checked deletion plans.",
+    "shortDescription": "Local-first chat history cleanup",
+    "longDescription": "Search and remove Telegram or Discord history using explicit, account-bound deletion plans.",
     "copyright": "Copyright © 2026 Pryzm Labs",
     "macOS": {
       "minimumSystemVersion": "12.0",

@@ -331,6 +331,20 @@ impl DiscordImportOwner {
             control.cancel();
         }
     }
+    pub(crate) fn active_progress(&self) -> Option<DiscordImportProgress> {
+        self.active.lock().ok().and_then(|active| {
+            active
+                .as_ref()
+                .map(|control| control.progress.borrow().clone())
+        })
+    }
+    pub(crate) fn cancel_active(&self) {
+        if let Ok(active) = self.active.lock()
+            && let Some(control) = active.as_ref()
+        {
+            control.cancel();
+        }
+    }
     #[cfg(test)]
     pub(crate) fn is_drained(&self) -> bool {
         self.job.try_lock().is_ok_and(|job| job.is_none())
