@@ -204,22 +204,23 @@ impl DiscordProvider {
     }
 }
 
+fn discord_descriptor() -> ProviderDescriptor {
+    ProviderDescriptor {
+        key: discord_provider_key(),
+        display_name: "Discord".into(),
+        capabilities: [
+            ProviderCapability::ConversationListing,
+            ProviderCapability::ContentSearch,
+            ProviderCapability::MediaMetadata,
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 impl ProviderRegistration for DiscordProvider {
     fn descriptor(&self) -> ProviderDescriptor {
-        ProviderDescriptor {
-            key: discord_provider_key(),
-            display_name: "Discord".into(),
-            capabilities: [
-                ProviderCapability::ArchiveImport,
-                ProviderCapability::ConversationListing,
-                ProviderCapability::ContentSearch,
-                ProviderCapability::MediaMetadata,
-                ProviderCapability::AutomaticRemediation,
-                ProviderCapability::Verification,
-            ]
-            .into_iter()
-            .collect(),
-        }
+        discord_descriptor()
     }
     fn reviewed_lifecycle(&self) -> Result<Arc<dyn ReviewedLifecycle>, ProviderRegistryError> {
         Ok(self.lifecycle.clone())
@@ -376,4 +377,24 @@ fn archive_error(error: crate::persistence::archive::ArchiveError) -> SafeError 
         }
         _ => ErrorCode::Transient,
     })
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn selected_archive_declares_only_capabilities_backed_by_registration_ports() {
+        let descriptor = discord_descriptor();
+        assert_eq!(
+            descriptor.capabilities,
+            [
+                ProviderCapability::ConversationListing,
+                ProviderCapability::ContentSearch,
+                ProviderCapability::MediaMetadata,
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
 }

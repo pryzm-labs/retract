@@ -72,6 +72,15 @@ export interface ChatSummary {
   conversationState: ConversationState;
   capabilities: ChatCapabilities;
   avatarSeed: number;
+  discordNavigation?: DiscordNavigation;
+}
+
+export type DiscordNavigationCategory = "direct" | "server" | "other";
+export interface DiscordNavigation {
+  category: DiscordNavigationCategory;
+  groupId: string | null;
+  groupLabel: string | null;
+  detail: string;
 }
 
 export interface MessageSnapshot {
@@ -249,6 +258,10 @@ export interface DiscordImportStatus {
   active: boolean;
   progress: DiscordImportProgress | null;
   sources: DiscordSource[];
+  importScope: Scope | null;
+  retryAvailable: boolean;
+  failureCode: "invalid_archive" | "unsupported_profile" | "limit_exceeded" | "input_changed" | "incomplete_source" | "storage_failure" | null;
+  warningDetails: Array<{ code: string; count: number }>;
 }
 
 export interface DiscordSessionStatus {

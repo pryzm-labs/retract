@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -172,6 +173,7 @@ impl Default for DiscordSessionData {
 
 pub(crate) struct DiscordSessionOwner {
     data: Mutex<DiscordSessionData>,
+    restore_attempts: Mutex<HashSet<String>>,
     identity_client: Arc<dyn DiscordIdentityClient>,
     credential_store: Arc<dyn DiscordCredentialStore>,
 }
@@ -190,6 +192,7 @@ impl DiscordSessionOwner {
     ) -> Self {
         Self {
             data: Mutex::new(DiscordSessionData::default()),
+            restore_attempts: Mutex::new(HashSet::new()),
             identity_client,
             credential_store,
         }
@@ -231,6 +234,21 @@ impl DiscordSessionOwner {
         &self,
         expected_account_id: &str,
     ) -> Result<DiscordSessionStatus, AppError> {
+        let current = self.status();
+        if current.state == DiscordSessionState::Ready {
+            if current.account_id.as_deref() == Some(expected_account_id) {
+                return Ok(current);
+            }
+            self.disconnect();
+        }
+        let first_attempt = self
+            .restore_attempts
+            .lock()
+            .map_err(|_| AppError::StateUnavailable)?
+            .insert(expected_account_id.to_owned());
+        if !first_attempt {
+            return Ok(self.status());
+        }
         let Some(credential) = self.credential_store.load()? else {
             return Ok(self.status());
         };

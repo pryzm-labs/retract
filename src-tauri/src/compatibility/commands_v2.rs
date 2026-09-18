@@ -191,6 +191,7 @@ pub fn register<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         crate::providers::discord::commands::select_archive_v2,
         crate::providers::discord::commands::start_discord_import_v2,
         crate::providers::discord::commands::get_discord_import_v2,
+        crate::providers::discord::commands::retry_discord_import_v2,
         crate::providers::discord::commands::cancel_discord_import_v2,
         crate::providers::discord::commands::get_discord_session_v2,
         crate::providers::discord::commands::discover_discord_browsers_v2,

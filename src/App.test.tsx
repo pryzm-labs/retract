@@ -1,6 +1,6 @@
 import { fixtureContext, fixtureRef, fixtureChatId, fixtureMessageId } from "./demo";
 import { testId, testJob } from "./test/v2-fixtures";
-import { uuid } from "./providers/identity";
+import { providerKey, uuid } from "./providers/identity";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@retract/api";
@@ -33,6 +33,171 @@ describe("Retract desktop UI", () => {
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
     expect(screen.queryByText(/Safe demo/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Reset demo fixtures/i })).not.toBeInTheDocument();
+  });
+
+  it("fences Telegram work and skips reconnection when a Discord session is already ready", async () => {
+    const telegramSnapshot = await api.snapshot(fixtureContext);
+    const telegramSearch = api.search.bind(api);
+    const telegramSnapshotRead = api.snapshot.bind(api);
+    const sourceScope = { ...fixtureContext.scope, provider: providerKey("discord") };
+    const discordContext = { ...fixtureContext, scope: sourceScope, sessionGeneration: testId("discord-session") };
+    const source = { scope: sourceScope, accountLabel: "Archive Owner", username: "owner", importedAt: "2026-09-15T12:00:00Z", warningCount: 0 };
+    const telegramChat = telegramSnapshot.chats[0];
+    const discordChat = {
+      ...telegramChat,
+      scope: sourceScope,
+      ref: {
+        ...telegramChat.ref,
+        scope: sourceScope,
+        resource: { ...telegramChat.ref.resource, provider: sourceScope.provider }
+      },
+      title: "Discord cleanup"
+    };
+    const telegramMessage = (await telegramSearch({
+      query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any",
+      minDate: null, maxDate: null, excludePinned: false, privacyScan: false, limit: 1
+    }, fixtureContext)).messages[0];
+    const discordMessage = {
+      ...telegramMessage,
+      scope: sourceScope,
+      ref: {
+        ...telegramMessage.ref,
+        scope: sourceScope,
+        resource: { ...telegramMessage.ref.resource, provider: sourceScope.provider }
+      },
+      chatId: discordChat.id,
+      preview: "Imported Discord message"
+    };
+    const discordBootstrap: AppSnapshot = {
+      ...telegramSnapshot,
+      context: discordContext,
+      accountLabel: "Archive Owner",
+      chats: [],
+      catalog: { phase: "ready", total: 0, processed: 0 },
+      safetyNotice: "Only exact messages from this archive are eligible."
+    };
+    const discordSnapshot: AppSnapshot = {
+      ...discordBootstrap,
+      chats: [discordChat],
+      catalog: { phase: "ready", total: 1, processed: 1 }
+    };
+    const readyImport = {
+      active: false,
+      sources: [source],
+      progress: null,
+      importScope: null,
+      retryAvailable: false,
+      failureCode: null,
+      warningDetails: []
+    };
+    let holdTelegramSearch = false;
+    let rejectStaleSearch: ((reason: Error) => void) | null = null;
+
+    vi.spyOn(api, "discordImport").mockResolvedValue(readyImport);
+    vi.spyOn(api, "discordSession").mockResolvedValue({ state: "ready", accountId: "42", username: "owner", displayName: "Archive Owner", remembered: true });
+    vi.spyOn(api, "discordBrowsers").mockResolvedValue([]);
+    vi.spyOn(api, "snapshot").mockImplementation(context => context.scope.provider === sourceScope.provider
+      ? Promise.resolve(discordSnapshot)
+      : telegramSnapshotRead(context));
+    vi.spyOn(api, "search").mockImplementation((request, context) => {
+      if (context.scope.provider === sourceScope.provider) {
+        return Promise.resolve(request.direction === "any"
+          ? { messages: [discordMessage], returned: 1, truncated: false }
+          : { messages: [], returned: 0, truncated: false });
+      }
+      if (holdTelegramSearch) return new Promise((_, reject) => { rejectStaleSearch = reject; });
+      return telegramSearch(request, context);
+    });
+    vi.spyOn(api, "selectDiscordSource").mockImplementation(async () => {
+      rejectStaleSearch?.(new Error("This action belongs to a different account or source."));
+      await new Promise(resolve => window.setTimeout(resolve, 20));
+      return discordBootstrap;
+    });
+
+    render(<App />);
+    await screen.findByText("Search every chat");
+    holdTelegramSearch = true;
+    fireEvent.click(screen.getByRole("button", { name: "Others" }));
+    await waitFor(() => expect(rejectStaleSearch).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Switch data source" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Archive Owner/ }));
+
+    expect(await screen.findByText("Imported Discord message")).toBeInTheDocument();
+    expect(screen.queryByText("This action belongs to a different account or source.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Anyone" })).toHaveClass("is-active");
+    expect(screen.queryByRole("heading", { name: "Connect the matching Discord account" })).not.toBeInTheDocument();
+  });
+
+  it("rediscovers the native provider before listing imported Discord sources", async () => {
+    const telegram = await api.bootstrapSnapshot();
+    const telegramSnapshotRead = api.snapshot.bind(api);
+    const sourceScope = { ...fixtureContext.scope, provider: providerKey("discord") };
+    const discordContext = { ...fixtureContext, scope: sourceScope, sessionGeneration: testId("rediscovered-discord-session") };
+    const discord: AppSnapshot = {
+      ...telegram,
+      context: discordContext,
+      accountLabel: "Archive Owner",
+      chats: [],
+      catalog: { phase: "ready", total: 0, processed: 0 },
+      safetyNotice: "Only exact messages from this archive are eligible.",
+      auth: { stage: "ready" }
+    };
+    const source = { scope: sourceScope, accountLabel: "Archive Owner", username: "owner", importedAt: "2026-09-15T12:00:00Z", warningCount: 0 };
+    const bootstrap = vi.spyOn(api, "bootstrapSnapshot")
+      .mockResolvedValueOnce(telegram)
+      .mockResolvedValue(discord);
+    vi.spyOn(api, "snapshot").mockImplementation(context => context.scope.provider === sourceScope.provider
+      ? Promise.resolve(discord)
+      : telegramSnapshotRead(context));
+    vi.spyOn(api, "discordImport").mockImplementation(context => context?.scope.provider === sourceScope.provider
+      ? Promise.resolve({ active: false, sources: [source], progress: null, importScope: null, retryAvailable: false, failureCode: null, warningDetails: [] })
+      : Promise.reject(new Error("This action belongs to a different account or source.")));
+
+    render(<App />);
+    await screen.findByText("Search every chat");
+    fireEvent.click(screen.getByRole("button", { name: "Switch data source" }));
+
+    expect(await screen.findByRole("button", { name: /Archive Owner/ })).toBeVisible();
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("This action belongs to a different account or source.")).not.toBeInTheDocument();
+  });
+
+  it("recovers when native source selection completes before its response fails", async () => {
+    const telegram = await api.bootstrapSnapshot();
+    const telegramSnapshotRead = api.snapshot.bind(api);
+    const sourceScope = { ...fixtureContext.scope, provider: providerKey("discord") };
+    const discordContext = { ...fixtureContext, scope: sourceScope, sessionGeneration: testId("recovered-discord-session") };
+    const discord: AppSnapshot = {
+      ...telegram,
+      context: discordContext,
+      accountLabel: "Recovered Archive",
+      chats: [],
+      catalog: { phase: "ready", total: 0, processed: 0 },
+      safetyNotice: "Only exact messages from this archive are eligible.",
+      auth: { stage: "ready" }
+    };
+    const source = { scope: sourceScope, accountLabel: "Recovered Archive", username: "owner", importedAt: "2026-09-15T12:00:00Z", warningCount: 0 };
+    let nativeSwitched = false;
+    vi.spyOn(api, "bootstrapSnapshot").mockImplementation(async () => nativeSwitched ? discord : telegram);
+    vi.spyOn(api, "snapshot").mockImplementation(context => context.scope.provider === sourceScope.provider
+      ? Promise.resolve(discord)
+      : telegramSnapshotRead(context));
+    vi.spyOn(api, "discordImport").mockResolvedValue({ active: false, sources: [source], progress: null, importScope: null, retryAvailable: false, failureCode: null, warningDetails: [] });
+    vi.spyOn(api, "discordSession").mockResolvedValue({ state: "ready", accountId: "42", username: "owner", displayName: "Recovered Archive", remembered: false });
+    vi.spyOn(api, "discordBrowsers").mockResolvedValue([]);
+    vi.spyOn(api, "selectDiscordSource").mockImplementation(async () => {
+      nativeSwitched = true;
+      throw new Error("This action belongs to a different account or source.");
+    });
+
+    render(<App />);
+    await screen.findByText("Search every chat");
+    fireEvent.click(screen.getByRole("button", { name: "Switch data source" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Recovered Archive/ }));
+
+    expect(await screen.findByText("Discord archive")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Switch data source" })).toHaveTextContent("Recovered Archive");
+    expect(screen.queryByText("This action belongs to a different account or source.")).not.toBeInTheDocument();
   });
 
   it("keeps legacy history review guidance accessible without blocking connection settings", async () => {

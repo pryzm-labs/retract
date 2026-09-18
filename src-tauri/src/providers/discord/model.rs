@@ -155,6 +155,25 @@ pub(super) fn content_kind(text: &str, has_attachment: bool) -> ContentKind {
     }
 }
 
+pub(super) fn attachment_urls(value: &str) -> Result<Vec<&str>, AppError> {
+    if value.is_empty() {
+        return Ok(vec![]);
+    }
+    if value.chars().any(|ch| ch.is_whitespace() && ch != ' ') {
+        return Err(invalid());
+    }
+    let urls = value.split(' ').collect::<Vec<_>>();
+    if urls.iter().any(|url| url.is_empty())
+        || urls.len() > crate::persistence::archive::MAX_ATTACHMENTS
+    {
+        return Err(invalid());
+    }
+    for url in &urls {
+        attachment_name(url)?;
+    }
+    Ok(urls)
+}
+
 /// Parse inert syntax only. Preserve the caller's exact URL in observation metadata.
 pub(super) fn attachment_name(value: &str) -> Result<Option<String>, AppError> {
     if value.len() > ENVELOPE_BYTES

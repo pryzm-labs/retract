@@ -23,7 +23,8 @@ import type {
   PlanOperation,
   PlanView,
   SaveConnectionSettingsResult,
-  SearchResponse
+  SearchResponse,
+  DiscordSource
 } from "./types";
 
 interface ToastState {
@@ -72,6 +73,9 @@ export default function App() {
   const catalogSyncStarted = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const pendingRemovalJobs = useRef(new Map<string, ScopedResourceRef[]>());
+  const discordSessionGeneration = snapshot?.context?.scope.provider === "discord"
+    ? snapshot.context.sessionGeneration
+    : null;
 
   const publish = useCallback((next: AppSnapshot) => {
     if (!sameContext(currentContext.current, next.context)) {
@@ -180,6 +184,24 @@ export default function App() {
   }, [publish, loadSnapshot]);
 
   useEffect(() => {
+    const context = snapshot?.context;
+    if (!context || context.scope.provider !== "discord" || !discordSessionGeneration) return;
+    const capturedEpoch = epoch.current;
+    let disposed = false;
+    void api.discordSession(context).then(status => {
+      if (!disposed && capturedEpoch === epoch.current) {
+        setDiscordConnectionOpen(status.state !== "ready");
+      }
+    }).catch(error => {
+      if (!disposed && capturedEpoch === epoch.current) {
+        setDiscordConnectionOpen(true);
+        showError(error, setToast, "The saved Discord token could not be restored");
+      }
+    });
+    return () => { disposed = true; };
+  }, [discordSessionGeneration]);
+
+  useEffect(() => {
     if (!snapshot || snapshot.identity.state === "failed" || (snapshot.context && !syncingCatalog && snapshot.catalog.phase === "ready")) return;
     let pending = false;
     const interval = window.setInterval(() => {
@@ -244,6 +266,9 @@ export default function App() {
     if (scope === "unanswered") return chats.filter((chat) => chat.conversationState === "never_replied").map((chat) => chat.ref);
     if (scope === "empty") return chats.filter((chat) => chat.conversationState === "empty").map((chat) => chat.ref);
     if (scope === "archive") return chats.filter((chat) => chat.archived).map((chat) => chat.ref);
+    if (scope === "direct") return chats.filter((chat) => chat.discordNavigation?.category === "direct").map((chat) => chat.ref);
+    if (scope === "servers") return chats.filter((chat) => chat.discordNavigation?.category === "server").map((chat) => chat.ref);
+    if (scope === "other") return chats.filter((chat) => chat.discordNavigation?.category === "other").map((chat) => chat.ref);
     return [];
   }, [chats, scope, selectedChatId]);
 
@@ -575,17 +600,75 @@ export default function App() {
     }
   };
 
-  const selectDiscordSource = useCallback((next: AppSnapshot) => {
+  const activateDiscordSource = useCallback((next: AppSnapshot) => {
+    setQuery("");
+    setDirection("any");
+    setContentFilter("all");
+    setDateFilter("any");
+    setExcludePinned(false);
+    setPrivacyScan(false);
+    setScope("all");
+    setChatQuery("");
     setSourceSetupOpen(false);
     publish(next);
     if (next.context) {
       catalogSyncStarted.current = true;
       void loadSnapshot(next.context);
-      setDiscordConnectionOpen(true);
     }
   }, [publish, loadSnapshot]);
 
+  const selectDiscordSource = useCallback(async (source: DiscordSource) => {
+    const previousContext = currentContext.current;
+    const transitionEpoch = ++epoch.current;
+    snapshotLoadGeneration.current += 1;
+    actionGeneration.current += 1;
+    backgroundRefreshGeneration.current += 1;
+    setSyncingCatalog(true);
+    setSearching(false);
+    setToast(null);
+    try {
+      const next = await api.selectDiscordSource(source.scope, previousContext);
+      if (transitionEpoch !== epoch.current) return;
+      activateDiscordSource(next);
+    } catch (error) {
+      if (transitionEpoch !== epoch.current) return;
+      try {
+        const discovered = await api.bootstrapSnapshot(null);
+        if (transitionEpoch !== epoch.current) return;
+        if (discovered.context && sameScope(discovered.context.scope, source.scope)) {
+          activateDiscordSource(discovered);
+          return;
+        }
+      } catch {
+        // Preserve the selection error when discovery cannot establish that
+        // the native provider already completed the requested transition.
+      }
+      if (transitionEpoch === epoch.current) setSyncingCatalog(false);
+      throw error;
+    }
+  }, [activateDiscordSource]);
+
   const sourceError = useCallback((error: unknown) => showError(error, setToast), []);
+
+  const openSourceSetup = useCallback(async () => {
+    const capturedEpoch = epoch.current;
+    try {
+      const discovered = await api.bootstrapSnapshot(null);
+      if (capturedEpoch !== epoch.current) return;
+      if (!sameContext(currentContext.current, discovered.context)) {
+        publish(discovered);
+        if (discovered.context && discovered.identity.state === "ready") {
+          catalogSyncStarted.current = true;
+          await loadSnapshot(discovered.context);
+        }
+      }
+      if (capturedEpoch === epoch.current || sameContext(currentContext.current, discovered.context)) {
+        setSourceSetupOpen(true);
+      }
+    } catch (error) {
+      if (capturedEpoch === epoch.current) showError(error, setToast);
+    }
+  }, [publish, loadSnapshot]);
 
   const sourceDialog = sourceSetupOpen && connectionSettings ? (
     <SourceSetupDialog
@@ -594,7 +677,7 @@ export default function App() {
       required={!connectionSettings.setupComplete && !snapshot?.context}
       onClose={() => setSourceSetupOpen(false)}
       onTelegram={() => { setSourceSetupOpen(false); setSettingsOpen(true); }}
-      onSelected={selectDiscordSource}
+      onSelect={selectDiscordSource}
       onError={sourceError}
     />
   ) : null;
@@ -614,7 +697,7 @@ export default function App() {
   }
 
   if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {
-    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => setSourceSetupOpen(true)}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => void openSourceSetup()}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
   }
 
   if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
@@ -647,7 +730,7 @@ export default function App() {
         onSelectChat={setSelectedChatId}
         onScopeChange={setScope}
         onOpenSettings={() => snapshot.context?.scope.provider === "discord" ? setDiscordConnectionOpen(true) : setSettingsOpen(true)}
-        onOpenSources={() => setSourceSetupOpen(true)}
+        onOpenSources={() => void openSourceSetup()}
       />
 
       <main className="main-column">
