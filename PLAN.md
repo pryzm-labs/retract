@@ -323,6 +323,16 @@ Avoid features that create hidden or automatic behavior: silent background delet
 - [x] Build Discord source selection, encrypted import/search, account-bound browser/manual authentication, review and exact owner-message remediation UI with synthetic automated coverage.
 - [ ] Perform separately authorized real private-export validation. Publication, merge and release remain separate decisions.
 
+### Deferred investigation — privacy scan TDLib diagnostics (reported 2026-09-07)
+
+- [ ] Investigate console diagnostics observed after clicking **Privacy scan**. This is a recorded report, not a confirmed root cause or a request to begin implementation now.
+  - `WebPagesManager.cpp`, under `SearchChatMessagesRequest`: `Receive wrong document`, `Receive photo without photo`, and `Receive link preview of unsupported type document`.
+  - `MessagesManager.cpp`: `Receive 19 valid messages out of 18 in 19 messages`.
+  - Determine whether these diagnostics affect scan completeness, pagination/deduplication, progress, or performance, versus being recoverable link-preview parsing issues. Do not assume the scan succeeded or lost messages from the log text alone.
+  - Investigate native TDLib logging separately from application diagnostics: the supplied console output contained full message URLs and query parameters. Preserve useful failure reporting without exposing private message-derived URLs or merely hiding a scan failure.
+  - Reproduce with synthetic malformed/unsupported preview fixtures and inconsistent result counts; verify text/caption scanning, bounded pagination, cancellation, and honest partial-result reporting. Any real-account reproduction requires separate authorization.
+  - Original URLs, usernames, tracking parameters, timestamps, and account/session identifiers are intentionally not retained in this public-repository report.
+
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
 
 - Obtain app API credentials and clarify public-distribution compliance.
