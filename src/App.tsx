@@ -576,6 +576,24 @@ export default function App() {
     }
   };
 
+  const activateDiscordSource = useCallback((next: AppSnapshot) => {
+    setQuery("");
+    setDirection("any");
+    setContentFilter("all");
+    setDateFilter("any");
+    setExcludePinned(false);
+    setPrivacyScan(false);
+    setScope("all");
+    setChatQuery("");
+    setSourceSetupOpen(false);
+    publish(next);
+    if (next.context) {
+      catalogSyncStarted.current = true;
+      void loadSnapshot(next.context);
+      setDiscordConnectionOpen(true);
+    }
+  }, [publish, loadSnapshot]);
+
   const selectDiscordSource = useCallback(async (source: DiscordSource) => {
     const previousContext = currentContext.current;
     const transitionEpoch = ++epoch.current;
@@ -588,28 +606,46 @@ export default function App() {
     try {
       const next = await api.selectDiscordSource(source.scope, previousContext);
       if (transitionEpoch !== epoch.current) return;
-      setQuery("");
-      setDirection("any");
-      setContentFilter("all");
-      setDateFilter("any");
-      setExcludePinned(false);
-      setPrivacyScan(false);
-      setScope("all");
-      setChatQuery("");
-      setSourceSetupOpen(false);
-      publish(next);
-      if (next.context) {
-        catalogSyncStarted.current = true;
-        void loadSnapshot(next.context);
-        setDiscordConnectionOpen(true);
-      }
+      activateDiscordSource(next);
     } catch (error) {
+      if (transitionEpoch !== epoch.current) return;
+      try {
+        const discovered = await api.bootstrapSnapshot(null);
+        if (transitionEpoch !== epoch.current) return;
+        if (discovered.context && sameScope(discovered.context.scope, source.scope)) {
+          activateDiscordSource(discovered);
+          return;
+        }
+      } catch {
+        // Preserve the selection error when discovery cannot establish that
+        // the native provider already completed the requested transition.
+      }
       if (transitionEpoch === epoch.current) setSyncingCatalog(false);
       throw error;
     }
-  }, [publish, loadSnapshot]);
+  }, [activateDiscordSource]);
 
   const sourceError = useCallback((error: unknown) => showError(error, setToast), []);
+
+  const openSourceSetup = useCallback(async () => {
+    const capturedEpoch = epoch.current;
+    try {
+      const discovered = await api.bootstrapSnapshot(null);
+      if (capturedEpoch !== epoch.current) return;
+      if (!sameContext(currentContext.current, discovered.context)) {
+        publish(discovered);
+        if (discovered.context && discovered.identity.state === "ready") {
+          catalogSyncStarted.current = true;
+          await loadSnapshot(discovered.context);
+        }
+      }
+      if (capturedEpoch === epoch.current || sameContext(currentContext.current, discovered.context)) {
+        setSourceSetupOpen(true);
+      }
+    } catch (error) {
+      if (capturedEpoch === epoch.current) showError(error, setToast);
+    }
+  }, [publish, loadSnapshot]);
 
   const sourceDialog = sourceSetupOpen && connectionSettings ? (
     <SourceSetupDialog
@@ -638,7 +674,7 @@ export default function App() {
   }
 
   if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {
-    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => setSourceSetupOpen(true)}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => void openSourceSetup()}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
   }
 
   if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
@@ -671,7 +707,7 @@ export default function App() {
         onSelectChat={setSelectedChatId}
         onScopeChange={setScope}
         onOpenSettings={() => snapshot.context?.scope.provider === "discord" ? setDiscordConnectionOpen(true) : setSettingsOpen(true)}
-        onOpenSources={() => setSourceSetupOpen(true)}
+        onOpenSources={() => void openSourceSetup()}
       />
 
       <main className="main-column">
