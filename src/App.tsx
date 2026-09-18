@@ -23,7 +23,8 @@ import type {
   PlanOperation,
   PlanView,
   SaveConnectionSettingsResult,
-  SearchResponse
+  SearchResponse,
+  DiscordSource
 } from "./types";
 
 interface ToastState {
@@ -575,13 +576,36 @@ export default function App() {
     }
   };
 
-  const selectDiscordSource = useCallback((next: AppSnapshot) => {
-    setSourceSetupOpen(false);
-    publish(next);
-    if (next.context) {
-      catalogSyncStarted.current = true;
-      void loadSnapshot(next.context);
-      setDiscordConnectionOpen(true);
+  const selectDiscordSource = useCallback(async (source: DiscordSource) => {
+    const previousContext = currentContext.current;
+    const transitionEpoch = ++epoch.current;
+    snapshotLoadGeneration.current += 1;
+    actionGeneration.current += 1;
+    backgroundRefreshGeneration.current += 1;
+    setSyncingCatalog(true);
+    setSearching(false);
+    setToast(null);
+    try {
+      const next = await api.selectDiscordSource(source.scope, previousContext);
+      if (transitionEpoch !== epoch.current) return;
+      setQuery("");
+      setDirection("any");
+      setContentFilter("all");
+      setDateFilter("any");
+      setExcludePinned(false);
+      setPrivacyScan(false);
+      setScope("all");
+      setChatQuery("");
+      setSourceSetupOpen(false);
+      publish(next);
+      if (next.context) {
+        catalogSyncStarted.current = true;
+        void loadSnapshot(next.context);
+        setDiscordConnectionOpen(true);
+      }
+    } catch (error) {
+      if (transitionEpoch === epoch.current) setSyncingCatalog(false);
+      throw error;
     }
   }, [publish, loadSnapshot]);
 
@@ -594,7 +618,7 @@ export default function App() {
       required={!connectionSettings.setupComplete && !snapshot?.context}
       onClose={() => setSourceSetupOpen(false)}
       onTelegram={() => { setSourceSetupOpen(false); setSettingsOpen(true); }}
-      onSelected={selectDiscordSource}
+      onSelect={selectDiscordSource}
       onError={sourceError}
     />
   ) : null;

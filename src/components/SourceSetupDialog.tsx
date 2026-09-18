@@ -2,7 +2,7 @@ import { Archive, LoaderCircle, MessageCircle, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@retract/api";
 import type { ActiveContext } from "../providers/identity";
-import type { AppSnapshot, DiscordImportStatus, DiscordSource } from "../types";
+import type { DiscordImportStatus, DiscordSource } from "../types";
 
 interface Props {
   context: ActiveContext | null;
@@ -10,16 +10,17 @@ interface Props {
   required?: boolean;
   onClose: () => void;
   onTelegram: () => void;
-  onSelected: (snapshot: AppSnapshot) => void;
+  onSelect: (source: DiscordSource) => Promise<void>;
   onError: (error: unknown) => void;
 }
 
-export function SourceSetupDialog({ context, telegramConfigured, required = false, onClose, onTelegram, onSelected, onError }: Props) {
+export function SourceSetupDialog({ context, telegramConfigured, required = false, onClose, onTelegram, onSelect, onError }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const [sources, setSources] = useState<DiscordSource[]>([]);
   const [status, setStatus] = useState<DiscordImportStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const autoSelecting = useRef(false);
+  const selecting = useRef(false);
 
   useEffect(() => { const dialog = ref.current; if (dialog && !dialog.open) dialog.showModal(); }, []);
   useEffect(() => {
@@ -28,15 +29,19 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
       if (disposed) return;
       setStatus(value);
       setSources(value.sources);
-    }).catch(onError);
+    }).catch(error => { if (!disposed && !selecting.current) onError(error); });
     return () => { disposed = true; };
   }, [context, onError]);
   useEffect(() => {
     if (!status?.active) return;
-    const timer = window.setInterval(() => void api.discordImport(context).then(next => {
-      void applyStatus(next);
-    }).catch(onError), 400);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    const timer = window.setInterval(() => {
+      if (selecting.current) return;
+      void api.discordImport(context).then(next => {
+        if (!disposed && !selecting.current) void applyStatus(next);
+      }).catch(error => { if (!disposed && !selecting.current) onError(error); });
+    }, 400);
+    return () => { disposed = true; window.clearInterval(timer); };
   }, [status?.active, context, onError]);
 
   async function importArchive() {
@@ -63,9 +68,16 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     await select(ready);
   }
   async function select(source: DiscordSource) {
+    if (selecting.current) return;
+    selecting.current = true;
     setBusy(true);
-    try { onSelected(await api.selectDiscordSource(source.scope, context)); }
-    catch (error) { onError(error); setBusy(false); }
+    try { await onSelect(source); }
+    catch (error) {
+      selecting.current = false;
+      autoSelecting.current = false;
+      onError(error);
+      setBusy(false);
+    }
   }
   const progress = status?.progress;
   const processed = !progress ? "" : progress.phase === "failed"
