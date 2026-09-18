@@ -29,6 +29,37 @@ it("offers Telegram, native Discord import, and an existing imported source", as
   await waitFor(() => expect(onSelect).toHaveBeenCalledWith(source));
 });
 
+it("shows source discovery progress until imported Discord accounts are available", async () => {
+  let resolveStatus!: (value: DiscordImportStatus) => void;
+  vi.spyOn(api, "discordImport").mockImplementation(() => new Promise(resolve => { resolveStatus = resolve; }));
+
+  render(<SourceSetupDialog context={null} telegramConfigured={false} required onClose={() => {}} onTelegram={() => {}} onSelect={async () => {}} onError={() => {}} />);
+
+  expect(screen.getByRole("status", { name: "Imported Discord accounts" })).toHaveTextContent("Loading imported accounts…");
+  expect(screen.queryByText("No imported Discord accounts yet.")).not.toBeInTheDocument();
+
+  resolveStatus({ ...idleImport, sources: [source] });
+
+  expect(await screen.findByRole("button", { name: /Archive Owner/ })).toBeVisible();
+  expect(screen.queryByText("Loading imported accounts…")).not.toBeInTheDocument();
+});
+
+it("shows a retryable source discovery error instead of an empty account list", async () => {
+  const status = vi.spyOn(api, "discordImport")
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce({ ...idleImport, sources: [source] });
+  const onError = vi.fn();
+
+  render(<SourceSetupDialog context={null} telegramConfigured={false} required onClose={() => {}} onTelegram={() => {}} onSelect={async () => {}} onError={onError} />);
+
+  expect(await screen.findByText("Couldn’t load imported accounts.")).toBeVisible();
+  expect(onError).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole("button", { name: "Retry loading imported accounts" }));
+
+  expect(await screen.findByRole("button", { name: /Archive Owner/ })).toBeVisible();
+  expect(status).toHaveBeenCalledTimes(2);
+});
+
 it("opens the newly ready Discord source after import", async () => {
   vi.spyOn(api, "discordImport").mockResolvedValue(idleImport);
   vi.spyOn(api, "startDiscordImport").mockResolvedValue({

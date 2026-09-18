@@ -19,19 +19,28 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
   const [sources, setSources] = useState<DiscordSource[]>([]);
   const [status, setStatus] = useState<DiscordImportStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sourceLookup, setSourceLookup] = useState<"loading" | "ready" | "failed">("loading");
+  const [sourceLookupVersion, setSourceLookupVersion] = useState(0);
   const autoSelecting = useRef(false);
   const selecting = useRef(false);
 
   useEffect(() => { const dialog = ref.current; if (dialog && !dialog.open) dialog.showModal(); }, []);
   useEffect(() => {
     let disposed = false;
+    setSourceLookup("loading");
+    setSources([]);
     void api.discordImport(context).then(value => {
       if (disposed) return;
       setStatus(value);
       setSources(value.sources);
-    }).catch(error => { if (!disposed && !selecting.current) onError(error); });
+      setSourceLookup("ready");
+    }).catch(error => {
+      if (disposed || selecting.current) return;
+      setSourceLookup("failed");
+      onError(error);
+    });
     return () => { disposed = true; };
-  }, [context, onError]);
+  }, [context, onError, sourceLookupVersion]);
   useEffect(() => {
     if (!status?.active) return;
     let disposed = false;
@@ -61,6 +70,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
   async function applyStatus(next: DiscordImportStatus) {
     setStatus(next);
     setSources(next.sources);
+    setSourceLookup("ready");
     if (next.progress?.phase !== "ready" || !next.importScope || autoSelecting.current) return;
     const ready = next.sources.find(source => sameScope(source, next.importScope!));
     if (!ready) return;
@@ -112,12 +122,17 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
       {status?.warningDetails.map(warning => <p key={warning.code}>{warningMessage(warning.code, warning.count)}</p>)}
       {status?.retryAvailable && <small>Choose the same Discord ZIP to retry safely. Staged records will not be duplicated.</small>}
     </div>}
-    {sources.length > 0 && <section className="available-sources">
+    <section className="available-sources">
       <p className="eyebrow">IMPORTED DISCORD ACCOUNTS</p>
-      {sources.map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
+      {sourceLookup === "loading" ? <div className="source-discovery-state" role="status" aria-label="Imported Discord accounts">
+        <LoaderCircle className="spin" size={16} /><span>Loading imported accounts…</span>
+      </div> : sourceLookup === "failed" ? <div className="source-discovery-state source-discovery-error" role="alert">
+        <span>Couldn’t load imported accounts.</span>
+        <button type="button" onClick={() => setSourceLookupVersion(version => version + 1)}>Retry loading imported accounts</button>
+      </div> : sources.length === 0 ? <p className="source-discovery-empty">No imported Discord accounts yet.</p> : sources.map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
         <Archive size={17} /><span><strong>{source.accountLabel}</strong><small>{source.username ? `@${source.username} · ` : ""}{source.importedAt ? `Imported ${new Date(source.importedAt).toLocaleDateString()}` : "Ready"}</small></span>
       </button>)}
-    </section>}
+    </section>
     <p className="source-privacy-note">Archive contents stay on this device. Importing does not connect to Discord or delete anything.</p>
   </dialog>;
 }

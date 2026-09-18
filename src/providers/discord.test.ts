@@ -57,7 +57,7 @@ describe("Discord application projection", () => {
         recipients: null, warnings: ["unknown_conversation_kind"]
       } }
     }, "Ada Example");
-    expect(chat.title).toBe("Unknown Discord chat");
-    expect(chat.discordNavigation).toEqual({ category: "other", groupId: null, groupLabel: null, detail: "Unclassified chat" });
+    expect(chat.title).toBe("Archived conversation …11001");
+    expect(chat.discordNavigation).toEqual({ category: "other", groupId: null, groupLabel: null, detail: "Name unavailable in Discord export" });
   });
 });

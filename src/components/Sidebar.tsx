@@ -64,7 +64,7 @@ export function Sidebar({
   });
   const directCount = chats.filter(chat => chat.discordNavigation?.category === "direct").length;
   const serverCount = new Set(chats.filter(chat => chat.discordNavigation?.category === "server").map(chat => chat.discordNavigation?.groupId ?? chat.discordNavigation?.groupLabel ?? refKey(chat.ref))).size;
-  const otherCount = chats.filter(chat => chat.discordNavigation?.category === "other").length;
+  const unclassifiedCount = chats.filter(chat => chat.discordNavigation?.category === "other").length;
 
   return (
     <aside className="sidebar" aria-label="Chat navigation">
@@ -88,7 +88,7 @@ export function Sidebar({
         {provider === "discord" ? <>
           <ScopeButton icon={<MessagesSquare />} label="Direct messages" count={directCount} active={scope === "direct" && selectedChatId === null} onClick={() => { onScopeChange("direct"); onSelectChat(null); }} />
           <ScopeButton icon={<Server />} label="Servers" count={serverCount} active={scope === "servers" && selectedChatId === null} onClick={() => { onScopeChange("servers"); onSelectChat(null); }} />
-          <ScopeButton icon={<CircleHelp />} label="Other" count={otherCount} active={scope === "other" && selectedChatId === null} onClick={() => { onScopeChange("other"); onSelectChat(null); }} />
+          <ScopeButton icon={<CircleHelp />} label="Unclassified" count={unclassifiedCount} active={scope === "other" && selectedChatId === null} onClick={() => { onScopeChange("other"); onSelectChat(null); }} />
         </> : <><ScopeButton
           icon={<MessageCircleOff />}
           label="No reply sent"
@@ -142,7 +142,7 @@ export function Sidebar({
 
       <div className="chat-list" aria-label="Chats">
         {provider === "discord"
-          ? <DiscordChatGroups chats={visibleChats} selectedChatId={selectedChatId} pendingRemovalChatIds={pendingRemovalChatIds} onSelectChat={onSelectChat} expandServers={Boolean(lowered)} />
+          ? <DiscordChatGroups chats={visibleChats} selectedChatId={selectedChatId} pendingRemovalChatIds={pendingRemovalChatIds} onSelectChat={onSelectChat} expandGroups={Boolean(lowered)} />
           : visibleChats.map(chat => <ChatRow key={refKey(chat.ref)} chat={chat} selectedChatId={selectedChatId} removalPending={pendingRemovalChatIds.has(refKey(chat.ref))} onSelectChat={onSelectChat} />)}
         {visibleChats.length === 0 && <p className="empty-sidebar">No matching chats</p>}
       </div>
@@ -157,12 +157,12 @@ function scopeHeading(scope: ChatScope): string {
   if (scope === "archive") return "ARCHIVED";
   if (scope === "direct") return "DIRECT MESSAGES";
   if (scope === "servers") return "SERVERS";
-  if (scope === "other") return "OTHER CHATS";
+  if (scope === "other") return "UNCLASSIFIED";
   return "CHATS";
 }
 
-function DiscordChatGroups({ chats, selectedChatId, pendingRemovalChatIds, onSelectChat, expandServers }: Pick<SidebarProps, "selectedChatId" | "pendingRemovalChatIds" | "onSelectChat"> & { chats: ChatSummary[]; expandServers: boolean }) {
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+function DiscordChatGroups({ chats, selectedChatId, pendingRemovalChatIds, onSelectChat, expandGroups }: Pick<SidebarProps, "selectedChatId" | "pendingRemovalChatIds" | "onSelectChat"> & { chats: ChatSummary[]; expandGroups: boolean }) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["direct"]));
   const direct = chats.filter(chat => chat.discordNavigation?.category === "direct");
   const other = chats.filter(chat => chat.discordNavigation?.category === "other" || !chat.discordNavigation);
   const servers = new Map<string, { label: string; chats: ChatSummary[] }>();
@@ -174,24 +174,20 @@ function DiscordChatGroups({ chats, selectedChatId, pendingRemovalChatIds, onSel
     servers.set(key, group);
   }
   const groups = [
-    ...(direct.length ? [{ key: "direct", label: "Direct messages", chats: direct, collapsible: false }] : []),
-    ...[...servers].sort(([, a], [, b]) => a.label.localeCompare(b.label)).map(([key, group]) => ({ key: `server:${key}`, label: group.label, chats: group.chats, collapsible: true })),
-    ...(other.length ? [{ key: "other", label: "Other", chats: other, collapsible: false }] : [])
+    ...(direct.length ? [{ key: "direct", label: "Direct messages", chats: direct }] : []),
+    ...[...servers].sort(([, a], [, b]) => a.label.localeCompare(b.label)).map(([key, group]) => ({ key: `server:${key}`, label: group.label, chats: group.chats })),
+    ...(other.length ? [{ key: "other", label: "Unclassified", chats: other }] : [])
   ];
   const rows = (group: typeof groups[number]) => group.chats.map(chat => <ChatRow key={refKey(chat.ref)} chat={chat} selectedChatId={selectedChatId} removalPending={pendingRemovalChatIds.has(refKey(chat.ref))} onSelectChat={onSelectChat} discord />);
   return <>{groups.map(group => {
-    const serverOpen = expandServers || expanded.has(group.key) || group.chats.some(chat => refKey(chat.ref) === selectedChatId);
-    return group.collapsible
-    ? <details className="discord-chat-group discord-server-group" key={group.key} open={serverOpen} onToggle={event => {
-      if (expandServers || group.chats.some(chat => refKey(chat.ref) === selectedChatId)) return;
-      setExpanded(current => { const next = new Set(current); if (event.currentTarget.open) next.add(group.key); else next.delete(group.key); return next; });
-    }}>
-      <summary role="button" aria-expanded={serverOpen} className="discord-chat-group-heading" aria-label={`${group.label} ${group.chats.length}`}><ChevronRight className="discord-group-chevron" size={13} /><span>{group.label}</span><span>{group.chats.length.toLocaleString()}</span></summary>
-      {rows(group)}
-    </details>
-    : <section className="discord-chat-group" key={group.key}>
-      <h3 className="discord-chat-group-heading" aria-label={`${group.label} ${group.chats.length}`}><span>{group.label}</span><span>{group.chats.length.toLocaleString()}</span></h3>
-      {rows(group)}
+    const forcedOpen = expandGroups || group.chats.some(chat => refKey(chat.ref) === selectedChatId);
+    const open = forcedOpen || expanded.has(group.key);
+    return <section className="discord-chat-group" key={group.key}>
+      <button type="button" aria-expanded={open} className={`discord-chat-group-heading discord-group-toggle ${open ? "is-open" : ""}`} aria-label={`${group.label} ${group.chats.length}`} onClick={() => {
+        if (forcedOpen) return;
+        setExpanded(current => { const next = new Set(current); if (next.has(group.key)) next.delete(group.key); else next.add(group.key); return next; });
+      }}><ChevronRight className="discord-group-chevron" size={13} /><span>{group.label}</span><span>{group.chats.length.toLocaleString()}</span></button>
+      {open && rows(group)}
     </section>;
   })}</>;
 }

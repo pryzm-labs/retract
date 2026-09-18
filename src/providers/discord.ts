@@ -17,12 +17,14 @@ export function discordConversationView(record: ConversationRecord, accountLabel
   const recipients = optionalNullable(m.recipients, value => array(value, text));
   const visibleRecipients = (recipients ?? []).filter(value => value.trim() && value !== accountLabel);
   const category = guild ? "server" : recipients ? "direct" : "other";
+  const channelSuffix = record.resource.canonicalKey.replace(/\D/g, "").slice(-8) || record.id.slice(-8);
+  const hasTitle = Boolean(record.title.trim());
   const title = record.title.trim() || (category === "direct"
     ? visibleRecipients.join(", ") || "Unnamed direct message"
-    : category === "server" ? "Unnamed channel" : "Unknown Discord chat");
+    : category === "server" ? "Unnamed channel" : `Archived conversation …${channelSuffix}`);
   const detail = category === "server" ? guild!.name
     : category === "direct" ? (visibleRecipients.length > 1 ? "Group direct message" : "Direct message")
-      : "Unclassified chat";
+      : hasTitle ? "Unclassified archive conversation" : "Name unavailable in Discord export";
   return {
     id: record.id, scope: record.scope, ref: recordRef(record), intents: [], title,
     kind: verified === "direct" ? "direct" : verified === "guild_channel" ? "channel" : "basic_group",
