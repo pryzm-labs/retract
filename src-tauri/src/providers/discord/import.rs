@@ -246,14 +246,20 @@ impl DiscordImportOwner {
         &self,
         file: File,
     ) -> Result<DiscordImportHandle, DiscordImportError> {
-        self.launch(file, None).await
+        self.launch(file, None, false).await
+    }
+    pub(crate) async fn start_or_retry(
+        &self,
+        file: File,
+    ) -> Result<DiscordImportHandle, DiscordImportError> {
+        self.launch(file, None, true).await
     }
     pub(super) async fn retry(
         &self,
         file: File,
         expected: &DiscordImportOutcome,
     ) -> Result<DiscordImportHandle, DiscordImportError> {
-        self.launch(file, Some(expected.clone())).await
+        self.launch(file, Some(expected.clone()), false).await
     }
     pub(crate) async fn retry_active(
         &self,
@@ -282,6 +288,7 @@ impl DiscordImportOwner {
         &self,
         file: File,
         retry: Option<DiscordImportOutcome>,
+        retry_existing: bool,
     ) -> Result<DiscordImportHandle, DiscordImportError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(DiscordImportError::Closed);
@@ -322,7 +329,13 @@ impl DiscordImportOwner {
             if ready.blocking_recv().is_err() {
                 return;
             }
-            let result = coordinate(file, &task_control, &archives, retry.as_ref());
+            let result = coordinate(
+                file,
+                &task_control,
+                &archives,
+                retry.as_ref(),
+                retry_existing,
+            );
             if let Err(error) = result {
                 task_control.phase(if error == DiscordImportError::Cancelled {
                     Phase::Cancelled
@@ -558,11 +571,12 @@ fn coordinate(
     control: &Control,
     archives: &ArchiveOwner,
     retry: Option<&DiscordImportOutcome>,
+    retry_existing: bool,
 ) -> Completion {
     let file = Mutex::new(file);
     let mut live = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(&file, control, archives, retry, &mut live)
+        run(&file, control, archives, retry, retry_existing, &mut live)
     }))
     .unwrap_or(Err(DiscordImportError::StorageFailure));
     match (result, live) {
@@ -599,6 +613,7 @@ fn run(
     control: &Control,
     archives: &ArchiveOwner,
     retry: Option<&DiscordImportOutcome>,
+    retry_existing: bool,
     live: &mut Option<Live>,
 ) -> Completion {
     control.check()?;
@@ -676,19 +691,32 @@ fn run(
                 }),
             )
             .map_err(DiscordImportError::before_session)?;
-        if resolution.disposition != ImportDisposition::Start {
+        if resolution.disposition == ImportDisposition::RetryRequired && retry_existing {
+            let session = runtime
+                .block_on(service.retry_import(&resolution.checkpoint))
+                .map_err(|error| match error {
+                    ArchiveError::ScopeMismatch
+                    | ArchiveError::StaleCursor
+                    | ArchiveError::InvalidRecord
+                    | ArchiveError::ConflictingObservation
+                    | ArchiveError::LimitExceeded => DiscordImportError::RetryMismatch,
+                    _ => DiscordImportError::before_session(error),
+                })?;
+            (resolution.checkpoint, session)
+        } else if resolution.disposition != ImportDisposition::Start {
             return Ok(outcome(
                 resolution.checkpoint,
                 resolution.disposition,
                 control,
             ));
+        } else {
+            (
+                resolution.checkpoint,
+                resolution
+                    .session
+                    .ok_or(DiscordImportError::StorageFailure)?,
+            )
         }
-        (
-            resolution.checkpoint,
-            resolution
-                .session
-                .ok_or(DiscordImportError::StorageFailure)?,
-        )
     };
     control.checkpoint(checkpoint.clone());
     control.bind(&session);

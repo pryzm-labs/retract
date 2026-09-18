@@ -737,6 +737,40 @@ fn discord_import_owner_retries_the_current_failed_checkpoint_with_the_selected_
 }
 
 #[test]
+fn discord_import_explicit_file_selection_resumes_a_persisted_retry_checkpoint() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("selected.zip");
+        let archives = archive(&dir.path().join("content.db"));
+        let (imports, gate, _release) =
+            paused_after(archives.clone(), TestPoint::BatchCommitted, 1);
+        let first = imports
+            .start(selected(&file, &package(700, "resume@example.test", false)))
+            .await
+            .unwrap();
+        gate.entered().await;
+        first.cancel();
+        gate.release();
+        assert_eq!(
+            first.wait().await.err(),
+            Some(DiscordImportError::Cancelled)
+        );
+
+        let resumed = imports
+            .start_or_retry(File::open(&file).unwrap())
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        assert_eq!(resumed.disposition, ImportDisposition::Ready);
+        assert_eq!(resumed.checkpoint.progress.committed_items, 700);
+        imports.shutdown().await;
+        archives.shutdown().await;
+    });
+}
+
+#[test]
 fn discord_import_exact_replay_preserves_digests_observation_time_and_rejects_changed_authority() {
     runtime().block_on(async {
         let dir = tempfile::tempdir().unwrap();

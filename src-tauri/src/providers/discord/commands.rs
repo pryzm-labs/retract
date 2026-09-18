@@ -197,7 +197,7 @@ pub(crate) async fn start_discord_import_v2<R: tauri::Runtime>(
     let file = open_selected(&path).map_err(|_| safe(ErrorCode::InvalidArchive))?;
     runtime
         .discord_imports
-        .start(file)
+        .start_or_retry(file)
         .await
         .map_err(import_error)?;
     encode(BootstrapResponse {
