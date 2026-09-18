@@ -72,6 +72,15 @@ export interface ChatSummary {
   conversationState: ConversationState;
   capabilities: ChatCapabilities;
   avatarSeed: number;
+  discordNavigation?: DiscordNavigation;
+}
+
+export type DiscordNavigationCategory = "direct" | "server" | "other";
+export interface DiscordNavigation {
+  category: DiscordNavigationCategory;
+  groupId: string | null;
+  groupLabel: string | null;
+  detail: string;
 }
 
 export interface MessageSnapshot {

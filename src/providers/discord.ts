@@ -10,14 +10,25 @@ function metadata(value: VersionedPayload | null, schema: string) {
 
 const kindMap = { text: "text", image: "photo", video: "video", document: "file", voice: "voice", audio: "audio", animation: "animation", sticker: "sticker", poll: "poll", location: "location", contact: "contact", service: "service", other: "other" } as const;
 
-export function discordConversationView(record: ConversationRecord): ChatSummary {
+export function discordConversationView(record: ConversationRecord, accountLabel = ""): ChatSummary {
   const m = metadata(record.providerMetadata, "discord.conversation_metadata");
   const verified = choice(m.verifiedKind, ["direct", "group_direct", "guild_channel", "other"]);
+  const guild = optionalNullable(m.guild, value => { const item = object(value); return { id: text(item.id), name: text(item.name) }; });
+  const recipients = optionalNullable(m.recipients, value => array(value, text));
+  const visibleRecipients = (recipients ?? []).filter(value => value.trim() && value !== accountLabel);
+  const category = guild ? "server" : recipients ? "direct" : "other";
+  const title = record.title.trim() || (category === "direct"
+    ? visibleRecipients.join(", ") || "Unnamed direct message"
+    : category === "server" ? "Unnamed channel" : "Unknown Discord chat");
+  const detail = category === "server" ? guild!.name
+    : category === "direct" ? (visibleRecipients.length > 1 ? "Group direct message" : "Direct message")
+      : "Unclassified chat";
   return {
-    id: record.id, scope: record.scope, ref: recordRef(record), intents: [], title: record.title,
+    id: record.id, scope: record.scope, ref: recordRef(record), intents: [], title,
     kind: verified === "direct" ? "direct" : verified === "guild_channel" ? "channel" : "basic_group",
     archived: true, memberCount: record.participantCount, conversationState: "active", avatarSeed: 0,
-    capabilities: { role: "member", canDeleteOthers: false, canClearForEveryone: false, canRemoveForSelf: false, canDeleteGroup: false, canDeleteBySender: false, canLeaveChat: false }
+    capabilities: { role: "member", canDeleteOthers: false, canClearForEveryone: false, canRemoveForSelf: false, canDeleteGroup: false, canDeleteBySender: false, canLeaveChat: false },
+    discordNavigation: { category, groupId: guild?.id ?? null, groupLabel: guild?.name ?? null, detail }
   };
 }
 
@@ -34,8 +45,9 @@ export function discordContentView(record: ContentRecord): MessageSnapshot {
 export function discordSnapshotView(response: BootstrapResponse<BootstrapSnapshot>): AppSnapshot {
   const p = response.payload;
   const account = metadata(p.auth, "discord.account");
+  const accountLabel = text(account.accountLabel);
   return { context: response.context, identity: p.identity, catalog: { ...p.catalog, phase: choice(p.catalog.phase, ["idle", "discovering", "loading", "ready"]) }, legacyHistory: p.legacyHistory,
-    accountLabel: text(account.accountLabel), modeReason: null, safetyNotice: "Only exact messages from this archive are eligible.", auth: { stage: "ready" }, chats: p.chats.map(discordConversationView), recentJobs: p.recentJobs.map(jobView) };
+    accountLabel, modeReason: null, safetyNotice: "Only exact messages from this archive are eligible.", auth: { stage: "ready" }, chats: p.chats.map(chat => discordConversationView(chat, accountLabel)), recentJobs: p.recentJobs.map(jobView) };
 }
 
 export function discordSearchFilters(request: SearchRequest): VersionedPayload {

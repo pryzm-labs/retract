@@ -245,6 +245,9 @@ export default function App() {
     if (scope === "unanswered") return chats.filter((chat) => chat.conversationState === "never_replied").map((chat) => chat.ref);
     if (scope === "empty") return chats.filter((chat) => chat.conversationState === "empty").map((chat) => chat.ref);
     if (scope === "archive") return chats.filter((chat) => chat.archived).map((chat) => chat.ref);
+    if (scope === "direct") return chats.filter((chat) => chat.discordNavigation?.category === "direct").map((chat) => chat.ref);
+    if (scope === "servers") return chats.filter((chat) => chat.discordNavigation?.category === "server").map((chat) => chat.ref);
+    if (scope === "other") return chats.filter((chat) => chat.discordNavigation?.category === "other").map((chat) => chat.ref);
     return [];
   }, [chats, scope, selectedChatId]);
 

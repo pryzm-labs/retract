@@ -172,6 +172,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .chat-search input::placeholder { color: var(--field-placeholder); }
 
 .chat-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 7px 8px; }
+.discord-chat-group + .discord-chat-group { margin-top: 8px; }
+.discord-chat-group-heading { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 8px 8px 5px; background: linear-gradient(180deg, var(--sidebar) 72%, transparent); color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+.discord-server-group > summary { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; justify-content: initial; gap: 5px; cursor: pointer; list-style: none; }
+.discord-server-group > summary::-webkit-details-marker { display: none; }
+.discord-group-chevron { transition: transform .15s ease; }
+.discord-server-group[open] .discord-group-chevron { transform: rotate(90deg); }
+.discord-context-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-row { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px; border: 0; border-radius: 10px; background: transparent; text-align: left; cursor: pointer; }
 .chat-row:hover { background: rgba(255,255,255,.52); }
 .chat-row.is-selected { background: linear-gradient(135deg, #d7e5e1, #d3dedd); box-shadow: inset 0 0 0 1px rgba(59,107,94,.07); }
