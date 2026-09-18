@@ -402,10 +402,12 @@ describe("Retract desktop UI", () => {
     render(<App />);
     await screen.findByText("Search every chat");
     fireEvent.click(await screen.findByText("Passport scan for the apartment application"));
-    fireEvent.click(screen.getByRole("button", { name: /Review deletion/ }));
-    expect(await screen.findByText("Delete 1 message for everyone?")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: /accepted Telegram deletions cannot be undone/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete for everyone" }));
+    const review = screen.getByRole("button", { name: /Review deletion/ });
+    await waitFor(() => expect(review).toBeEnabled());
+    fireEvent.click(review);
+    const dialog = await screen.findByRole("dialog", { name: "Delete 1 message for everyone?" });
+    fireEvent.click(await within(dialog).findByRole("checkbox", { name: /accepted Telegram deletions cannot be undone/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete for everyone" }));
 
     expect(await screen.findByText("Syncing cleanup…")).toBeInTheDocument();
     expect(nativeAuthorization).toHaveBeenCalledTimes(1);
