@@ -238,26 +238,6 @@ impl ProviderRegistration for DiscordProvider {
     }
 }
 
-#[cfg(test)]
-mod registration_tests {
-    use super::*;
-
-    #[test]
-    fn selected_archive_declares_only_capabilities_backed_by_registration_ports() {
-        let descriptor = discord_descriptor();
-        assert_eq!(
-            descriptor.capabilities,
-            [
-                ProviderCapability::ConversationListing,
-                ProviderCapability::ContentSearch,
-                ProviderCapability::MediaMetadata,
-            ]
-            .into_iter()
-            .collect()
-        );
-    }
-}
-
 pub(crate) struct DiscordConnection {
     context: ActiveContext,
     account_label: String,
@@ -397,4 +377,24 @@ fn archive_error(error: crate::persistence::archive::ArchiveError) -> SafeError 
         }
         _ => ErrorCode::Transient,
     })
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[test]
+    fn selected_archive_declares_only_capabilities_backed_by_registration_ports() {
+        let descriptor = discord_descriptor();
+        assert_eq!(
+            descriptor.capabilities,
+            [
+                ProviderCapability::ConversationListing,
+                ProviderCapability::ContentSearch,
+                ProviderCapability::MediaMetadata,
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
 }
