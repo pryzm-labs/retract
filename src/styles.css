@@ -431,6 +431,8 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 .discord-import-progress strong { font-size: 10px; }
 .discord-import-progress small { color: var(--muted); font-size: 9px; }
 .discord-import-progress button, .discord-session-ready button { display: flex; align-items: center; gap: 5px; border: 0; background: transparent; color: currentColor; font-size: 9px; font-weight: 700; cursor: pointer; }
+.discord-import-details { display: grid; gap: 5px; margin: -6px 0 14px; padding: 0 12px 12px 39px; color: var(--muted); font-size: 10px; }
+.discord-import-details p, .discord-import-details small { margin: 0; }
 .source-privacy-note { margin: 18px 0 0; color: var(--muted); font-size: 9px; }
 .risk-disclosure { display: flex; align-items: flex-start; gap: 10px; margin: 18px 0 12px; padding: 12px; border: 1px solid rgba(188,139,46,.3); border-radius: 10px; background: var(--amber-soft); color: #765d2c; }
 .risk-disclosure svg { flex: 0 0 auto; }

@@ -25,6 +25,7 @@ export interface RetractApi {
   discordSources(context: ActiveContext | null): Promise<DiscordSource[]>;
   selectDiscordSource(scope: import("./providers/identity").Scope, context: ActiveContext | null): Promise<AppSnapshot>;
   startDiscordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
+  retryDiscordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
   discordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
   cancelDiscordImport(context: ActiveContext | null): Promise<DiscordImportStatus>;
   discordSession(context: ActiveContext): Promise<DiscordSessionStatus>;

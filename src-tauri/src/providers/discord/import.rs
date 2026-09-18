@@ -255,6 +255,29 @@ impl DiscordImportOwner {
     ) -> Result<DiscordImportHandle, DiscordImportError> {
         self.launch(file, Some(expected.clone())).await
     }
+    pub(crate) async fn retry_active(
+        &self,
+        file: File,
+    ) -> Result<DiscordImportHandle, DiscordImportError> {
+        let checkpoint = self
+            .active_checkpoint()
+            .filter(|checkpoint| {
+                matches!(
+                    checkpoint.progress.phase,
+                    ImportPhase::Interrupted | ImportPhase::Cancelled | ImportPhase::Failed
+                )
+            })
+            .ok_or(DiscordImportError::RetryMismatch)?;
+        self.retry(
+            file,
+            &DiscordImportOutcome {
+                checkpoint,
+                disposition: ImportDisposition::RetryRequired,
+                parser_policy: PARSER_POLICY.into(),
+            },
+        )
+        .await
+    }
     async fn launch(
         &self,
         file: File,
@@ -336,6 +359,13 @@ impl DiscordImportOwner {
             active
                 .as_ref()
                 .map(|control| control.progress.borrow().clone())
+        })
+    }
+    pub(crate) fn active_checkpoint(&self) -> Option<ImportCheckpoint> {
+        self.active.lock().ok().and_then(|active| {
+            active
+                .as_ref()
+                .and_then(|control| control.checkpoint.lock().ok()?.clone())
         })
     }
     pub(crate) fn cancel_active(&self) {

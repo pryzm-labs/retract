@@ -249,6 +249,10 @@ export interface DiscordImportStatus {
   active: boolean;
   progress: DiscordImportProgress | null;
   sources: DiscordSource[];
+  importScope: Scope | null;
+  retryAvailable: boolean;
+  failureCode: "invalid_archive" | "unsupported_profile" | "limit_exceeded" | "input_changed" | "incomplete_source" | "storage_failure" | null;
+  warningDetails: Array<{ code: string; count: number }>;
 }
 
 export interface DiscordSessionStatus {

@@ -326,9 +326,7 @@ impl ProviderPayloadValidator for DiscordPayloadValidator {
         {
             return Err(invalid());
         }
-        // Profile v1 establishes at most one opaque URL. No splitting grammar.
-        if metadata.attachment_urls.len() > 1
-            || record.attachments.len() != metadata.attachment_urls.len()
+        if record.attachments.len() != metadata.attachment_urls.len()
             || record.kind != content_kind(&record.searchable_text, !record.attachments.is_empty())
         {
             return Err(invalid());

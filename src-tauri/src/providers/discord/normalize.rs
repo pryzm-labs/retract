@@ -134,31 +134,30 @@ impl DiscordNormalizer {
         let actor = DiscordUserLocator::new(account.id.as_str())?.resource(self.scope.account_id);
         let conversation =
             DiscordChannelLocator::new(channel.id.as_str())?.resource(self.scope.account_id);
-        let attachments = if input.attachments.is_empty() {
-            vec![]
-        } else {
-            vec![AttachmentRecord {
-                kind: ContentKind::Other,
-                safe_display_name: attachment_name(&input.attachments)?,
-                size_bytes: None,
-                mime_type: None,
-                locator: payload(
-                    ATTACHMENT_SCHEMA,
-                    &DiscordAttachmentLocator {
-                        channel_id: input.channel_id.as_str().into(),
-                        message_id: input.id.as_str().into(),
-                        ordinal: 0,
-                    },
-                )?,
-            }]
-        };
+        let attachment_urls = attachment_urls(&input.attachments)?;
+        let attachments = attachment_urls
+            .iter()
+            .enumerate()
+            .map(|(ordinal, url)| {
+                Ok(AttachmentRecord {
+                    kind: ContentKind::Other,
+                    safe_display_name: attachment_name(url)?,
+                    size_bytes: None,
+                    mime_type: None,
+                    locator: payload(
+                        ATTACHMENT_SCHEMA,
+                        &DiscordAttachmentLocator {
+                            channel_id: input.channel_id.as_str().into(),
+                            message_id: input.id.as_str().into(),
+                            ordinal: ordinal.try_into().map_err(|_| invalid())?,
+                        },
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
         let metadata = DiscordContentMetadata {
             author_user_id: account.id.as_str().into(),
-            attachment_urls: if input.attachments.is_empty() {
-                vec![]
-            } else {
-                vec![input.attachments.clone()]
-            },
+            attachment_urls: attachment_urls.into_iter().map(str::to_owned).collect(),
         };
         let record = ContentRecord {
             id: resource

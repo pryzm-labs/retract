@@ -86,6 +86,7 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     discordSources: async context => array(decodeEnvelope(await call("list_sources_v2", {}, context), context, true).payload, decodeDiscordSource),
     selectDiscordSource: async (scope, context) => snapshotView(decodeBootstrap(await call("select_archive_v2", { scope }, context))),
     startDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("start_discord_import_v2", {}, context), context, true).payload),
+    retryDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("retry_discord_import_v2", {}, context), context, true).payload),
     discordImport: async context => decodeDiscordImport(decodeEnvelope(await call("get_discord_import_v2", {}, context), context, true).payload),
     cancelDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("cancel_discord_import_v2", {}, context), context, true).payload),
     discordSession: async context => decodeDiscordSession(await active("get_discord_session_v2", {}, context)),

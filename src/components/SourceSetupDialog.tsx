@@ -19,26 +19,48 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
   const [sources, setSources] = useState<DiscordSource[]>([]);
   const [status, setStatus] = useState<DiscordImportStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const autoSelecting = useRef(false);
 
   useEffect(() => { const dialog = ref.current; if (dialog && !dialog.open) dialog.showModal(); }, []);
   useEffect(() => {
     let disposed = false;
-    void api.discordSources(context).then(value => { if (!disposed) setSources(value); }).catch(onError);
+    void api.discordImport(context).then(value => {
+      if (disposed) return;
+      setStatus(value);
+      setSources(value.sources);
+    }).catch(onError);
     return () => { disposed = true; };
   }, [context, onError]);
   useEffect(() => {
     if (!status?.active) return;
     const timer = window.setInterval(() => void api.discordImport(context).then(next => {
-      setStatus(next); setSources(next.sources);
+      void applyStatus(next);
     }).catch(onError), 400);
     return () => window.clearInterval(timer);
   }, [status?.active, context, onError]);
 
   async function importArchive() {
+    autoSelecting.current = false;
     setBusy(true);
-    try { const next = await api.startDiscordImport(context); setStatus(next); setSources(next.sources); }
+    try { await applyStatus(await api.startDiscordImport(context)); }
     catch (error) { onError(error); }
     finally { setBusy(false); }
+  }
+  async function retryArchive() {
+    autoSelecting.current = false;
+    setBusy(true);
+    try { await applyStatus(await api.retryDiscordImport(context)); }
+    catch (error) { onError(error); }
+    finally { setBusy(false); }
+  }
+  async function applyStatus(next: DiscordImportStatus) {
+    setStatus(next);
+    setSources(next.sources);
+    if (next.progress?.phase !== "ready" || !next.importScope || autoSelecting.current) return;
+    const ready = next.sources.find(source => sameScope(source, next.importScope!));
+    if (!ready) return;
+    autoSelecting.current = true;
+    await select(ready);
   }
   async function select(source: DiscordSource) {
     setBusy(true);
@@ -46,7 +68,13 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     catch (error) { onError(error); setBusy(false); }
   }
   const progress = status?.progress;
-  const processed = progress?.totalRecords ? `${progress.parsedRecords.toLocaleString()} of ${progress.totalRecords.toLocaleString()} messages` : progress ? `${progress.parsedRecords.toLocaleString()} messages` : "";
+  const processed = !progress ? "" : progress.phase === "failed"
+    ? `${progress.committedItems.toLocaleString()} staged records · not yet available`
+    : progress.phase === "ready"
+      ? `${progress.committedItems.toLocaleString()} messages ready`
+      : progress.totalRecords
+        ? `${progress.parsedRecords.toLocaleString()} of ${progress.totalRecords.toLocaleString()} messages processed`
+        : `${progress.parsedRecords.toLocaleString()} messages processed`;
 
   return <dialog ref={ref} className="source-setup-dialog" onCancel={event => { if (required || busy) event.preventDefault(); else onClose(); }}>
     {!required && <button className="dialog-close" type="button" aria-label="Close source setup" onClick={onClose} disabled={busy}><X size={18} /></button>}
@@ -63,8 +91,14 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
       </button>
     </div>
     {progress && <div className={`discord-import-progress phase-${progress.phase}`} role="status" aria-live="polite">
-      <Archive size={17} /><span><strong>{importPhase(progress.phase)}</strong><small>{processed}{progress.warnings ? ` · ${progress.warnings} warnings` : ""}</small></span>
+      <Archive size={17} /><span><strong>{importPhase(progress.phase)}</strong><small>{processed}</small>{progress.warnings > 0 && <small>{progress.warnings.toLocaleString()} warnings</small>}</span>
       {status?.active && <button type="button" onClick={() => void api.cancelDiscordImport(context).then(setStatus).catch(onError)}>Cancel</button>}
+      {status?.retryAvailable && <button type="button" onClick={() => void retryArchive()} disabled={busy}>Retry failed import</button>}
+    </div>}
+    {progress?.phase === "failed" && <div className="discord-import-details">
+      <p>{failureMessage(status?.failureCode ?? null)}</p>
+      {status?.warningDetails.map(warning => <p key={warning.code}>{warningMessage(warning.code, warning.count)}</p>)}
+      {status?.retryAvailable && <small>Choose the same Discord ZIP to retry safely. Staged records will not be duplicated.</small>}
     </div>}
     {sources.length > 0 && <section className="available-sources">
       <p className="eyebrow">IMPORTED DISCORD ACCOUNTS</p>
@@ -78,4 +112,24 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
 
 function importPhase(phase: NonNullable<DiscordImportStatus["progress"]>["phase"]): string {
   return ({ inspecting: "Inspecting archive", hashing: "Verifying package", registering: "Registering source", importing: "Importing messages", verifying: "Checking imported records", ready: "Archive ready", cancelled: "Import cancelled", failed: "Import failed" })[phase];
+}
+
+function sameScope(source: DiscordSource, scope: NonNullable<DiscordImportStatus["importScope"]>): boolean {
+  return source.scope.provider === scope.provider && source.scope.accountId === scope.accountId && source.scope.sourceId === scope.sourceId;
+}
+
+function failureMessage(code: DiscordImportStatus["failureCode"]): string {
+  return ({
+    invalid_archive: "The package contains a record Retract could not safely import.",
+    unsupported_profile: "This Discord export format is not supported yet.",
+    limit_exceeded: "The package exceeds Retract's safe import limits.",
+    input_changed: "The selected ZIP changed while Retract was reading it.",
+    incomplete_source: "The package ended before all required records were available.",
+    storage_failure: "Retract could not finish writing the local archive."
+  } as const)[code ?? "invalid_archive"];
+}
+
+function warningMessage(code: string, count: number): string {
+  if (code === "unknown_conversation_kind") return `${count.toLocaleString()} ${count === 1 ? "conversation has" : "conversations have"} an unverified type and will remain searchable after a successful import.`;
+  return `${count.toLocaleString()} non-blocking import ${count === 1 ? "warning was" : "warnings were"} recorded.`;
 }

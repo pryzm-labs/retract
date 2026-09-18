@@ -15,7 +15,7 @@ use super::{
 use crate::{
     RuntimeState,
     compatibility::model_v2::{BootstrapRequest, BootstrapResponse, Empty},
-    persistence::archive::ArchiveSourceEntry,
+    persistence::archive::{ArchiveSourceEntry, ImportFailureCode, ImportPhase, ImportWarning},
     provider_service::{decode, encode, safe, validate_version},
 };
 
@@ -128,11 +128,16 @@ struct ImportView {
     active: bool,
     progress: Option<DiscordImportProgress>,
     sources: Vec<DiscordSourceView>,
+    import_scope: Option<Scope>,
+    retry_available: bool,
+    failure_code: Option<ImportFailureCode>,
+    warning_details: Vec<ImportWarning>,
 }
 
 async fn import_view(runtime: &RuntimeState) -> Result<ImportView, SafeError> {
     let (_, entries) = ready_entries(runtime).await?;
     let progress = runtime.discord_imports.active_progress();
+    let checkpoint = runtime.discord_imports.active_checkpoint();
     let active = progress.as_ref().is_some_and(|progress| {
         !matches!(
             progress.phase,
@@ -145,6 +150,22 @@ async fn import_view(runtime: &RuntimeState) -> Result<ImportView, SafeError> {
         active,
         progress,
         sources: entries.iter().map(source_view).collect(),
+        import_scope: checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.scope.clone()),
+        retry_available: checkpoint.as_ref().is_some_and(|checkpoint| {
+            matches!(
+                checkpoint.progress.phase,
+                ImportPhase::Interrupted | ImportPhase::Cancelled | ImportPhase::Failed
+            )
+        }),
+        failure_code: checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.failure_code),
+        warning_details: checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.warnings.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -198,6 +219,44 @@ pub(crate) async fn get_discord_import_v2(
         .read()
         .await
         .check_optional(request.context.as_ref())?;
+    encode(BootstrapResponse {
+        contract_version: 2,
+        context: runtime.service.read().await.context(),
+        payload: import_view(&runtime).await?,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn retry_discord_import_v2<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    runtime: State<'_, Arc<RuntimeState>>,
+    request: Value,
+) -> Result<Value, SafeError> {
+    validate_version(&request)?;
+    let request: BootstrapRequest<Empty> = decode(request)?;
+    runtime
+        .service
+        .read()
+        .await
+        .check_optional(request.context.as_ref())?;
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("Discord data package", &["zip"])
+        .blocking_pick_file();
+    let Some(path) = selected.and_then(|path| path.into_path().ok()) else {
+        return encode(BootstrapResponse {
+            contract_version: 2,
+            context: runtime.service.read().await.context(),
+            payload: import_view(&runtime).await?,
+        });
+    };
+    let file = open_selected(&path).map_err(|_| safe(ErrorCode::InvalidArchive))?;
+    runtime
+        .discord_imports
+        .retry_active(file)
+        .await
+        .map_err(import_error)?;
     encode(BootstrapResponse {
         contract_version: 2,
         context: runtime.service.read().await.context(),

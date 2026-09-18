@@ -437,6 +437,39 @@ fn discord_attachment_only_and_empty_records_keep_unknown_media_and_exact_text()
 }
 
 #[test]
+fn discord_space_delimited_attachment_exports_preserve_each_url_and_ordinal() {
+    let mut message = message_input();
+    message.attachments = concat!(
+        "https://example.invalid/first%20photo.png?signature=one ",
+        "https://cdn.example.invalid/second.pdf?signature=two"
+    )
+    .into();
+
+    let record = normalizer(2)
+        .content(&account_input(), &channel_input(), &message)
+        .unwrap();
+
+    assert_eq!(record.attachments.len(), 2);
+    assert_eq!(
+        record.attachments[0].safe_display_name.as_deref(),
+        Some("first photo.png")
+    );
+    assert_eq!(
+        record.attachments[1].safe_display_name.as_deref(),
+        Some("second.pdf")
+    );
+    assert_eq!(record.attachments[0].locator.payload["ordinal"], json!(0));
+    assert_eq!(record.attachments[1].locator.payload["ordinal"], json!(1));
+    assert_eq!(
+        record.provider_metadata.unwrap().payload["attachmentUrls"],
+        json!([
+            "https://example.invalid/first%20photo.png?signature=one",
+            "https://cdn.example.invalid/second.pdf?signature=two"
+        ])
+    );
+}
+
+#[test]
 fn discord_attachment_urls_reject_active_local_ambiguous_and_malformed_references() {
     for url in [
         "http://example.invalid/file",
@@ -449,7 +482,6 @@ fn discord_attachment_urls_reject_active_local_ambiguous_and_malformed_reference
         "https://",
         "https:///example.invalid/file",
         "https:////example.invalid/file",
-        "https://example.invalid/a https://example.invalid/b",
         "https://example.invalid/a\nhttps://example.invalid/b",
         " https://example.invalid/a",
         "https://example.invalid/a\t",
