@@ -5,10 +5,25 @@ mode=${1:-}
 case "$mode" in
   check|build) ;;
   *)
-    echo "usage: $0 check|build" >&2
+    echo "usage: $0 check|build [linux/amd64|linux/arm64]" >&2
     exit 64
     ;;
 esac
+
+platform=${2:-}
+case "$platform" in
+  ""|linux/amd64|linux/arm64) ;;
+  *)
+    echo "unsupported Docker platform: $platform" >&2
+    exit 64
+    ;;
+esac
+
+if [ -n "$platform" ]; then
+  set -- --platform "$platform"
+else
+  set --
+fi
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 context_directory=$(mktemp -d "${TMPDIR:-/tmp}/retract-docker-context.XXXXXX")
@@ -31,6 +46,7 @@ git ls-files --cached -z \
 case "$mode" in
   check)
     docker buildx build \
+      "$@" \
       --target checks \
       --output type=cacheonly \
       --progress plain \
@@ -39,6 +55,7 @@ case "$mode" in
   build)
     mkdir -p "$repository_root/artifacts/frontend"
     docker buildx build \
+      "$@" \
       --target frontend-artifact \
       --output "type=local,dest=$repository_root/artifacts/frontend" \
       "$context_directory"
