@@ -687,7 +687,7 @@ describe("Retract desktop UI", () => {
     await screen.findByText("Search every chat");
     fireEvent.click(screen.getByRole("button", { name: "Open connection settings" }));
     expect(await screen.findByRole("heading", { name: "Telegram connection" })).toBeInTheDocument();
-    expect(screen.getByText("TDLib library")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("This build does not include the reviewed TDLib engine");
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
   });
 });

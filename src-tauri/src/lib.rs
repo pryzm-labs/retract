@@ -120,7 +120,6 @@ fn create_service<R: tauri::Runtime>(
     let key = secure_store::load_tdlib_database_key(&path)?;
     let gateway = providers::telegram::native::LiveGateway::connect_with_identity_store(
         providers::telegram::native::LiveGatewayConfig::new(
-            settings.library_path,
             settings.api_id,
             settings.api_hash,
             settings.use_test_dc,

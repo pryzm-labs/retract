@@ -19,8 +19,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "container:check": "docker buildx build --target checks --output type=cacheonly --progress plain .",
-    "container:build": "docker buildx build --target frontend-artifact --output type=local,dest=artifacts/frontend .",
+    "container:check": "sh scripts/container-build.sh check",
+    "container:build": "sh scripts/container-build.sh build",
     "container:cache:status": "docker buildx du --filter type=exec.cachemount --filter description~=retract-",
     "container:cache:prune": "docker buildx prune --filter type=exec.cachemount --filter description~=retract-",
     "tdlib:ensure": "sh scripts/ensure-tdlib.sh",
@@ -36,7 +36,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run tdlib:ensure && npm run test && npm run test:release && npm run build && cargo test --locked --manifest-path crates/cleaner-domain/Cargo.toml && cargo test --locked --manifest-path crates/retract-domain/Cargo.toml && RETRACT_TEST_TDLIB_PATH=$PWD/vendor/tdlib-dist/libtdjson.dylib cargo test --locked --manifest-path src-tauri/Cargo.toml",
+    "check": "npm run tdlib:ensure && npm run test && npm run test:release && npm run build && cargo test --locked --manifest-path crates/cleaner-domain/Cargo.toml && cargo test --locked --manifest-path crates/retract-domain/Cargo.toml && cargo test --locked --manifest-path src-tauri/Cargo.toml",
     "tauri": "npm run tdlib:ensure && tauri"
   },
   "dependencies": {

@@ -242,6 +242,32 @@ fn sealed_plan_binds_every_immutable_field() {
 }
 
 #[test]
+fn trusted_plan_token_uses_the_first_sixty_four_digest_bits() {
+    assert_eq!(
+        plan_fingerprint_token(
+            "sha256-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ),
+        Ok("0123456789abcdef")
+    );
+}
+
+#[test]
+fn trusted_plan_token_rejects_noncanonical_fingerprints() {
+    for fingerprint in [
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "sha256-v1:0123456789abcdef",
+        "sha256-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeG",
+        "sha256-v2:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ] {
+        assert_eq!(
+            plan_fingerprint_token(fingerprint),
+            Err(DomainError::FingerprintMismatch),
+            "{fingerprint}"
+        );
+    }
+}
+
+#[test]
 fn target_sets_are_canonical_but_step_order_is_bound() {
     let original = plan();
     let mut reordered = original.clone();

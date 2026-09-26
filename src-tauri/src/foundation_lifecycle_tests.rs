@@ -287,7 +287,7 @@ fn foundation_lifecycle_foreign_account_execution_never_mutates_gateway() {
 }
 
 #[test]
-fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay() {
+fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_and_new_review() {
     tauri::async_runtime::block_on(async {
         for status in [JobStatus::Running, JobStatus::Queued] {
             let directory = tempfile::tempdir().unwrap();
@@ -360,22 +360,16 @@ fn foundation_lifecycle_encrypted_recovery_requires_verified_scope_before_replay
                 json!({"contractVersion":2,"context":reconnected,"payload":{}}),
             )
             .unwrap();
-            if let Some(deadline) = job.retry_at {
-                while chrono::Utc::now() + chrono::Duration::milliseconds(40) < deadline {
-                    assert!(pending.gateway.operation_log().await.is_empty());
-                    assert!(pending.gateway.current_reach_calls().await.is_empty());
-                    assert_eq!(reopened.store.snapshot().unwrap().jobs[0].next_batch, 0);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            }
             let finished = reopened.settled(&reconnected, id).await;
-            assert_eq!(finished.status, JobStatus::Completed);
-            assert_eq!(finished.counters.deleted, 2);
+            assert_eq!(finished.status, JobStatus::Failed);
+            assert_eq!(finished.counters.deleted, 0);
+            assert_eq!(finished.retry_at, None);
+            assert!(finished.diagnostics.iter().any(|error| {
+                error.code == retract_domain::ErrorCode::RestartRequiresNewReview
+            }));
             assert_eq!(pending.registrations.load(Ordering::Acquire), 1);
-            assert_eq!(
-                pending.gateway.delete_calls().await,
-                vec![(-1001, vec![9_007_199_254_740_992, 9_007_199_254_740_993])]
-            );
+            assert!(pending.gateway.delete_calls().await.is_empty());
+            assert!(pending.gateway.current_reach_calls().await.is_empty());
         }
     });
 }

@@ -3,6 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export const EXPECTED_TDLIB_ARCHIVE_SHA256 = "aab5736f737319a13bcb871aa2b8a7a90a33e28ec9708fee53dbd387a24b98e4";
+export const EXPECTED_TDLIB_COMPRESSED_SHA256 = "e93e2134e9fb57f7d019a8802f8518b9c0339806224af17df21fa965785afb95";
+
 function requireMatch(value, pattern, label) {
   const match = value.match(pattern);
   if (!match) throw new Error(`invalid ${label}`);
@@ -11,22 +14,36 @@ function requireMatch(value, pattern, label) {
 
 export function parseBuildStamp(text) {
   const lines = text.trim().split(/\r?\n/);
-  if (lines.length !== 2) throw new Error("invalid TDLib build stamp");
+  if (lines.length !== 4) throw new Error("invalid TDLib build stamp");
   const provenance = requireMatch(
     lines[0],
-    /^tdlib=([^\s]+) commit=([0-9a-f]{40}) arch=(arm64) macos=([^\s]+)$/,
+    /^tdlib=([^\s]+) commit=([0-9a-f]{40}) arch=(arm64) macos=([^\s]+) linkage=(static)$/,
     "TDLib provenance"
   );
-  const digest = requireMatch(
+  const archiveDigest = requireMatch(
     lines[1],
-    /^sha256=([0-9a-f]{64}) file=libtdjson\.dylib$/,
-    "TDLib digest"
+    /^archive_sha256=([0-9a-f]{64}) file=libtdjson_retract\.a$/,
+    "TDLib archive digest"
+  );
+  const compressedDigest = requireMatch(
+    lines[2],
+    /^compressed_sha256=([0-9a-f]{64}) file=libtdjson_static\.a\.gz$/,
+    "TDLib compressed digest"
+  );
+  const openssl = requireMatch(
+    lines[3],
+    /^openssl=(3\.6\.3) provider=(sqlcipher-vendored-openssl)$/,
+    "TDLib OpenSSL provider"
   );
   return {
     version: provenance[1],
     commit: provenance[2],
     architecture: provenance[3],
-    sha256: digest[1]
+    linkage: provenance[5],
+    archiveSha256: archiveDigest[1],
+    compressedSha256: compressedDigest[1],
+    opensslVersion: openssl[1],
+    opensslProvider: openssl[2]
   };
 }
 
@@ -47,6 +64,13 @@ export function buildManifest(input) {
   if (!/^[0-9a-f]{7,64}$/.test(input.sourceCommit)) throw new Error("invalid source commit");
   if (input.target !== "aarch64-apple-darwin") throw new Error("invalid release target");
   if (input.tdlib.architecture !== "arm64") throw new Error("invalid TDLib architecture");
+  if (input.tdlib.linkage !== "static"
+      || input.tdlib.archiveSha256 !== EXPECTED_TDLIB_ARCHIVE_SHA256
+      || input.tdlib.compressedSha256 !== EXPECTED_TDLIB_COMPRESSED_SHA256
+      || input.tdlib.opensslVersion !== "3.6.3"
+      || input.tdlib.opensslProvider !== "sqlcipher-vendored-openssl") {
+    throw new Error("TDLib does not match Retract's reviewed static provenance");
+  }
   return {
     product: input.product,
     version: input.version,

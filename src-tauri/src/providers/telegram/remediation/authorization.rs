@@ -17,7 +17,11 @@ impl TelegramCleanup {
                 "the authorization request does not match the frozen plan".into(),
             ));
         }
-        let reason = authorization_reason(&plan);
+        let trusted_scope = self
+            .context
+            .as_ref()
+            .map(|context| (context.verified_user_id(), context.active().scope.source_id));
+        let reason = authorization_reason(&plan, trusted_scope)?;
         if let Some(context) = &self.context {
             context
                 .authenticate(&reason, self.read.info().mode == "live")
@@ -36,8 +40,34 @@ impl TelegramCleanup {
     }
 }
 
-pub(super) fn authorization_reason(plan: &DeletionPlan) -> String {
-    let plan_token = &plan.fingerprint[..plan.fingerprint.len().min(12)];
+pub(super) fn authorization_reason(
+    plan: &DeletionPlan,
+    trusted_scope: Option<(i64, retract_domain::SourceId)>,
+) -> Result<String, AppError> {
+    // Context-bound live plans use the neutral envelope prefix. Context-free
+    // demo and legacy fixtures retain cleaner-domain's canonical bare digest;
+    // normalize only that exact 64-hex representation before extracting the
+    // same 64-bit trusted-display token.
+    let normalized_fingerprint = if plan.fingerprint.starts_with("sha256-v1:") {
+        std::borrow::Cow::Borrowed(plan.fingerprint.as_str())
+    } else {
+        std::borrow::Cow::Owned(format!("sha256-v1:{}", plan.fingerprint))
+    };
+    let plan_token =
+        retract_domain::plan_fingerprint_token(&normalized_fingerprint).map_err(|_| {
+            AppError::SystemAuthentication(
+                "the frozen plan has an invalid authentication fingerprint".into(),
+            )
+        })?;
+    let target_count = frozen_target_count(plan);
+    let target_word = if target_count == 1 {
+        "target"
+    } else {
+        "targets"
+    };
+    let scope = trusted_scope.map_or_else(String::new, |(account_id, source_id)| {
+        format!(" account {account_id}; source {};", source_id.as_uuid())
+    });
     let chat_id = plan.target_chat_id.unwrap_or_default();
     let chat = trusted_prompt_label(plan.chat_title.as_deref().unwrap_or("Unknown chat"));
     let target = format!("‘{chat}’ (chat {chat_id})");
@@ -67,55 +97,70 @@ pub(super) fn authorization_reason(plan: &DeletionPlan) -> String {
                     .unwrap_or("Unknown sender"),
             );
             let sender_id = plan.target_sender_id.unwrap_or_default();
-            format!("Delete every message by ‘{sender}’ (sender {sender_id}) in {target}")
+            format!("Delete all by ‘{sender}’ ({sender_id}) in {target}")
         }
         PlanOperation::DeleteMyMessages => format!(
             "Delete {} frozen messages sent by your account in {target}",
             plan.summary.delete_for_everyone
         ),
         PlanOperation::SelectedMessages => {
-            let mut chat_ids = plan
+            let visible_targets = plan
                 .items
                 .iter()
                 .filter(|item| item.expected_reach == DeletionReach::Everyone)
-                .map(|item| item.chat_id)
+                .take(1)
+                .map(|item| format!("{}/{}", item.chat_id, item.message_id))
                 .collect::<Vec<_>>();
-            chat_ids.sort_unstable();
-            chat_ids.dedup();
-            let visible_ids = chat_ids
-                .iter()
-                .take(4)
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let remainder = chat_ids.len().saturating_sub(4);
+            let remainder = plan
+                .summary
+                .delete_for_everyone
+                .saturating_sub(visible_targets.len());
             let suffix = if remainder == 0 {
                 String::new()
             } else {
                 format!(" and {remainder} more")
             };
             format!(
-                "Delete {} frozen Telegram messages for everyone in chat IDs {visible_ids}{suffix}",
-                plan.summary.delete_for_everyone
+                "Delete {} frozen Telegram messages for everyone; first target {}{suffix}",
+                plan.summary.delete_for_everyone,
+                visible_targets.join(", ")
             )
         }
     };
-    format!("Plan {plan_token}: {action}.")
+    let reason = format!(
+        "Telegram plan {plan_token}:{scope} {target_count} frozen {target_word}. {action}."
+    );
+    if reason.chars().count() > 256
+        || reason.chars().any(char::is_control)
+        || reason.chars().any(is_direction_or_line_formatting)
+    {
+        return Err(AppError::SystemAuthentication(
+            "the frozen plan cannot be represented safely for authentication".into(),
+        ));
+    }
+    Ok(reason)
+}
+
+fn frozen_target_count(plan: &DeletionPlan) -> usize {
+    match plan.operation {
+        PlanOperation::SelectedMessages | PlanOperation::DeleteMyMessages => {
+            plan.summary.delete_for_everyone
+        }
+        PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat => {
+            plan.summary.delete_for_everyone.saturating_add(1)
+        }
+        PlanOperation::ClearHistory
+        | PlanOperation::ClearHistoryAndLeave
+        | PlanOperation::RemoveChatForSelf
+        | PlanOperation::DeleteBySender
+        | PlanOperation::DeleteGroup => 1,
+    }
 }
 
 pub(super) fn trusted_prompt_label(value: &str) -> String {
     let single_line = value
         .chars()
-        .filter(|character| {
-            !matches!(
-                *character,
-                '\u{061c}'
-                    | '\u{200e}'
-                    | '\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2066}'..='\u{2069}'
-            )
-        })
+        .filter(|character| !is_direction_or_line_formatting(*character))
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -124,5 +169,19 @@ pub(super) fn trusted_prompt_label(value: &str) -> String {
             }
         })
         .collect::<String>();
-    single_line.trim().chars().take(80).collect()
+    single_line.trim().chars().take(24).collect()
+}
+
+fn is_direction_or_line_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+    )
 }

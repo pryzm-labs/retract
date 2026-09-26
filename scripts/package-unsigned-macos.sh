@@ -9,7 +9,7 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   exit 1
 fi
 
-for tool in codesign ditto file grep node npm otool shasum; do
+for tool in codesign ditto file grep nm node npm otool shasum strings; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Missing required release tool: $tool" >&2
     exit 1
@@ -19,9 +19,15 @@ done
 RELEASE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/retract-release.XXXXXX")
 trap 'rm -rf "$RELEASE_TMP"' EXIT HUP INT TERM
 
-APP_PATH="$PROJECT_ROOT/src-tauri/target/release/bundle/macos/Retract.app"
+# Native dependencies such as vendored OpenSSL record their Cargo output prefix
+# in the compiled binary. Build the distributable in a private, disposable
+# target directory outside the developer's home so an unsigned package cannot
+# reveal the builder's account name or checkout location.
+CARGO_TARGET_DIR="$RELEASE_TMP/target"
+export CARGO_TARGET_DIR
+
+APP_PATH="$CARGO_TARGET_DIR/release/bundle/macos/Retract.app"
 APP_BINARY_REL="Contents/MacOS/retract"
-TDLIB_REL="Contents/Resources/lib/libtdjson.dylib"
 VERSION=$(node -p 'require("./package.json").version')
 ARCHIVE_NAME="Retract-v${VERSION}-macos-arm64.app.zip"
 ARCHIVE_PATH="$RELEASE_TMP/$ARCHIVE_NAME"
@@ -54,15 +60,20 @@ verify_app() {
       ;;
   esac
 
-  expected_tdlib_sha=$(sed -n '2s/^sha256=\([^ ]*\).*/\1/p' vendor/tdlib-dist/build-stamp.txt)
-  actual_tdlib_sha=$(shasum -a 256 "$verify_path/$TDLIB_REL" | cut -d ' ' -f 1)
-  if [ -z "$expected_tdlib_sha" ] || [ "$actual_tdlib_sha" != "$expected_tdlib_sha" ]; then
-    echo "Bundled TDLib does not match its reviewed build stamp." >&2
+  if otool -L "$verify_path/$APP_BINARY_REL" | grep -q 'libtdjson'; then
+    echo "Retract must not load TDLib dynamically." >&2
+    exit 1
+  fi
+  if ! nm -gU "$verify_path/$APP_BINARY_REL" | grep -q ' _td_json_client_create$'; then
+    echo "Retract executable does not contain the statically linked TDLib API." >&2
+    exit 1
+  fi
+  if strings "$verify_path/$APP_BINARY_REL" | grep -E -q '/Users/[^/]+/|/home/[^/]+/'; then
+    echo "Retract executable exposes a developer home-directory path." >&2
     exit 1
   fi
 
   verify_native_dependencies "$verify_path/$APP_BINARY_REL" "$RELEASE_TMP/app-dependencies.txt"
-  verify_native_dependencies "$verify_path/$TDLIB_REL" "$RELEASE_TMP/tdlib-dependencies.txt"
 }
 
 verify_native_dependencies() {
@@ -71,7 +82,7 @@ verify_native_dependencies() {
   otool -L "$native_path" >"$dependency_report"
   sed -n '2,$s/^[[:space:]]*\([^ ]*\).*/\1/p' "$dependency_report" | while IFS= read -r dependency; do
     case "$dependency" in
-      @rpath/libtdjson.dylib|/usr/lib/*|/System/Library/*) ;;
+      /usr/lib/*|/System/Library/*) ;;
       *)
         echo "Native artifact has a non-reviewed runtime dependency: $dependency" >&2
         exit 1
@@ -79,6 +90,18 @@ verify_native_dependencies() {
     esac
   done
 }
+
+# Rust dependencies can embed source locations in panic and tracing strings
+# even in an optimized binary. Remap the complete developer home before Cargo
+# fingerprints or compiles anything so release artifacts never reveal the
+# builder's account name or local checkout layout.
+REMAP_HOME="--remap-path-prefix=$HOME=/usr/src/retract-home"
+if [ -n "${RUSTFLAGS:-}" ]; then
+  RUSTFLAGS="$RUSTFLAGS $REMAP_HOME"
+else
+  RUSTFLAGS=$REMAP_HOME
+fi
+export RUSTFLAGS
 
 npm run tauri build -- --bundles app
 npm run verify:production-bundle -- --existing

@@ -713,7 +713,7 @@ fn compatibility_v2_async_refresh_discards_old_context_results() {
 }
 
 #[test]
-fn compatibility_v2_nonnumeric_recovery_resumes_an_actual_durable_retry_checkpoint() {
+fn compatibility_v2_nonnumeric_recovery_requires_new_review_without_replay() {
     tauri::async_runtime::block_on(async {
         use super::fixtures::*;
         use std::sync::atomic::Ordering;
@@ -758,14 +758,17 @@ fn compatibility_v2_nonnumeric_recovery_resumes_an_actual_durable_retry_checkpoi
         )
         .unwrap();
         let finished = recovered.settled(&active, job.id).await;
-        assert_eq!(finished.status, retract_domain::JobStatus::Completed);
-        assert_eq!(finished.counters.deleted, 1);
-        assert_eq!(finished.next_batch, 1);
-        assert_eq!(io.calls.lock().unwrap().len(), 1);
-        assert_eq!(
-            io.calls.lock().unwrap()[0][0].resource.locator_payload["messageId"],
-            "message:part/0007"
+        assert_eq!(finished.status, retract_domain::JobStatus::Failed);
+        assert_eq!(finished.counters.deleted, 0);
+        assert_eq!(finished.next_batch, 0);
+        assert_eq!(finished.retry_at, None);
+        assert!(
+            finished
+                .diagnostics
+                .iter()
+                .any(|error| { error.code == retract_domain::ErrorCode::RestartRequiresNewReview })
         );
+        assert!(io.calls.lock().unwrap().is_empty());
         assert_eq!(io.catalog.load(Ordering::Acquire), 0);
         let state = encrypted_state(directory.path(), &active, KEY).unwrap();
         assert_eq!(state.jobs[0], finished);
@@ -867,7 +870,7 @@ fn review_round1_intent_catalog_rejects_malformed_provider_output() {
 }
 
 #[test]
-fn review_round1_retry_preserves_the_native_absolute_deadline_through_latency_and_recovery() {
+fn review_round1_retry_preserves_live_deadlines_but_recovery_requires_new_review() {
     tauri::async_runtime::block_on(async {
         use super::fixtures::*;
         use std::sync::atomic::Ordering;
@@ -925,6 +928,17 @@ fn review_round1_retry_preserves_the_native_absolute_deadline_through_latency_an
                     json!({"contractVersion":2,"context":active,"payload":{}}),
                 )
                 .unwrap();
+
+                let stopped = harness.settled(&active, job.id).await;
+                assert_eq!(stopped.status, retract_domain::JobStatus::Failed);
+                assert_eq!(stopped.counters.deleted, 0);
+                assert_eq!(stopped.retry_at, None);
+                assert!(stopped.diagnostics.iter().any(|error| {
+                    error.code == retract_domain::ErrorCode::RestartRequiresNewReview
+                }));
+                assert_eq!(io.preflights.lock().unwrap().len(), 1);
+                assert!(io.calls.lock().unwrap().is_empty());
+                continue;
             }
             while chrono::Utc::now() + chrono::Duration::milliseconds(30) < deadline {
                 assert_eq!(io.preflights.lock().unwrap().len(), 1);
@@ -938,5 +952,74 @@ fn review_round1_retry_preserves_the_native_absolute_deadline_through_latency_an
             assert!(preflights[1] >= deadline);
             assert_eq!(io.calls.lock().unwrap().len(), 1);
         }
+    });
+}
+
+#[test]
+fn cancellation_waits_for_an_in_flight_mutation_to_acknowledge_and_quiesce() {
+    tauri::async_runtime::block_on(async {
+        use super::fixtures::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let barrier = Arc::new(PreflightBarrier::default());
+        *io.mutation_barrier.lock().unwrap() = Some(barrier.clone());
+        let harness = synthetic(directory.path(), io.clone());
+        let plan = harness.prepare(&active, vec![fixture()["messages"][2]["ref"].clone()]);
+        harness.authorize(&active, &plan);
+        let job = harness.start(&active, &plan).unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .unwrap();
+        let cancellation = {
+            let service = harness.service.clone();
+            let active = active.clone();
+            tokio::spawn(async move {
+                service
+                    .active(
+                        "cancel",
+                        json!({
+                            "contractVersion": 2,
+                            "context": active,
+                            "payload": {"jobId": job.id}
+                        }),
+                    )
+                    .await
+                    .unwrap()
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), async {
+                while !cancellation.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            harness.store.snapshot().unwrap().jobs[0].status,
+            retract_domain::JobStatus::Cancelled,
+            "cancellation must be durable before waiting for an in-flight mutation"
+        );
+        assert!(io.calls.lock().unwrap().is_empty());
+
+        barrier.release.notify_one();
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled: retract_domain::ScopedJobRecord =
+            serde_json::from_value(cancelled["payload"].clone()).unwrap();
+        assert_eq!(cancelled.status, retract_domain::JobStatus::Cancelled);
+        assert_eq!(io.calls.lock().unwrap().len(), 1);
+        let settled = harness.settled(&active, job.id).await;
+        assert_eq!(settled.status, retract_domain::JobStatus::Cancelled);
     });
 }

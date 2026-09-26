@@ -208,8 +208,6 @@ export interface CommandError {
 
 export interface ConnectionSettings {
   setupComplete: boolean;
-  tdlibPath: string;
-  detectedTdlibPath?: string | null;
   bundledTdlibAvailable: boolean;
   apiId?: number | null;
   apiHashConfigured: boolean;
@@ -220,7 +218,6 @@ export interface ConnectionSettings {
 }
 
 export interface SaveConnectionSettingsRequest {
-  tdlibPath: string;
   apiId: number | null;
   apiHash: string | null;
   useTestDc: boolean;

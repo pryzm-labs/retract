@@ -42,6 +42,20 @@ fn discovery_is_cross_browser_deterministic_and_never_requests_a_profile() {
 }
 
 #[test]
+fn macos_discovery_never_falls_back_to_path_binaries() {
+    let mut environment = FakeEnvironment::default();
+    environment.commands.insert(
+        "google-chrome".into(),
+        PathBuf::from("/tmp/attacker/google-chrome"),
+    );
+    environment
+        .commands
+        .insert("firefox.exe".into(), PathBuf::from("/tmp/attacker/firefox"));
+
+    assert!(discover_with(&environment, "macos").is_empty());
+}
+
+#[test]
 fn discovery_supports_chromium_variants_firefox_and_path_fallbacks() {
     let mut environment = FakeEnvironment::default();
     for command in [

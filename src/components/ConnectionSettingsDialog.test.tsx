@@ -10,8 +10,6 @@ import { ConnectionSettingsDialog } from "./ConnectionSettingsDialog";
 
 const bundledSettings: ConnectionSettings = {
   setupComplete: false,
-  tdlibPath: "/Applications/Retract.app/Contents/Resources/lib/libtdjson.dylib",
-  detectedTdlibPath: "/Applications/Retract.app/Contents/Resources/lib/libtdjson.dylib",
   bundledTdlibAvailable: true,
   apiId: null,
   apiHashConfigured: false,
@@ -60,7 +58,6 @@ describe("ConnectionSettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith({
-      tdlibPath: bundledSettings.tdlibPath,
       apiId: 12345678,
       apiHash: "0123456789abcdef0123456789abcdef",
       useTestDc: false

@@ -2,11 +2,16 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use retract_domain::*;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::http::{DeleteOutcome, DiscordDeleteClient, DiscordDeleteError};
+use super::http::{
+    DeleteOutcome, DiscordDeleteClient, DiscordDeleteError, DiscordLiveMessageBinding,
+};
 use super::locators::{
     DiscordMessageLocator, DiscordPayloadValidator, MESSAGE_SCHEMA, canonical_id,
 };
@@ -29,10 +34,22 @@ struct DiscordDeleteRecipe {
 
 #[async_trait]
 pub(crate) trait DiscordMessageDelete: Send + Sync {
-    async fn delete(
+    async fn verify_owned(
         &self,
         channel_id: &str,
         message_id: &str,
+        owner_user_id: &str,
+        expected: &DiscordLiveMessageBinding,
+        token: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<(), DiscordDeleteError>;
+
+    async fn delete_owned(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        owner_user_id: &str,
+        expected: &DiscordLiveMessageBinding,
         token: &str,
         cancelled: &AtomicBool,
     ) -> Result<DeleteOutcome, DiscordDeleteError>;
@@ -40,14 +57,44 @@ pub(crate) trait DiscordMessageDelete: Send + Sync {
 
 #[async_trait]
 impl DiscordMessageDelete for DiscordDeleteClient {
-    async fn delete(
+    async fn verify_owned(
         &self,
         channel_id: &str,
         message_id: &str,
+        owner_user_id: &str,
+        expected: &DiscordLiveMessageBinding,
+        token: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<(), DiscordDeleteError> {
+        self.verify_owned(
+            channel_id,
+            message_id,
+            owner_user_id,
+            expected,
+            token,
+            cancelled,
+        )
+        .await
+    }
+
+    async fn delete_owned(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        owner_user_id: &str,
+        expected: &DiscordLiveMessageBinding,
         token: &str,
         cancelled: &AtomicBool,
     ) -> Result<DeleteOutcome, DiscordDeleteError> {
-        self.delete(channel_id, message_id, token, cancelled).await
+        self.delete_owned(
+            channel_id,
+            message_id,
+            owner_user_id,
+            expected,
+            token,
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -163,6 +210,78 @@ impl DiscordRemediationIo {
         }
         Ok(records)
     }
+
+    fn token(&self) -> Result<Zeroizing<String>, SafeError> {
+        self.session
+            .with_token(&self.owner_user_id, |value| {
+                Zeroizing::new(value.to_owned())
+            })
+            .map_err(|_| safe(ErrorCode::AuthenticationRequired))
+    }
+
+    async fn verify_live_owned(
+        &self,
+        records: &[ContentRecord],
+        cancelled: &AtomicBool,
+    ) -> Result<(), SafeError> {
+        let token = self.token()?;
+        for record in records {
+            let locator: DiscordMessageLocator =
+                serde_json::from_value(record.resource.locator_payload.clone())
+                    .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+            let attachment_names = record
+                .attachments
+                .iter()
+                .map(|attachment| attachment.safe_display_name.as_deref())
+                .collect::<Vec<_>>();
+            let expected = DiscordLiveMessageBinding::with_attachment_names(
+                &record.searchable_text,
+                record.timestamp.timestamp_millis(),
+                &attachment_names,
+            );
+            self.delete
+                .verify_owned(
+                    &locator.channel_id,
+                    &locator.message_id,
+                    &self.owner_user_id,
+                    &expected,
+                    &token,
+                    cancelled,
+                )
+                .await
+                .map_err(|error| self.map_delete_error(error))?;
+        }
+        Ok(())
+    }
+
+    fn map_delete_error(&self, error: DiscordDeleteError) -> SafeError {
+        match error {
+            DiscordDeleteError::Authentication => {
+                self.session.shutdown();
+                safe(ErrorCode::AuthenticationRequired)
+            }
+            DiscordDeleteError::Permission | DiscordDeleteError::OwnershipMismatch => {
+                safe(ErrorCode::PermissionChanged)
+            }
+            DiscordDeleteError::NotFound => safe(ErrorCode::NotFound),
+            DiscordDeleteError::RateLimited {
+                retry_after_millis, ..
+            } => SafeError {
+                code: ErrorCode::RateLimited,
+                retry_at: Some(
+                    Utc::now()
+                        + ChronoDuration::milliseconds(
+                            i64::try_from(retry_after_millis).unwrap_or(i64::MAX),
+                        ),
+                ),
+            },
+            DiscordDeleteError::Transient => safe(ErrorCode::Transient),
+            DiscordDeleteError::Ambiguous => safe(ErrorCode::AmbiguousOutcome),
+            DiscordDeleteError::Permanent => safe(ErrorCode::Permanent),
+            DiscordDeleteError::InvalidTarget => safe(ErrorCode::UnsupportedSchema),
+            DiscordDeleteError::Cancelled => safe(ErrorCode::StaleContext),
+        }
+    }
 }
 
 #[async_trait]
@@ -181,7 +300,9 @@ impl FrozenProviderIo for DiscordRemediationIo {
         if intent.action_id != "selected_messages" || intent.actor.is_some() {
             return Err(safe(ErrorCode::UnsupportedSchema));
         }
-        self.resolve_owned(&intent.targets).await?;
+        let records = self.resolve_owned(&intent.targets).await?;
+        self.verify_live_owned(&records, &AtomicBool::new(false))
+            .await?;
         self.check_context(context)?;
         let descriptor = descriptor();
         let recipe = DiscordDeleteRecipe {
@@ -210,7 +331,7 @@ impl FrozenProviderIo for DiscordRemediationIo {
                 payload: serde_json::to_value(recipe)
                     .map_err(|_| safe(ErrorCode::UnsupportedSchema))?,
             },
-            restart_policy: RestartPolicy::ResumeFrozenTargets,
+            restart_policy: RestartPolicy::RequiresNewReview,
             created_at: Utc::now(),
             fingerprint: String::new(),
         };
@@ -225,17 +346,20 @@ impl FrozenProviderIo for DiscordRemediationIo {
     }
 
     async fn owner_prompt(&self, plan: &RemediationPlan) -> Result<(), SafeError> {
-        validate_plan(plan).map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
-        crate::local_auth::authenticate(
-            "Allow Retract to delete the reviewed Discord archive messages",
-        )
-        .await
-        .map_err(|_| safe(ErrorCode::AuthenticationRequired))
+        let reason = authorization_reason(plan).map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+        crate::local_auth::authenticate(&reason)
+            .await
+            .map_err(|_| safe(ErrorCode::AuthenticationRequired))
     }
 
-    async fn preflight(&self, target: &ScopedResourceRef) -> Result<bool, SafeError> {
+    async fn preflight(
+        &self,
+        target: &ScopedResourceRef,
+        cancelled: &AtomicBool,
+    ) -> Result<bool, SafeError> {
         self.check_context(&self.context)?;
-        self.resolve_owned(std::slice::from_ref(target)).await?;
+        let records = self.resolve_owned(std::slice::from_ref(target)).await?;
+        self.verify_live_owned(&records, cancelled).await?;
         self.check_context(&self.context)?;
         Ok(true)
     }
@@ -244,51 +368,51 @@ impl FrozenProviderIo for DiscordRemediationIo {
         &self,
         plan: &RemediationPlan,
         targets: &[ScopedResourceRef],
+        cancelled: &AtomicBool,
     ) -> Result<(), SafeError> {
         self.check_context(&self.context)?;
         validate_plan(plan).map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+        let recipe: DiscordDeleteRecipe = serde_json::from_value(plan.recipe.payload.clone())
+            .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+        if recipe.owner_user_id != self.owner_user_id {
+            return Err(safe(ErrorCode::ScopeMismatch));
+        }
         if targets.len() != 1 || !plan.targets.contains(&targets[0]) {
             return Err(safe(ErrorCode::ScopeMismatch));
         }
-        self.resolve_owned(targets).await?;
+        let records = self.resolve_owned(targets).await?;
         self.check_context(&self.context)?;
         let locator: DiscordMessageLocator =
             serde_json::from_value(targets[0].resource.locator_payload.clone())
                 .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
-        let token = self
-            .session
-            .with_token(&self.owner_user_id, |value| {
-                Zeroizing::new(value.to_owned())
-            })
-            .map_err(|_| safe(ErrorCode::AuthenticationRequired))?;
-        let cancelled = AtomicBool::new(false);
+        let token = self.token()?;
+        let attachment_names = records[0]
+            .attachments
+            .iter()
+            .map(|attachment| attachment.safe_display_name.as_deref())
+            .collect::<Vec<_>>();
+        let expected = DiscordLiveMessageBinding::with_attachment_names(
+            &records[0].searchable_text,
+            records[0].timestamp.timestamp_millis(),
+            &attachment_names,
+        );
+        if cancelled.load(Ordering::Acquire) {
+            return Err(safe(ErrorCode::StaleContext));
+        }
         match self
             .delete
-            .delete(&locator.channel_id, &locator.message_id, &token, &cancelled)
+            .delete_owned(
+                &locator.channel_id,
+                &locator.message_id,
+                &self.owner_user_id,
+                &expected,
+                &token,
+                cancelled,
+            )
             .await
         {
             Ok(DeleteOutcome::Deleted | DeleteOutcome::AlreadyAbsent) => Ok(()),
-            Err(DiscordDeleteError::Authentication) => {
-                self.session.shutdown();
-                Err(safe(ErrorCode::AuthenticationRequired))
-            }
-            Err(DiscordDeleteError::Permission) => Err(safe(ErrorCode::PermissionChanged)),
-            Err(DiscordDeleteError::RateLimited {
-                retry_after_millis, ..
-            }) => Err(SafeError {
-                code: ErrorCode::RateLimited,
-                retry_at: Some(
-                    Utc::now()
-                        + ChronoDuration::milliseconds(
-                            i64::try_from(retry_after_millis).unwrap_or(i64::MAX),
-                        ),
-                ),
-            }),
-            Err(DiscordDeleteError::Transient) => Err(safe(ErrorCode::Transient)),
-            Err(DiscordDeleteError::Ambiguous) => Err(safe(ErrorCode::AmbiguousOutcome)),
-            Err(DiscordDeleteError::Permanent) => Err(safe(ErrorCode::Permanent)),
-            Err(DiscordDeleteError::InvalidTarget) => Err(safe(ErrorCode::UnsupportedSchema)),
-            Err(DiscordDeleteError::Cancelled) => Err(safe(ErrorCode::StaleContext)),
+            Err(error) => Err(self.map_delete_error(error)),
         }
     }
 
@@ -307,6 +431,50 @@ impl FrozenProviderIo for DiscordRemediationIo {
             descriptors: vec![descriptor()],
         }])
     }
+}
+
+pub(super) fn authorization_reason(
+    plan: &RemediationPlan,
+) -> Result<String, crate::error::AppError> {
+    use crate::error::AppError;
+
+    validate_plan(plan)?;
+    let recipe: DiscordDeleteRecipe = serde_json::from_value(plan.recipe.payload.clone())
+        .map_err(|_| AppError::InvalidRequest("invalid Discord deletion plan".into()))?;
+    let plan_token = retract_domain::plan_fingerprint_token(&plan.fingerprint)
+        .map_err(|_| AppError::InvalidRequest("invalid Discord deletion plan".into()))?;
+    let first_target = plan
+        .targets
+        .first()
+        .ok_or_else(|| AppError::InvalidRequest("invalid Discord deletion plan".into()))?;
+    let locator: DiscordMessageLocator =
+        serde_json::from_value(first_target.resource.locator_payload.clone())
+            .map_err(|_| AppError::InvalidRequest("invalid Discord deletion target".into()))?;
+    let target_count = recipe.target_count;
+    let target_word = if target_count == 1 {
+        "message"
+    } else {
+        "messages"
+    };
+    let remainder = target_count.saturating_sub(1);
+    let remainder = if remainder == 0 {
+        String::new()
+    } else {
+        format!(" (+{remainder} more)")
+    };
+    let reason = format!(
+        "Discord plan {plan_token}: delete {target_count} reviewed {target_word} owned by account {} from source {}; target channel {}/message {}{remainder}.",
+        recipe.owner_user_id,
+        plan.scope.source_id.as_uuid(),
+        locator.channel_id,
+        locator.message_id,
+    );
+    if reason.chars().count() > 256 || reason.chars().any(char::is_control) {
+        return Err(AppError::InvalidRequest(
+            "the Discord deletion plan cannot be represented safely for authentication".into(),
+        ));
+    }
+    Ok(reason)
 }
 
 fn descriptor() -> ActionDescriptor {
@@ -338,7 +506,7 @@ pub(crate) fn validate_plan(plan: &RemediationPlan) -> Result<(), crate::error::
     if plan.scope.provider.as_str() != "discord"
         || plan.recipe.schema != DELETE_RECIPE_SCHEMA
         || plan.recipe.version != 1
-        || plan.restart_policy != RestartPolicy::ResumeFrozenTargets
+        || plan.restart_policy != RestartPolicy::RequiresNewReview
         || plan.steps.len() != 1
         || plan.steps[0].descriptor != descriptor()
         || plan.steps[0].targets != plan.targets

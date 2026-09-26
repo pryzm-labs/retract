@@ -123,13 +123,7 @@ pub(crate) fn discover_with(
                 .iter()
                 .find_map(|command| environment.find_command(command)),
         };
-        let Some(executable) = configured.or_else(|| {
-            candidate
-                .linux
-                .iter()
-                .chain(candidate.windows.iter())
-                .find_map(|command| environment.find_command(command))
-        }) else {
+        let Some(executable) = configured else {
             continue;
         };
         if !seen.insert(executable.clone()) {

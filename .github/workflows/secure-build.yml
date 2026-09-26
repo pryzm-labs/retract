@@ -33,13 +33,7 @@ jobs:
           persist-credentials: false
 
       - name: Build and test in the locked container
-        run: >-
-          docker buildx build
-          --platform linux/${{ matrix.arch }}
-          --target checks
-          --output type=cacheonly
-          --progress plain
-          .
+        run: scripts/container-build.sh check linux/${{ matrix.arch }}
 
   native-macos-package:
     name: Native macOS package

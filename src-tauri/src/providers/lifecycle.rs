@@ -144,6 +144,9 @@ pub async fn run_frozen_batches<D: FrozenBatchDriver>(
                     fatal,
                 })
                 .await?;
+            if driver.cancelled().await? {
+                return Ok(true);
+            }
             if fatal {
                 return Ok(true);
             }
@@ -254,18 +257,12 @@ impl ScopedRepository {
     }
 }
 
-pub fn resumable(plan: &RemediationPlan, job: &ScopedJobRecord) -> bool {
-    job.started_authorized
-        && plan.restart_policy == retract_domain::RestartPolicy::ResumeFrozenTargets
-        && job.counters.uncertain == 0
-        && !job.diagnostics.iter().any(|d| {
-            matches!(
-                d.code,
-                ErrorCode::AmbiguousOutcome
-                    | ErrorCode::StatePersistenceFailed
-                    | ErrorCode::RestartRequiresNewReview
-            )
-        })
+pub fn resumable(_plan: &RemediationPlan, _job: &ScopedJobRecord) -> bool {
+    // A valid authenticated ciphertext can still be an older snapshot copied
+    // back by same-user software. Never replay a recovered destructive job;
+    // the user must review the current state and grant owner authentication
+    // again in this process.
+    false
 }
 pub fn block_foreign_jobs(store: &FoundationStore, scope: &Scope) -> Result<(), AppError> {
     if !store.snapshot()?.jobs.iter().any(|j| {

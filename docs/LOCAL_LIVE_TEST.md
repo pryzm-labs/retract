@@ -21,7 +21,7 @@ Install the Xcode Command Line Tools if the last command fails:
 xcode-select --install
 ```
 
-The project already includes the Apple-silicon TDLib library. CMake, gperf, and OpenSSL are needed only if that artifact is missing or you are rebuilding for a different architecture; the automated script reports the exact missing prerequisite.
+The project already includes the reviewed Apple-silicon TDLib static archive. A normal user build does not compile TDLib or require CMake, gperf, or a separate OpenSSL installation.
 
 ## 2. Run the synthetic automated checks
 
@@ -35,13 +35,13 @@ When checking an upgrade, `jobs.pre-provider.enc` must retain the exact legacy c
 
 The fixture UI exists only in the automated tests and the dedicated `npm run screenshot:dev` documentation mode. The normal Tauri app always requires a real Telegram connection.
 
-## 3. Verify the included TDLib library
+## 3. Verify the included TDLib engine
 
 ```sh
 npm run tdlib:ensure
 ```
 
-The command should report `TDLib 1.8.64 is ready` and a verified SHA-256. The normal `npm run tauri dev`, `npm run tauri build`, and `npm run check` commands invoke this check automatically. Retract also asks the loaded library for its version and refuses anything other than 1.8.64.
+The command should report `TDLib 1.8.64 is ready` after verifying the compressed static archive. The Rust build independently verifies both compressed and uncompressed SHA-256 values before linking it into Retract. The normal `npm run tauri dev`, `npm run tauri build`, and `npm run check` commands invoke this check automatically. Retract also asks the linked engine for its version and refuses anything other than 1.8.64.
 
 ## 4. Obtain Telegram application credentials
 
@@ -70,7 +70,7 @@ Retract keeps test-DC and production databases and job stores in separate app-da
 
 ### Optional environment overrides
 
-Normal local testing does not require `RETRACT_*` environment variables. They remain available for CI and backend development; any active override is listed in the Settings screen and wins over the corresponding saved value. `RETRACT_TDLIB_PATH` is an advanced override for testing a custom library, not a setup requirement. Remove an override from the launching shell if you want the UI or bundled value to take effect.
+Normal local testing does not require `RETRACT_*` environment variables. Telegram API credential and test-DC overrides remain available for CI and backend development; any active override is listed in the Settings screen and wins over the corresponding saved value. TDLib is statically linked and has no runtime path override.
 
 ## 6. Create an isolated verification group
 

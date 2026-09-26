@@ -931,7 +931,7 @@ fn scoped_plan_installs_one_fingerprint_before_review_and_persistence() {
         assert_eq!(plan.scope, f.context.active().scope);
         let legacy = f.repository.load().unwrap().plans.remove(0);
         assert_eq!(legacy.fingerprint, plan.fingerprint);
-        assert_eq!(plan.restart_policy, RestartPolicy::ResumeFrozenTargets);
+        assert_eq!(plan.restart_policy, RestartPolicy::RequiresNewReview);
         let recipe = TelegramExecutionRecipe::from_envelope(plan).unwrap();
         assert!(
             !serde_json::to_string(&recipe)
@@ -1371,7 +1371,7 @@ fn rate_wait_rechecks_binding_before_any_retry_call() {
 }
 
 #[test]
-fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scope() {
+fn recovery_requires_new_review_and_still_blocks_foreign_scope() {
     tauri::async_runtime::block_on(async {
         let f = fixture();
         let plan = selection(&f).await;
@@ -1401,8 +1401,11 @@ fn recovery_only_resumes_matching_authorized_frozen_jobs_and_blocks_foreign_scop
         )
         .unwrap();
         resumed.resume_incomplete().await;
-        assert_eq!(terminal(&resumed, queued.id).await.deleted, 1);
-        assert_eq!(f.gateway.delete_calls().await, vec![(-1001, vec![14])]);
+        let stopped = terminal(&resumed, queued.id).await;
+        assert_eq!(stopped.status, super::model::JobStatus::Failed);
+        assert_eq!(stopped.deleted, 0);
+        assert_eq!(stopped.error_codes, vec!["restart_requires_new_review"]);
+        assert!(f.gateway.delete_calls().await.is_empty());
         assert_eq!(
             plan.fingerprint,
             f.store.snapshot().unwrap().plans[0].fingerprint
@@ -1675,82 +1678,52 @@ fn preflight_transport_timeout_and_confirmed_rejection_are_not_ambiguous() {
 }
 
 #[test]
-fn recovery_preserves_absolute_retry_deadline_and_guards_the_remaining_wait() {
+fn recovery_clears_retry_deadline_and_requires_new_review_without_waiting() {
     tauri::async_runtime::block_on(async {
-        for outcome in ["resume", "cancel", "switch"] {
-            let f = fixture();
-            selection(&f).await;
-            let legacy = f.repository.load().unwrap().plans.remove(0);
-            let mut queued = normalize_job(
-                &f.context.active().scope,
-                &legacy,
-                &super::model::JobRecord::new(&legacy),
-                true,
-            )
+        let f = fixture();
+        selection(&f).await;
+        let legacy = f.repository.load().unwrap().plans.remove(0);
+        let mut queued = normalize_job(
+            &f.context.active().scope,
+            &legacy,
+            &super::model::JobRecord::new(&legacy),
+            true,
+        )
+        .unwrap();
+        let deadline = chrono::Utc::now() + chrono::Duration::seconds(2);
+        queued.retry_at = Some(deadline);
+        queued.diagnostics.push(retract_domain::SafeError {
+            code: retract_domain::ErrorCode::RateLimited,
+            retry_at: Some(deadline),
+        });
+        f.store
+            .transaction(|s| {
+                s.jobs.push(queued.clone());
+                Ok(())
+            })
             .unwrap();
-            let deadline = chrono::Utc::now() + chrono::Duration::seconds(2);
-            queued.retry_at = Some(deadline);
-            queued.diagnostics.push(retract_domain::SafeError {
-                code: retract_domain::ErrorCode::RateLimited,
-                retry_at: Some(deadline),
-            });
-            f.store
-                .transaction(|s| {
-                    s.jobs.push(queued.clone());
-                    Ok(())
-                })
-                .unwrap();
-            let repository = Arc::new(
-                FoundationTelegramRepository::new(
-                    f.store.clone(),
-                    f.context.active().scope.clone(),
-                )
+        let repository = Arc::new(
+            FoundationTelegramRepository::new(f.store.clone(), f.context.active().scope.clone())
                 .unwrap(),
-            );
-            let service = TelegramCleanup::new_scoped(
-                f.gateway.clone(),
-                f.gateway.clone(),
-                f.context.clone(),
-                repository,
-            )
-            .unwrap();
-            assert_eq!(
-                f.store.snapshot().unwrap().jobs[0].retry_at,
-                Some(deadline),
-                "constructor must not erase/rebase the deadline"
-            );
-            service.resume_incomplete().await;
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            assert!(chrono::Utc::now() < deadline);
-            assert!(f.gateway.current_reach_calls().await.is_empty());
-            assert!(f.gateway.delete_calls().await.is_empty());
-            assert_eq!(f.store.snapshot().unwrap().jobs[0].retry_at, Some(deadline));
-            match outcome {
-                "cancel" => {
-                    service.cancel_job(queued.id).await.unwrap();
-                }
-                "switch" => f.binding.invalidate(),
-                _ => {}
-            }
-            let stopped = terminal(&service, queued.id).await;
-            if outcome == "resume" {
-                assert!(chrono::Utc::now() >= deadline);
-                assert_eq!(stopped.deleted, 1);
-                assert_eq!(f.gateway.delete_calls().await, vec![(-1001, vec![14])]);
-            } else {
-                assert!(f.gateway.delete_calls().await.is_empty());
-                assert!(f.gateway.current_reach_calls().await.is_empty());
-                assert_eq!(
-                    stopped.status,
-                    if outcome == "cancel" {
-                        super::model::JobStatus::Cancelled
-                    } else {
-                        super::model::JobStatus::Failed
-                    }
-                );
-            }
-            assert!(f.store.snapshot().unwrap().jobs[0].retry_at.is_none());
-        }
+        );
+        let service = TelegramCleanup::new_scoped(
+            f.gateway.clone(),
+            f.gateway.clone(),
+            f.context.clone(),
+            repository,
+        )
+        .unwrap();
+        service.resume_incomplete().await;
+        let stopped = terminal(&service, queued.id).await;
+        assert_eq!(stopped.status, super::model::JobStatus::Failed);
+        assert_eq!(stopped.deleted, 0);
+        assert_eq!(
+            stopped.error_codes.last().unwrap(),
+            "restart_requires_new_review"
+        );
+        assert!(f.gateway.current_reach_calls().await.is_empty());
+        assert!(f.gateway.delete_calls().await.is_empty());
+        assert!(f.store.snapshot().unwrap().jobs[0].retry_at.is_none());
     });
 }
 

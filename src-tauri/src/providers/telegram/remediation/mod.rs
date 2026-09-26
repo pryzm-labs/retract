@@ -27,9 +27,73 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 const DIRECT_CHAT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct TelegramJobControl {
+    cancelled: AtomicBool,
+    mutation_gate: Mutex<()>,
+    finished: AtomicBool,
+    finished_notify: Notify,
+}
+
+impl TelegramJobControl {
+    fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.finished_notify.notify_waiters();
+    }
+
+    async fn wait_finished(&self) {
+        while !self.finished.load(Ordering::Acquire) {
+            let notified = self.finished_notify.notified();
+            if self.finished.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestMutationPause {
+    entered: AtomicBool,
+    entered_notify: Notify,
+    released: AtomicBool,
+    release_notify: Notify,
+}
+
+#[cfg(test)]
+impl TestMutationPause {
+    async fn wait_entered(&self) {
+        while !self.entered.load(Ordering::Acquire) {
+            let notified = self.entered_notify.notified();
+            if self.entered.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.release_notify.notify_waiters();
+    }
+
+    async fn pause(&self) {
+        self.entered.store(true, Ordering::Release);
+        self.entered_notify.notify_waiters();
+        while !self.released.load(Ordering::Acquire) {
+            let notified = self.release_notify.notified();
+            if self.released.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
 
 pub struct TelegramCleanup {
     read: Arc<dyn TelegramRead>,
@@ -37,12 +101,14 @@ pub struct TelegramCleanup {
     worker_owner: Weak<Self>,
     plans: RwLock<HashMap<Uuid, DeletionPlan>>,
     jobs: RwLock<HashMap<Uuid, JobRecord>>,
-    cancellation: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
+    cancellation: Mutex<HashMap<Uuid, Arc<TelegramJobControl>>>,
     system_grants: Mutex<crate::providers::lifecycle::GrantBook>,
     store: Arc<dyn TelegramStateRepository>,
     context: Option<Arc<EngineContext>>,
     transition_lock: Mutex<()>,
     persistence_failed: AtomicBool,
+    #[cfg(test)]
+    mutation_pause: Mutex<Option<Arc<TestMutationPause>>>,
 }
 
 use super::{

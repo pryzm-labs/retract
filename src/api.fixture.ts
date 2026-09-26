@@ -4,7 +4,7 @@ import { array, bool, choice, count, date, decodeContext, decodeRefs, invalid, n
 import { sameContext, uuid } from "./providers/identity";
 import type { ChatSummary, MessageSnapshot } from "./types";
 import { demoExecute, demoIntents, demoJobs, demoPrepareChatAction, demoPrepareOwnMessages, demoPrepareSelection, demoPrepareSenderAction, demoRefreshChats, demoReset, demoSearch, demoSnapshot, fixtureContext, fixtureRef } from "./demo";
-const connectionDefaults = { setupComplete: true, tdlibPath: "", detectedTdlibPath: null, bundledTdlibAvailable: false, apiId: null, apiHashConfigured: false, useTestDc: false, environmentOverrides: [], configurationError: null, supportedTdlibVersion: "1.8.64" };
+const connectionDefaults = { setupComplete: true, bundledTdlibAvailable: false, apiId: null, apiHashConfigured: false, useTestDc: false, environmentOverrides: [], configurationError: null, supportedTdlibVersion: "1.8.64" };
 export function fixtureConversation(chat: ChatSummary): ConversationRecord {
   return { id: chat.id, scope: chat.scope, resource: chat.ref.resource, kind: chat.kind === "channel" ? "broadcast" : chat.kind === "supergroup" || chat.kind === "basic_group" ? "group" : "direct", title: chat.title, parentId: null, participantCount: chat.memberCount ?? null, participants: [], evidence: "live", observedAt: "2026-08-15T18:00:00Z", providerMetadata: { schema: "telegram.conversation_metadata", version: 1, payload: { originalKind: chat.kind, archived: chat.archived, conversationState: chat.conversationState, capabilities: chat.capabilities, avatarSeed: chat.avatarSeed } } };
 }

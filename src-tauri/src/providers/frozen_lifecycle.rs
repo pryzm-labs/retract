@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 #[async_trait]
@@ -32,11 +32,16 @@ pub trait FrozenProviderIo: Send + Sync {
     ) -> Result<RemediationPlan, SafeError>;
     fn dirty_refs(&self, plan: &RemediationPlan) -> Result<Vec<ScopedResourceRef>, SafeError>;
     async fn owner_prompt(&self, plan: &RemediationPlan) -> Result<(), SafeError>;
-    async fn preflight(&self, target: &ScopedResourceRef) -> Result<bool, SafeError>;
+    async fn preflight(
+        &self,
+        target: &ScopedResourceRef,
+        cancelled: &AtomicBool,
+    ) -> Result<bool, SafeError>;
     async fn mutate(
         &self,
         plan: &RemediationPlan,
         targets: &[ScopedResourceRef],
+        cancelled: &AtomicBool,
     ) -> Result<(), SafeError>;
     async fn intents(
         &self,
@@ -53,9 +58,29 @@ struct Inner {
     repository: ScopedRepository,
     state: Mutex<Projection>,
     grants: Mutex<GrantBook>,
-    workers: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
+    workers: Mutex<HashMap<Uuid, Arc<WorkerControl>>>,
     failed: AtomicBool,
     stopped: AtomicBool,
+}
+
+#[derive(Default)]
+struct WorkerControl {
+    cancelled: AtomicBool,
+    mutation_gate: Mutex<()>,
+    finished: AtomicBool,
+    finished_notify: Notify,
+}
+
+impl WorkerControl {
+    async fn wait_finished(&self) {
+        loop {
+            let notified = self.finished_notify.notified();
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 impl FrozenLifecycle {
     pub fn new(
@@ -150,7 +175,8 @@ impl FrozenLifecycle {
         if workers.contains_key(&id) {
             return;
         }
-        workers.insert(id, Arc::new(AtomicBool::new(false)));
+        let control = Arc::new(WorkerControl::default());
+        workers.insert(id, control.clone());
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = this.run(id).await {
@@ -175,6 +201,8 @@ impl FrozenLifecycle {
                     })
                     .await;
             }
+            control.finished.store(true, Ordering::Release);
+            control.finished_notify.notify_waiters();
             this.0.workers.lock().await.remove(&id);
         });
     }
@@ -350,20 +378,46 @@ impl ReviewedLifecycle for FrozenLifecycle {
         id: Uuid,
     ) -> Result<ScopedJobRecord, SafeError> {
         self.check(context)?;
-        let workers = self.0.workers.lock().await;
-        workers
+        let control = self
+            .0
+            .workers
+            .lock()
+            .await
             .get(&id)
-            .ok_or_else(|| safe(ErrorCode::NotFound))?
-            .store(true, Ordering::Release);
-        self.0
+            .cloned()
+            .ok_or_else(|| safe(ErrorCode::NotFound))?;
+        let cancelled = self
+            .transition(|state| {
+                let job = state
+                    .1
+                    .iter_mut()
+                    .find(|job| job.id == id)
+                    .ok_or_else(|| safe(ErrorCode::NotFound))?;
+                job.status = JobStatus::Cancelled;
+                job.retry_at = None;
+                job.updated_at = Utc::now();
+                Ok(job.clone())
+            })
+            .await?;
+        // Signal only after the terminal cancellation is durable. If the
+        // commit fails, the caller sees failure and the worker is left alone.
+        control.cancelled.store(true, Ordering::Release);
+        // Once cancellation is visible, synchronize with mutation initiation.
+        // A provider call that already held this guard may settle, but no
+        // later call can pass its pre-send cancellation check.
+        let mutation_guard = control.mutation_gate.lock().await;
+        drop(mutation_guard);
+        control.wait_finished().await;
+        Ok(self
+            .0
             .state
             .lock()
             .await
             .1
             .iter()
-            .find(|j| j.id == id)
+            .find(|job| job.id == id)
             .cloned()
-            .ok_or_else(|| safe(ErrorCode::NotFound))
+            .unwrap_or(cancelled))
     }
     async fn recover(&self, context: &ActiveContext) -> Result<(), SafeError> {
         self.check(context)?;
@@ -380,8 +434,8 @@ impl ReviewedLifecycle for FrozenLifecycle {
     }
     async fn stop(&self) {
         self.0.stopped.store(true, Ordering::Release);
-        for token in self.0.workers.lock().await.values() {
-            token.store(true, Ordering::Release);
+        for control in self.0.workers.lock().await.values() {
+            control.cancelled.store(true, Ordering::Release);
         }
         while !self.0.workers.lock().await.is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -396,6 +450,17 @@ struct Driver<'a> {
     plan: &'a RemediationPlan,
 }
 impl Driver<'_> {
+    async fn worker_control(&self) -> Result<Arc<WorkerControl>, SafeError> {
+        self.lifecycle
+            .0
+            .workers
+            .lock()
+            .await
+            .get(&self.id)
+            .cloned()
+            .ok_or_else(|| safe(ErrorCode::StaleContext))
+    }
+
     async fn wait_until(&self, deadline: chrono::DateTime<Utc>) -> Result<bool, SafeError> {
         loop {
             if self.cancelled().await? {
@@ -443,7 +508,7 @@ impl FrozenBatchDriver for Driver<'_> {
             .lock()
             .await
             .get(&self.id)
-            .is_none_or(|token| token.load(Ordering::Acquire));
+            .is_none_or(|control| control.cancelled.load(Ordering::Acquire));
         if cancelled {
             self.lifecycle
                 .transition(|s| {
@@ -459,13 +524,29 @@ impl FrozenBatchDriver for Driver<'_> {
     }
     async fn reach(&self, _: &Self::Batch, target: &Self::Target) -> Result<bool, SafeError> {
         self.lifecycle.check(&self.lifecycle.0.context)?;
-        let result = self.lifecycle.0.io.preflight(target).await?;
+        let control = self.worker_control().await?;
+        let result = self
+            .lifecycle
+            .0
+            .io
+            .preflight(target, &control.cancelled)
+            .await?;
         self.lifecycle.check(&self.lifecycle.0.context)?;
         Ok(result)
     }
     async fn mutate(&self, _: &Self::Batch, targets: &[Self::Target]) -> Result<(), SafeError> {
         self.lifecycle.check(&self.lifecycle.0.context)?;
-        let result = self.lifecycle.0.io.mutate(self.plan, targets).await;
+        let control = self.worker_control().await?;
+        let _mutation_guard = control.mutation_gate.lock().await;
+        if control.cancelled.load(Ordering::Acquire) {
+            return Err(safe(ErrorCode::StaleContext));
+        }
+        let result = self
+            .lifecycle
+            .0
+            .io
+            .mutate(self.plan, targets, &control.cancelled)
+            .await;
         if self.lifecycle.check(&self.lifecycle.0.context).is_err() {
             return Err(safe(ErrorCode::AmbiguousOutcome));
         }
@@ -522,6 +603,7 @@ impl FrozenBatchDriver for Driver<'_> {
         self.lifecycle
             .transition(|s| {
                 let j = s.1.iter_mut().find(|j| j.id == self.id).unwrap();
+                let cancelled = j.status == JobStatus::Cancelled;
                 j.next_batch = next as u64;
                 j.counters.skipped += skipped as u64;
                 j.counters.deleted += deleted as u64;
@@ -531,7 +613,7 @@ impl FrozenBatchDriver for Driver<'_> {
                 if let Some(error) = error {
                     j.diagnostics.push(error.clone());
                 }
-                if fatal {
+                if fatal && !cancelled {
                     j.status = if j.counters.deleted > 0 {
                         JobStatus::Partial
                     } else {
