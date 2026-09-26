@@ -40,7 +40,7 @@
 - Produces `secure_store::{load_discord_credential, save_discord_credential, forget_discord_credential}`.
 
 - [ ] **Step 1: Write failing vault tests** for frozen v1/v2 compatibility, one bounded namespaced Discord credential, opt-in save, exact account/token round trip, forget preserving all Telegram/archive keys, unknown-entry rejection, uncertain-write reconciliation and one-read denial caching.
-- [ ] **Step 2: Run the focused vault tests** with `CARGO_TARGET_DIR=/Users/aaron/dev/tg-cleaner/src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml secure_store::vault_tests`; confirm failure because the Discord entry APIs do not exist.
+- [ ] **Step 2: Run the focused vault tests** with `CARGO_TARGET_DIR=src-tauri/target cargo test --locked --manifest-path src-tauri/Cargo.toml secure_store::vault_tests`; confirm failure because the Discord entry APIs do not exist.
 - [ ] **Step 3: Implement vault v3 encoding** with closed entry names, length-prefixed variable credential bytes, strict decimal account/token bounds and zeroization; preserve v1/v2 bytes unless a Discord credential mutation is explicitly committed.
 - [ ] **Step 4: Write failing session tests** proving whitespace normalization, control/size/Bot/Bearer rejection, `GET /users/@me` identity parsing, archive-owner mismatch rejection, no token in Debug/errors/serialized status, replacement zeroization ownership, invalid-session forget and shutdown.
 - [ ] **Step 5: Implement the session owner and injected HTTP identity client** using `reqwest` with rustls, a 15-second timeout, fixed safe errors and no response-body propagation.

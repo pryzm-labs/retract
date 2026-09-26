@@ -42,6 +42,8 @@ The native macOS job now includes parser tests/fmt/Clippy and the Discord backen
 
 ### Discord live acceptance
 
+Exploratory local testing completed before this revision exercised a real private Data Package import, reopening and selecting the imported source, grouped Discord navigation, manual token-based account connection and remembered-session restoration. This establishes useful UX feedback only: no credential, message content, package path or private fixture is retained in the repository, and the run did not complete the destructive, browser-capture, rate-limit, second-participant or full Keychain acceptance matrix below.
+
 - Import a current Data Package through the native picker; confirm the path and raw ZIP bytes never appear in frontend state or logs, progress counters advance, cancellation stops uncommitted work, and the imported source is searchable without Discord authentication.
 - Test detected Chromium-family and Firefox providers separately. Each must open a visible fresh temporary profile, bind automation to loopback, never touch the existing browser profile, close on success/cancel/timeout, and complete best-effort profile cleanup. Inspect and record any cleanup failure because a retained temporary profile may contain a reusable Discord session. Safari or any unsupported browser must still have the manual-entry path.
 - For manual entry, confirm the field is password-masked, autocomplete/spellcheck are off, the value clears immediately on submit and unmount, and neither success nor failure responses echo it.
@@ -79,6 +81,7 @@ Create disposable test-DC users covering: DM peer, basic-group owner, supergroup
 - Privacy scan finds each supported category in deterministic fixtures and labels the category without writing matched values to job state.
 - Privacy scan respects chat, sender, date, content-kind, and pinned-message filters.
 - Deep account scans paginate past 100 messages per chat, deduplicate page boundaries, and include secret chats.
+- Privacy scans continue when TDLib omits all converted messages from a page but supplies an unseen nonzero continuation cursor; inconsistent approximate `total_count` values and unsupported link-preview metadata do not suppress formatted-text findings.
 - The UI states that privacy detection is heuristic and does not OCR image pixels or inspect external copies.
 - **No reply sent** includes a normal DM/group only when an account-sender search finds no outgoing message; ambiguous admin and secret-chat cases are excluded.
 - **Empty** includes a chat only after a non-local `getChatHistory` probe returns no messages.
@@ -156,7 +159,8 @@ For every accepted operation, verify from both participating accounts after TDLi
 ## Production exit criteria
 
 - Two-person review of evidence for every destructive and confirmation case.
-- No unresolved critical/high security findings.
+- The 2026-09-26 delegated Deep Security Scan of baseline `2e71a25` reported 1 high-, 8 medium- and 10 low-severity findings. Release is blocked until the high finding is fixed and verified and every remaining finding is fixed, rejected with source-backed evidence, or explicitly accepted with a documented rationale.
+- No unresolved critical/high security findings and no untriaged medium/low findings.
 - TDLib binary digest matches the reviewed artifact and is bundled/ad-hoc-signed with the preview app.
 - Privacy copy and support documentation state the residual-copy limitations.
 - Preserve the prior source/build for diagnosis, but do not automatically downgrade or restore job state: an older binary cannot read active v3. The retained migration backup does not restore Telegram-accepted deletions and must not be replayed as a rollback procedure.

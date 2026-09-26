@@ -1,12 +1,12 @@
 # Security policy
 
-Retract performs irreversible operations on private Telegram data. Please treat security and deletion-scope bugs as sensitive.
+Retract performs irreversible operations on private Telegram and Discord data. Please treat security, credential-handling and deletion-scope bugs as sensitive.
 
 ## Reporting a vulnerability
 
 Use [GitHub private vulnerability reporting](https://github.com/Pryzm-Labs/retract/security/advisories/new). Do not open a public issue for a vulnerability before it is resolved.
 
-Never include Telegram API credentials, authorization codes, session files, TDLib databases, chat exports, unredacted conversations, or screenshots of private conversations in any report. Create a minimal synthetic reproduction and redact device usernames and local paths.
+Never include Telegram API credentials, authorization codes, session files, TDLib databases, Discord user-session tokens, Discord Data Packages, Retract archive databases or keys, chat exports, unredacted conversations, or screenshots of private conversations in any report. Create a minimal synthetic reproduction and redact device usernames and local paths.
 
 Include the Retract version or commit, macOS version and architecture, expected deletion scope, observed result, and the smallest safe reproduction you can provide. We will acknowledge a report when maintainers are available; this preview project does not promise a fixed response SLA.
 
@@ -16,4 +16,4 @@ The latest tagged preview is the only supported version. Retract v0.1.x targets 
 
 ## Security boundaries
 
-Retract can request only the operations Telegram currently authorizes for the signed-in account. It cannot erase forwarded content, exports, notification history, screenshots, backups, or copies held outside Telegram. See the [threat model](docs/THREAT_MODEL.md) for the detailed boundaries and residual risks.
+Retract can request only the operations Telegram or Discord currently authorizes for the connected account. Discord archive observations are local evidence, not independent proof of live ownership or authority. Retract cannot erase forwarded content, exports, notification history, screenshots, backups, or copies held outside the provider. See the [threat model](docs/THREAT_MODEL.md) for the detailed boundaries and residual risks.

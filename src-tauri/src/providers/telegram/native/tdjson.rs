@@ -23,7 +23,7 @@ type ReceiveFn = unsafe extern "C" fn(*mut c_void, c_double) -> *const c_char;
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
 type SetLogVerbosityFn = unsafe extern "C" fn(i32);
 
-const DEFAULT_TDLIB_LOG_VERBOSITY: i32 = 1;
+const DEFAULT_TDLIB_LOG_VERBOSITY: i32 = 0;
 const RECEIVE_TIMEOUT_SECONDS: c_double = 1.0;
 
 /// A narrow, owned wrapper around TDLib's legacy per-client JSON C interface.
@@ -448,11 +448,11 @@ mod tests {
 
     #[test]
     fn keeps_tdlib_quiet_unless_a_valid_developer_override_is_set() {
-        assert_eq!(tdlib_log_verbosity(None), 1);
+        assert_eq!(tdlib_log_verbosity(None), 0);
         assert_eq!(tdlib_log_verbosity(Some("4")), 4);
-        assert_eq!(tdlib_log_verbosity(Some("-1")), 1);
-        assert_eq!(tdlib_log_verbosity(Some("6")), 1);
-        assert_eq!(tdlib_log_verbosity(Some("verbose")), 1);
+        assert_eq!(tdlib_log_verbosity(Some("-1")), 0);
+        assert_eq!(tdlib_log_verbosity(Some("6")), 0);
+        assert_eq!(tdlib_log_verbosity(Some("verbose")), 0);
     }
 
     #[test]
