@@ -11,9 +11,17 @@ All notable changes to Retract are documented here. The project follows [Semanti
 - A single-writer version-3 encrypted job store with exact legacy ciphertext preservation in `jobs.pre-provider.enc`; unfinished legacy work requires new review and the backup is never restored automatically.
 - Backend-described ordered cleanup effects and accessible complete job outcomes, including skipped, failed, uncertain, retry and blocked states.
 - Synthetic lifecycle, migration, interprocess-lock and stale-response regression coverage.
-- A lazy, bounded SQLCipher archive backend with scoped import/retry/query/removal ports, cancellation and application-lifetime shutdown ownership. No real importer, automatic Telegram indexing, Discord/X support or archive destructive IPC is enabled.
+- A lazy, bounded SQLCipher archive backend with scoped Discord Data Package import, retry, query, source removal, cancellation and application-lifetime shutdown ownership. Telegram is not automatically indexed and providers other than Telegram and Discord are not enabled.
 - A shared fail-fast macOS credential lease, lazy archive-key vault upgrade and injected process/lifecycle tests. All older Retract copies must quit before first archive use; vault-format downgrades are unsupported.
 - An opt-in 100,000-item synthetic same-worker storage benchmark and complete synthetic archive/injected-vault native pre-package gates.
+- Discord source selection, archive search and privacy scanning, grouped direct-message/server navigation, import recovery and remembered-source restoration.
+- Account-bound Discord authentication through an isolated detected browser or browser-neutral manual token entry, with memory-only sessions by default and optional macOS Keychain persistence.
+- Immutable exact-message Discord cleanup plans with typed confirmation, device-owner authorization, bounded pacing/retries and content-free durable outcomes.
+
+### Fixed
+
+- TDLib native logging now defaults to verbosity `0`, preventing its internal error logger from printing private message-derived URLs unless a developer explicitly opts into native diagnostics with `RETRACT_TDLIB_LOG_VERBOSITY`.
+- Telegram privacy scans now follow a valid continuation cursor after TDLib omits every message from a converted page, ignore approximate `total_count` values, and stop on repeated cursors or an excessive page count.
 
 ## [0.1.0] - 2026-08-20
 

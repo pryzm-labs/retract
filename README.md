@@ -95,6 +95,9 @@ The API hash, TDLib database key, and encrypted job-store key live in one versio
 
 ### Import and clean Discord history
 
+> [!WARNING]
+> Discord cleanup is experimental and pre-release. Archive import and local search are non-destructive, but live user-token automation is unsupported by Discord and the complete native/live acceptance matrix has not passed. Use only a disposable owner-authored message for testing, verify the exact account and target, and assume Discord may restrict the account.
+
 First request a package in Discord under **User Settings → Data & Privacy → Request your data**. Discord says package generation can take up to 30 days; its [Data Package guide](https://support.discord.com/hc/en-us/articles/360004957991-Your-Discord-Data-Package) explains the contents and current request flow.
 
 1. In Retract, choose **Import Discord package** and select the ZIP. Do not extract it first.

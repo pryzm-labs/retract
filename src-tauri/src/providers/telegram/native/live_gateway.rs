@@ -43,6 +43,7 @@ pub const SUPPORTED_TDLIB_VERSION: &str = "1.8.64";
 const CHAT_SUMMARY_CONCURRENCY: usize = 12;
 const CHAT_CLEANUP_MESSAGE_LIMIT: usize = 100_001;
 const MESSAGE_MAPPING_CONCURRENCY: usize = 12;
+const PRIVACY_SEARCH_MAX_PAGES_PER_CHAT: usize = 100_000;
 const CATALOG_IDLE: u8 = 0;
 const CATALOG_DISCOVERING: u8 = 1;
 const CATALOG_LOADING: u8 = 2;
@@ -1466,6 +1467,7 @@ impl LiveGateway {
             .collect();
         let server_filter = search_filter(&request.content_kinds);
         let mut matches = Vec::new();
+        let mut matched_message_ids = HashSet::new();
 
         for chat_id in chat_ids {
             if self.search_generation.load(Ordering::Acquire) != generation {
@@ -1479,9 +1481,15 @@ impl LiveGateway {
                 continue;
             }
             let mut from_message_id = 0_i64;
+            let mut seen_cursors = HashSet::new();
+            let mut page_count = 0_usize;
             loop {
                 if self.search_generation.load(Ordering::Acquire) != generation {
                     return Ok(Vec::new());
+                }
+                page_count += 1;
+                if page_count > PRIVACY_SEARCH_MAX_PAGES_PER_CHAT {
+                    return Err(AppError::Gateway("TDLIB_SEARCH_PAGE_LIMIT".into()));
                 }
                 let response = match self
                     .client
@@ -1507,16 +1515,14 @@ impl LiveGateway {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                if raw_messages.is_empty() {
-                    break;
-                }
-                let mut saw_new_message = false;
                 for raw in &raw_messages {
                     let message_id = value_i64(raw.get("id")).unwrap_or_default();
                     if message_id == 0 || (from_message_id != 0 && message_id == from_message_id) {
                         continue;
                     }
-                    saw_new_message = true;
+                    if matched_message_ids.contains(&(chat_id, message_id)) {
+                        continue;
+                    }
                     let is_outgoing = raw
                         .get("is_outgoing")
                         .and_then(Value::as_bool)
@@ -1560,24 +1566,32 @@ impl LiveGateway {
                     if !query_tokens.iter().all(|token| searchable.contains(token)) {
                         continue;
                     }
+                    matched_message_ids.insert((chat_id, message_id));
                     message.privacy_findings = findings;
                     matches.push(message);
                     if matches.len() > request.limit.saturating_mul(2) {
                         matches.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
                         matches.truncate(request.limit);
+                        matched_message_ids.retain(|(chat_id, message_id)| {
+                            matches.iter().any(|message| {
+                                message.chat_id == *chat_id && message.message_id == *message_id
+                            })
+                        });
                     }
                 }
                 let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-                if next == 0 || next == from_message_id || !saw_new_message {
+                if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
                     break;
                 }
-                if request.min_date.is_some_and(|minimum| {
-                    raw_messages.iter().all(|message| {
-                        value_i64(message.get("date"))
-                            .and_then(|date| DateTime::from_timestamp(date, 0))
-                            .is_some_and(|date| date < minimum)
+                if !raw_messages.is_empty()
+                    && request.min_date.is_some_and(|minimum| {
+                        raw_messages.iter().all(|message| {
+                            value_i64(message.get("date"))
+                                .and_then(|date| DateTime::from_timestamp(date, 0))
+                                .is_some_and(|date| date < minimum)
+                        })
                     })
-                }) {
+                {
                     break;
                 }
                 from_message_id = next;
@@ -4193,6 +4207,123 @@ mod tests {
                     .filter(|trace| trace.kind == "searchSecretMessages")
                     .count(),
                 2
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn privacy_search_follows_a_cursor_after_tdlib_omits_an_invalid_preview_page() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            gateway
+                .chat_kinds
+                .write()
+                .await
+                .insert(1101, ChatKind::Direct);
+
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 0,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "total_count": 19,
+                    "messages": [],
+                    "next_from_message_id": 7030
+                }),
+            );
+
+            let mut privacy_message = raw_text_message(
+                1101,
+                7031,
+                1_700_000_031,
+                false,
+                false,
+                4401,
+                "Synthetic contact person@example.invalid",
+            );
+            privacy_message["content"]["link_preview"] = json!({
+                "@type": "linkPreview",
+                "url": "https://example.invalid/private?token=synthetic",
+                "type": { "@type": "linkPreviewTypeUnsupported" }
+            });
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 7030,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "total_count": 0,
+                    "messages": [privacy_message.clone()],
+                    "next_from_message_id": 7020
+                }),
+            );
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages",
+                    "chat_id": 1101,
+                    "topic_id": null,
+                    "query": "",
+                    "sender_id": null,
+                    "from_message_id": 7020,
+                    "offset": 0,
+                    "limit": 100,
+                    "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "total_count": 0,
+                    "messages": [privacy_message],
+                    "next_from_message_id": 0
+                }),
+            );
+            script.respond(
+                json!({ "@type": "getUser", "user_id": 4401 }),
+                json!({
+                    "@type": "user",
+                    "id": 4401,
+                    "first_name": "Synthetic",
+                    "last_name": "Sender"
+                }),
+            );
+            respond_with_reach(&script, 1101, 7031, DeletionReach::Everyone);
+
+            let mut request = search_request("");
+            request.chat_ids = vec![1101];
+            request.privacy_scan = true;
+            let matches = gateway.search(&request).await.unwrap();
+
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].message_id, 7031);
+            assert!(
+                matches[0]
+                    .privacy_findings
+                    .contains(&cleaner_domain::SensitiveDataKind::EmailAddress)
+            );
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "searchChatMessages")
+                    .count(),
+                3
             );
             script.assert_drained();
         });

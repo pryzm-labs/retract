@@ -1,6 +1,6 @@
 # Chat History Cleaner — Product and Engineering Plan
 
-Status: provider foundation and the direct Telegram provider migration were implemented by 2026-09-06. Both full Linux `arm64` and `amd64` gates passed on reviewed commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`; independent whole-branch review of `0d799b0..c7f2f5f` found no Critical or Important issues. The Discord archive importer, source-selection/search UI, account-bound session handling, browser-neutral/manual credential flow, and exact archive-message remediation are implemented on the current feature branch. Native macOS CI, Keychain/LocalAuthentication, browser launch, VoiceOver, Telegram test-DC, and separately authorized disposable Discord gates remain tracked separately. Synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is release-validated.
+Status: provider foundation and the direct Telegram provider migration were implemented by 2026-09-06. Both full Linux `arm64` and `amd64` gates passed on reviewed commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`; independent whole-branch review of `0d799b0..c7f2f5f` found no Critical or Important issues. Discord archive import, recovery, source selection/search, grouped conversation navigation, account-bound browser-neutral/manual sessions, optional remembered credentials and exact archive-message remediation are merged through baseline `2e71a25`. A delegated Deep Security Scan of that baseline completed on 2026-09-26 with 1 high-, 8 medium- and 10 low-severity findings still unresolved; release remains blocked on their disposition and the gates below. Native macOS CI, final Keychain/LocalAuthentication and browser validation, VoiceOver, Telegram test-DC, and separately authorized disposable Discord deletion remain tracked separately. Synthetic fixtures are restricted to automated tests and documentation screenshots. A pinned Apple-silicon TDLib 1.8.64 artifact is bundled by the build. Destructive release remains gated on `docs/TEST_PLAN.md`. The roadmap below also contains future work, not a claim that every proposed feature is release-validated.
 
 ## 1. Product direction
 
@@ -319,18 +319,22 @@ Avoid features that create hidden or automatic behavior: silent background delet
 ### Tracked Discord backend stage
 
 - [x] Implement the bounded, versioned Discord archive reader, normalized records, encrypted import migration, owned coordinator, replay, search/findings, restart and local-source removal. Acceptance uses synthetic inputs and the opt-in generated resource benchmark.
-- [ ] Complete the independent whole-branch review and native macOS gate for the final revision.
+- [x] Complete a delegated Deep Security Scan of baseline `2e71a25`; its 19 findings remain unresolved release work and this checkbox does not approve release.
+- [ ] Run the native macOS gate on the final reviewed revision.
 - [x] Build Discord source selection, encrypted import/search, account-bound browser/manual authentication, review and exact owner-message remediation UI with synthetic automated coverage.
-- [ ] Perform separately authorized real private-export validation. Publication, merge and release remain separate decisions.
+- [x] Exercise a real private export locally through import, source switching and manual account connection. This exploratory result did not validate remote deletion, browser capture, Keychain persistence or the full acceptance matrix.
+- [ ] Perform the separately authorized harmless exact-message deletion and complete the remaining real private-export acceptance matrix. Publication, merge and release remain separate decisions.
 
-### Deferred investigation — privacy scan TDLib diagnostics (reported 2026-09-07)
+### Privacy scan TDLib diagnostics — resolved in current development work
 
-- [ ] Investigate console diagnostics observed after clicking **Privacy scan**. This is a recorded report, not a confirmed root cause or a request to begin implementation now.
+- [x] Investigate console diagnostics observed after clicking **Privacy scan** and add synthetic regression coverage.
   - `WebPagesManager.cpp`, under `SearchChatMessagesRequest`: `Receive wrong document`, `Receive photo without photo`, and `Receive link preview of unsupported type document`.
   - `MessagesManager.cpp`: `Receive 19 valid messages out of 18 in 19 messages`.
-  - Determine whether these diagnostics affect scan completeness, pagination/deduplication, progress, or performance, versus being recoverable link-preview parsing issues. Do not assume the scan succeeded or lost messages from the log text alone.
-  - Investigate native TDLib logging separately from application diagnostics: the supplied console output contained full message URLs and query parameters. Preserve useful failure reporting without exposing private message-derived URLs or merely hiding a scan failure.
-  - Reproduce with synthetic malformed/unsupported preview fixtures and inconsistent result counts; verify text/caption scanning, bounded pagination, cancellation, and honest partial-result reporting. Any real-account reproduction requires separate authorization.
+  - Root cause: Retract configured TDLib's process-wide native logger at error verbosity by default. TDLib's link-preview error paths can interpolate complete message URLs and query parameters directly into stderr, outside Retract's bounded application diagnostics.
+  - Fix: production now defaults TDLib native verbosity to `0`. Explicit developer values `0` through `5` remain available through `RETRACT_TDLIB_LOG_VERBOSITY`; nonzero values are opt-in and may expose message-derived content.
+  - TDLib documents `total_count` as approximate, and Retract does not use it to decide which messages to scan. Malformed or unsupported preview metadata remains inert while formatted message text and captions are inspected.
+  - A separate completeness bug was confirmed: TDLib can omit invalid converted messages while returning a nonzero continuation cursor. Privacy scanning now follows unseen cursors across empty pages, rejects cursor cycles and enforces a generous per-chat page ceiling.
+  - Synthetic coverage uses malformed/unsupported preview metadata, inconsistent counts and an empty page with a valid continuation cursor. Packaged macOS stderr behavior remains part of the final native release gate; real-account reproduction still requires separate authorization.
   - Original URLs, usernames, tracking parameters, timestamps, and account/session identifiers are intentionally not retained in this public-repository report.
 
 ### Phase 0 — feasibility and compliance spike (1–2 weeks)
