@@ -68,6 +68,7 @@ impl TelegramCleanup {
             context: None,
             transition_lock: Mutex::new(()),
             persistence_failed: AtomicBool::new(false),
+            mutation_pause: Mutex::new(None),
         }))
     }
 
@@ -103,6 +104,8 @@ impl TelegramCleanup {
             context: Some(context),
             transition_lock: Mutex::new(()),
             persistence_failed: AtomicBool::new(false),
+            #[cfg(test)]
+            mutation_pause: Mutex::new(None),
         }))
     }
 
@@ -127,14 +130,16 @@ impl TelegramCleanup {
         !self.cancellation.lock().await.is_empty()
     }
     pub(crate) async fn stop_workers(&self) {
-        for token in self.cancellation.lock().await.values() {
-            token.store(true, Ordering::Release);
+        let controls: Vec<_> = self.cancellation.lock().await.values().cloned().collect();
+        for control in &controls {
+            control.cancelled.store(true, Ordering::Release);
         }
-        loop {
-            if self.cancellation.lock().await.is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        for control in &controls {
+            let mutation_guard = control.mutation_gate.lock().await;
+            drop(mutation_guard);
+        }
+        for control in controls {
+            control.wait_finished().await;
         }
         self.system_grants.lock().await.clear();
     }
@@ -186,21 +191,42 @@ impl TelegramCleanup {
     }
 
     pub(crate) async fn cancel_job(&self, job_id: Uuid) -> Result<JobRecord, AppError> {
-        let jobs = self.jobs.read().await;
-        let job = jobs.get(&job_id).cloned().ok_or(AppError::NotFound)?;
-        if job.status.is_terminal() {
-            return Err(AppError::JobAlreadyTerminal);
-        }
-        drop(jobs);
-        let cancellation = self
+        let control = self
             .cancellation
             .lock()
             .await
             .get(&job_id)
             .cloned()
             .ok_or(AppError::StateUnavailable)?;
-        cancellation.store(true, Ordering::Release);
-        Ok(job)
+        // Cancellation is a durable state transition before it can influence
+        // the worker. If persistence fails, no signal is sent and the caller
+        // receives the storage failure instead of a false cancellation ack.
+        self.transition(|_, jobs| {
+            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+            if job.status.is_terminal() {
+                return Err(AppError::JobAlreadyTerminal);
+            }
+            job.status = JobStatus::Cancelled;
+            job.clear_retry();
+            job.updated_at = Utc::now();
+            Ok(())
+        })
+        .await?;
+
+        control.cancelled.store(true, Ordering::Release);
+        // A sender that entered before the signal owns this gate until its
+        // native request has acknowledged. A sender queued behind us rechecks
+        // the token while holding the gate and therefore cannot start.
+        let mutation_guard = control.mutation_gate.lock().await;
+        drop(mutation_guard);
+        control.wait_finished().await;
+
+        self.jobs
+            .read()
+            .await
+            .get(&job_id)
+            .cloned()
+            .ok_or(AppError::NotFound)
     }
 
     pub(crate) async fn legacy_jobs(&self) -> Vec<JobRecord> {

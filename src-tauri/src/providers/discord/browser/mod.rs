@@ -53,7 +53,14 @@ pub(crate) struct BrowserTokenCapture;
 
 impl BrowserTokenCapture {
     pub(crate) fn discover() -> Vec<BrowserDescriptor> {
-        discovery::discover()
+        if cfg!(any(debug_assertions, test)) {
+            discovery::discover()
+        } else {
+            // Reusable Discord user tokens cannot be captured safely through a
+            // generic browser-debug endpoint. Release builds expose only the
+            // explicit one-way manual entry flow.
+            Vec::new()
+        }
     }
 
     pub(crate) async fn capture(
@@ -64,19 +71,31 @@ impl BrowserTokenCapture {
         cancellation: &CaptureCancellation,
         progress: impl Fn(CaptureProgress),
     ) -> Result<DiscordSessionStatus, AppError> {
+        if !cfg!(any(debug_assertions, test)) {
+            return Err(AppError::InvalidRequest(
+                "Discord browser token capture is unavailable in release builds; use manual token entry"
+                    .into(),
+            ));
+        }
+        let attempt = session.begin_install(expected_account_id)?;
         progress(CaptureProgress::Launching);
         let token = match browser.family {
             BrowserFamily::ChromiumCdp => {
-                chromium::capture(&browser.executable, cancellation, &progress).await?
+                chromium::capture(&browser.executable, cancellation, &progress).await
             }
             BrowserFamily::FirefoxBidi => {
-                firefox::capture(&browser.executable, cancellation, &progress).await?
+                firefox::capture(&browser.executable, cancellation, &progress).await
+            }
+        };
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => {
+                session.abandon_install(&attempt);
+                return Err(error);
             }
         };
         progress(CaptureProgress::Verifying);
-        let status = session
-            .install_captured(expected_account_id, token, remember)
-            .await?;
+        let status = session.install_captured(attempt, token, remember).await?;
         progress(CaptureProgress::Complete);
         Ok(status)
     }

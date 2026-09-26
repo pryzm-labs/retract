@@ -43,14 +43,13 @@ pub const SUPPORTED_TDLIB_VERSION: &str = "1.8.64";
 const CHAT_SUMMARY_CONCURRENCY: usize = 12;
 const CHAT_CLEANUP_MESSAGE_LIMIT: usize = 100_001;
 const MESSAGE_MAPPING_CONCURRENCY: usize = 12;
-const PRIVACY_SEARCH_MAX_PAGES_PER_CHAT: usize = 100_000;
+const TDLIB_SEARCH_MAX_PAGES: usize = 2_000;
 const CATALOG_IDLE: u8 = 0;
 const CATALOG_DISCOVERING: u8 = 1;
 const CATALOG_LOADING: u8 = 2;
 const CATALOG_READY: u8 = 3;
 
 pub struct LiveGatewayConfig {
-    pub library_path: PathBuf,
     pub api_id: i32,
     pub api_hash: Zeroizing<String>,
     pub data_directory: PathBuf,
@@ -60,7 +59,6 @@ pub struct LiveGatewayConfig {
 
 impl LiveGatewayConfig {
     pub fn new(
-        library_path: PathBuf,
         api_id: i32,
         api_hash: Zeroizing<String>,
         use_test_dc: bool,
@@ -68,7 +66,6 @@ impl LiveGatewayConfig {
         database_key: [u8; 32],
     ) -> Self {
         Self {
-            library_path,
             api_id,
             api_hash,
             data_directory,
@@ -131,7 +128,7 @@ impl LiveGateway {
     ) -> Result<Arc<Self>, AppError> {
         std::fs::create_dir_all(config.data_directory.join("database"))?;
         std::fs::create_dir_all(config.data_directory.join("files"))?;
-        let client = TdJsonClient::load(&config.library_path)?;
+        let client = TdJsonClient::load()?;
         let gateway = Arc::new(Self {
             client,
             config,
@@ -737,10 +734,7 @@ impl LiveGateway {
         self.catalog_phase.store(CATALOG_LOADING, Ordering::Release);
         let mut summaries = stream::iter(ids)
             .map(|id| async move {
-                let chat = self
-                    .client
-                    .request(json!({ "@type": "getChat", "chat_id": id }))
-                    .await?;
+                let chat = self.request_chat(id).await?;
                 let summary = self.map_chat(&chat).await?;
                 self.catalog_processed.fetch_add(1, Ordering::AcqRel);
                 Ok::<ChatSummary, AppError>(summary)
@@ -870,11 +864,7 @@ impl LiveGateway {
         let retry_ids = ids.clone();
         let updates = stream::iter(ids)
             .map(|chat_id| async move {
-                let chat = match self
-                    .client
-                    .request(json!({ "@type": "getChat", "chat_id": chat_id }))
-                    .await
-                {
+                let chat = match self.request_chat(chat_id).await {
                     Ok(chat) => chat,
                     Err(AppError::Gateway(message)) if message.starts_with("404 ") => {
                         return Ok((chat_id, None));
@@ -901,6 +891,15 @@ impl LiveGateway {
 
         self.apply_chat_summary_updates(updates).await;
         Ok(())
+    }
+
+    async fn request_chat(&self, chat_id: i64) -> Result<Value, AppError> {
+        let chat = self
+            .client
+            .request(json!({ "@type": "getChat", "chat_id": chat_id }))
+            .await?;
+        require_matching_response_id(&chat, chat_id, "getChat.id")?;
+        Ok(chat)
     }
 
     async fn map_chat(&self, chat: &Value) -> Result<ChatSummary, AppError> {
@@ -945,6 +944,7 @@ impl LiveGateway {
                     .client
                     .request(json!({ "@type": "getBasicGroup", "basic_group_id": group_id }))
                     .await?;
+                require_matching_response_id(&group, group_id, "getBasicGroup.id")?;
                 let (role, delete, can_leave) = role_from_status(group.get("status"));
                 (
                     ChatKind::BasicGroup,
@@ -961,6 +961,7 @@ impl LiveGateway {
                     .client
                     .request(json!({ "@type": "getSupergroup", "supergroup_id": group_id }))
                     .await?;
+                require_matching_response_id(&group, group_id, "getSupergroup.id")?;
                 let is_channel = group
                     .get("is_channel")
                     .and_then(Value::as_bool)
@@ -1154,7 +1155,10 @@ impl LiveGateway {
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
+        let mut seen_offsets = HashSet::new();
+        let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
                 .request(json!({
@@ -1174,7 +1178,7 @@ impl LiveGateway {
                 .get("next_offset")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if next.is_empty() || next == offset {
+            if next.is_empty() || next == offset || !seen_offsets.insert(next.to_owned()) {
                 break;
             }
             offset = next.to_owned();
@@ -1190,7 +1194,10 @@ impl LiveGateway {
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
+        let mut seen_offsets = HashSet::new();
+        let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
                 .request(json!({
@@ -1207,7 +1214,7 @@ impl LiveGateway {
                 .get("next_offset")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if next.is_empty() || next == offset {
+            if next.is_empty() || next == offset || !seen_offsets.insert(next.to_owned()) {
                 break;
             }
             offset = next.to_owned();
@@ -1223,7 +1230,10 @@ impl LiveGateway {
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut from_message_id = 0_i64;
+        let mut seen_cursors = HashSet::new();
+        let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
                 .request(json!({
@@ -1240,7 +1250,7 @@ impl LiveGateway {
                 .await?;
             append_raw_messages(&mut messages, &response);
             let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-            if next == 0 || next == from_message_id {
+            if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
                 break;
             }
             from_message_id = next;
@@ -1258,8 +1268,11 @@ impl LiveGateway {
 
         let mut messages = Vec::new();
         let mut seen = HashSet::new();
+        let mut seen_cursors = HashSet::new();
         let mut from_message_id = 0_i64;
+        let mut page_count = 0;
         while messages.len() < CHAT_CLEANUP_MESSAGE_LIMIT {
+            check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
                 .request(json!({
@@ -1290,7 +1303,7 @@ impl LiveGateway {
                 }
             }
             let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-            if next == 0 || next == from_message_id {
+            if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
                 break;
             }
             from_message_id = next;
@@ -1301,8 +1314,11 @@ impl LiveGateway {
     async fn raw_chat_messages(&self, chat_id: i64) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut seen = HashSet::new();
+        let mut seen_cursors = HashSet::new();
         let mut from_message_id = 0_i64;
+        let mut page_count = 0;
         while messages.len() < CHAT_CLEANUP_MESSAGE_LIMIT {
+            check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
                 .request(json!({
@@ -1333,7 +1349,7 @@ impl LiveGateway {
                 }
             }
             let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-            if next == 0 || next == from_message_id {
+            if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
                 break;
             }
             from_message_id = next;
@@ -1416,9 +1432,7 @@ impl LiveGateway {
             return name;
         }
         let response = if is_chat {
-            self.client
-                .request(json!({ "@type": "getChat", "chat_id": id }))
-                .await
+            self.request_chat(id).await
         } else {
             self.client
                 .request(json!({ "@type": "getUser", "user_id": id }))
@@ -1487,10 +1501,7 @@ impl LiveGateway {
                 if self.search_generation.load(Ordering::Acquire) != generation {
                     return Ok(Vec::new());
                 }
-                page_count += 1;
-                if page_count > PRIVACY_SEARCH_MAX_PAGES_PER_CHAT {
-                    return Err(AppError::Gateway("TDLIB_SEARCH_PAGE_LIMIT".into()));
-                }
+                check_search_page_budget(&mut page_count)?;
                 let response = match self
                     .client
                     .request(json!({
@@ -1660,11 +1671,7 @@ impl TelegramRead for LiveGateway {
 
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError> {
         self.ensure_ready()?;
-        let chat = match self
-            .client
-            .request(json!({ "@type": "getChat", "chat_id": chat_id }))
-            .await
-        {
+        let chat = match self.request_chat(chat_id).await {
             Ok(chat) => chat,
             Err(AppError::Gateway(message)) if message.starts_with("404 ") => {
                 self.apply_chat_summary_updates(vec![(chat_id, None)]).await;
@@ -1758,11 +1765,15 @@ impl TelegramRead for LiveGateway {
 
     async fn messages_by_ids(&self, ids: &[(i64, i64)]) -> Result<Vec<MessageSnapshot>, AppError> {
         self.ensure_ready()?;
+        let mut requested = HashSet::with_capacity(ids.len());
         let mut by_chat: HashMap<i64, Vec<i64>> = HashMap::new();
         for (chat_id, message_id) in ids {
+            if !requested.insert((*chat_id, *message_id)) {
+                return Err(tdlib_response_mismatch("duplicate requested message"));
+            }
             by_chat.entry(*chat_id).or_default().push(*message_id)
         }
-        let mut snapshots = Vec::new();
+        let mut raw_by_id = HashMap::with_capacity(ids.len());
         for (chat_id, message_ids) in by_chat {
             for chunk in message_ids.chunks(100) {
                 let response = self
@@ -1773,17 +1784,41 @@ impl TelegramRead for LiveGateway {
                         "message_ids": chunk
                     }))
                     .await?;
-                for message in response
+                let messages = response
                     .get("messages")
                     .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if !message.is_null() {
-                        snapshots.push(self.map_message(message).await?)
+                    .ok_or_else(|| tdlib_response_mismatch("getMessages.messages missing"))?;
+                if messages.len() != chunk.len() {
+                    return Err(tdlib_response_mismatch("getMessages result count"));
+                }
+                let expected = chunk.iter().copied().collect::<HashSet<_>>();
+                let mut seen = HashSet::with_capacity(chunk.len());
+                for message in messages {
+                    if message.is_null() {
+                        return Err(tdlib_response_mismatch("getMessages null result"));
                     }
+                    let response_chat_id = required_i64(message.get("chat_id"), "message.chat_id")?;
+                    let response_message_id = required_i64(message.get("id"), "message.id")?;
+                    if response_chat_id != chat_id || !expected.contains(&response_message_id) {
+                        return Err(tdlib_response_mismatch("getMessages foreign result"));
+                    }
+                    if !seen.insert(response_message_id) {
+                        return Err(tdlib_response_mismatch("getMessages duplicate result"));
+                    }
+                    raw_by_id.insert((response_chat_id, response_message_id), message.clone());
+                }
+                if seen.len() != expected.len() {
+                    return Err(tdlib_response_mismatch("getMessages missing result"));
                 }
             }
+        }
+
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for id in ids {
+            let raw = raw_by_id
+                .remove(id)
+                .ok_or_else(|| tdlib_response_mismatch("getMessages missing requested result"))?;
+            snapshots.push(self.map_message(&raw).await?);
         }
         Ok(snapshots)
     }
@@ -2020,6 +2055,14 @@ impl TelegramConnectionIo for LiveGateway {
     }
 }
 
+fn check_search_page_budget(page_count: &mut usize) -> Result<(), AppError> {
+    *page_count = page_count.saturating_add(1);
+    if *page_count > TDLIB_SEARCH_MAX_PAGES {
+        return Err(AppError::Gateway("TDLIB_SEARCH_PAGE_LIMIT".into()));
+    }
+    Ok(())
+}
+
 fn append_raw_messages(destination: &mut Vec<Value>, response: &Value) {
     if let Some(messages) = response.get("messages").and_then(Value::as_array) {
         destination.extend(
@@ -2054,6 +2097,22 @@ fn chat_is_in_catalog(chat: &Value) -> bool {
 
 fn required_i64(value: Option<&Value>, field: &str) -> Result<i64, AppError> {
     value_i64(value).ok_or_else(|| AppError::Gateway(format!("TDLIB_FIELD_MISSING: {field}")))
+}
+
+fn require_matching_response_id(
+    response: &Value,
+    expected_id: i64,
+    field: &str,
+) -> Result<(), AppError> {
+    let actual_id = required_i64(response.get("id"), field)?;
+    if actual_id != expected_id {
+        return Err(tdlib_response_mismatch(field));
+    }
+    Ok(())
+}
+
+fn tdlib_response_mismatch(context: &str) -> AppError {
+    AppError::Gateway(format!("TDLIB_RESPONSE_MISMATCH: {context}"))
 }
 
 fn value_u32(value: Option<&Value>) -> Option<u32> {
@@ -2302,7 +2361,6 @@ mod tests {
         let (client, script) = TdJsonClient::scripted();
         let gateway = LiveGateway::connect_scripted(
             LiveGatewayConfig::new(
-                PathBuf::from("synthetic-tdlib"),
                 7,
                 Zeroizing::new("synthetic-api-value".into()),
                 true,
@@ -2332,7 +2390,6 @@ mod tests {
         let (client, script) = TdJsonClient::scripted();
         let gateway = LiveGateway::connect_scripted(
             LiveGatewayConfig::new(
-                PathBuf::from("synthetic-tdlib"),
                 7,
                 Zeroizing::new("synthetic-api-value".into()),
                 true,
@@ -3001,6 +3058,183 @@ mod tests {
     }
 
     #[test]
+    fn messages_by_ids_rejects_responses_that_do_not_exactly_match_the_request() {
+        tauri::async_runtime::block_on(async {
+            let requested = vec![(1101, 7011), (1101, 7012)];
+            let valid_first = raw_text_message(1101, 7011, 1_700_000_001, true, false, 42, "one");
+            let foreign = raw_text_message(1101, 7999, 1_700_000_003, true, false, 42, "foreign");
+
+            for (name, response) in [
+                (
+                    "foreign message",
+                    json!({
+                        "@type": "messages",
+                        "messages": [valid_first.clone(), foreign]
+                    }),
+                ),
+                (
+                    "duplicate message",
+                    json!({
+                        "@type": "messages",
+                        "messages": [valid_first.clone(), valid_first.clone()]
+                    }),
+                ),
+                (
+                    "missing message",
+                    json!({
+                        "@type": "messages",
+                        "messages": [valid_first.clone()]
+                    }),
+                ),
+                (
+                    "null message",
+                    json!({
+                        "@type": "messages",
+                        "messages": [valid_first.clone(), null]
+                    }),
+                ),
+            ] {
+                let (gateway, script, _directory) = scripted_gateway();
+                script.respond(
+                    json!({
+                        "@type": "getMessages",
+                        "chat_id": 1101,
+                        "message_ids": [7011, 7012]
+                    }),
+                    response,
+                );
+
+                let error = gateway.messages_by_ids(&requested).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("TDLIB_RESPONSE_MISMATCH"),
+                    "{name}: {error}"
+                );
+                assert_eq!(
+                    script
+                        .traces()
+                        .iter()
+                        .filter(|trace| trace.kind == "getMessageProperties")
+                        .count(),
+                    0,
+                    "{name} must fail before mapping or property lookup"
+                );
+                script.assert_drained();
+            }
+        });
+    }
+
+    #[test]
+    fn messages_by_ids_preserves_request_order_after_exact_validation() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            let first = raw_text_message(1101, 7011, 1_700_000_001, true, false, 42, "one");
+            let second = raw_text_message(1101, 7012, 1_700_000_002, true, false, 42, "two");
+            let third = raw_text_message(1102, 7021, 1_700_000_003, true, false, 42, "three");
+            script.respond(
+                json!({
+                    "@type": "getMessages",
+                    "chat_id": 1101,
+                    "message_ids": [7011, 7012]
+                }),
+                json!({ "@type": "messages", "messages": [second, first] }),
+            );
+            script.respond(
+                json!({
+                    "@type": "getMessages",
+                    "chat_id": 1102,
+                    "message_ids": [7021]
+                }),
+                json!({ "@type": "messages", "messages": [third] }),
+            );
+            respond_with_reach(&script, 1101, 7011, DeletionReach::Everyone);
+            respond_with_reach(&script, 1102, 7021, DeletionReach::Everyone);
+            respond_with_reach(&script, 1101, 7012, DeletionReach::Everyone);
+
+            let messages = gateway
+                .messages_by_ids(&[(1101, 7011), (1102, 7021), (1101, 7012)])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| (message.chat_id, message.message_id))
+                    .collect::<Vec<_>>(),
+                vec![(1101, 7011), (1102, 7021), (1101, 7012)]
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn chat_by_id_rejects_a_get_chat_response_for_another_chat() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            script.respond(
+                json!({ "@type": "getChat", "chat_id": 1301 }),
+                visible_chat(
+                    1302,
+                    "Foreign chat",
+                    json!({ "@type": "chatTypePrivate", "user_id": 6302 }),
+                    json!({ "@type": "message", "id": 1, "is_outgoing": true }),
+                ),
+            );
+
+            let error = gateway.chat_by_id(1301).await.unwrap_err();
+            assert!(error.to_string().contains("TDLIB_RESPONSE_MISMATCH"));
+            assert!(gateway.chat_summary_cache.read().await.is_none());
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn chat_mapping_rejects_group_detail_responses_for_another_group() {
+        tauri::async_runtime::block_on(async {
+            for (chat_id, chat_type, detail_request, detail_response) in [
+                (
+                    -1401,
+                    json!({ "@type": "chatTypeBasicGroup", "basic_group_id": 3401 }),
+                    json!({ "@type": "getBasicGroup", "basic_group_id": 3401 }),
+                    json!({
+                        "@type": "basicGroup",
+                        "id": 3499,
+                        "member_count": 3,
+                        "status": { "@type": "chatMemberStatusMember" }
+                    }),
+                ),
+                (
+                    -1402,
+                    json!({ "@type": "chatTypeSupergroup", "supergroup_id": 3402 }),
+                    json!({ "@type": "getSupergroup", "supergroup_id": 3402 }),
+                    json!({
+                        "@type": "supergroup",
+                        "id": 3499,
+                        "is_channel": false,
+                        "member_count": 3,
+                        "status": { "@type": "chatMemberStatusMember" }
+                    }),
+                ),
+            ] {
+                let (gateway, script, _directory) = scripted_gateway();
+                script.respond(
+                    json!({ "@type": "getChat", "chat_id": chat_id }),
+                    visible_chat(
+                        chat_id,
+                        "Requested group",
+                        chat_type,
+                        json!({ "@type": "message", "id": 1, "is_outgoing": true }),
+                    ),
+                );
+                script.respond(detail_request, detail_response);
+
+                let error = gateway.chat_by_id(chat_id).await.unwrap_err();
+                assert!(error.to_string().contains("TDLIB_RESPONSE_MISMATCH"));
+                script.assert_drained();
+            }
+        });
+    }
+
+    #[test]
     fn scripted_tdjson_drives_auth_transitions_without_exposing_submitted_secrets() {
         tauri::async_runtime::block_on(async {
             let (gateway, script, directory) = scripted_gateway();
@@ -3473,7 +3707,6 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let gateway = LiveGateway::connect_scripted(
                 LiveGatewayConfig::new(
-                    PathBuf::from("synthetic-tdlib"),
                     7,
                     Zeroizing::new("synthetic-api-value".into()),
                     true,
@@ -4327,6 +4560,49 @@ mod tests {
             );
             script.assert_drained();
         });
+    }
+
+    #[test]
+    fn chat_cleanup_stops_when_tdlib_repeats_an_earlier_cursor() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            for (from_message_id, next_from_message_id) in [(0, 7010), (7010, 7020), (7020, 7010)] {
+                script.respond(
+                    json!({
+                        "@type": "searchChatMessages",
+                        "chat_id": 1101,
+                        "topic_id": null,
+                        "query": "",
+                        "sender_id": null,
+                        "from_message_id": from_message_id,
+                        "offset": 0,
+                        "limit": 100,
+                        "filter": null
+                    }),
+                    json!({
+                        "@type": "foundChatMessages",
+                        "total_count": 0,
+                        "messages": [],
+                        "next_from_message_id": next_from_message_id
+                    }),
+                );
+            }
+
+            assert!(gateway.raw_chat_messages(1101).await.unwrap().is_empty());
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn every_tdlib_search_loop_has_a_finite_page_budget() {
+        let mut page_count = 0;
+        for _ in 0..TDLIB_SEARCH_MAX_PAGES {
+            check_search_page_budget(&mut page_count).unwrap();
+        }
+        assert!(matches!(
+            check_search_page_budget(&mut page_count),
+            Err(AppError::Gateway(code)) if code == "TDLIB_SEARCH_PAGE_LIMIT"
+        ));
     }
 
     #[test]

@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -28,8 +25,8 @@ struct StoredConnectionSettings {
     setup_complete: bool,
     #[serde(default)]
     runtime_mode: RuntimePreference,
-    #[serde(default)]
-    tdlib_path: Option<PathBuf>,
+    #[serde(default, rename = "tdlibPath", skip_serializing)]
+    _legacy_tdlib_path: Option<std::path::PathBuf>,
     #[serde(default)]
     api_id: Option<i32>,
     #[serde(default)]
@@ -42,7 +39,7 @@ impl Default for StoredConnectionSettings {
             schema_version: settings_schema_version(),
             setup_complete: false,
             runtime_mode: RuntimePreference::Live,
-            tdlib_path: None,
+            _legacy_tdlib_path: None,
             api_id: None,
             use_test_dc: false,
         }
@@ -53,8 +50,6 @@ impl Default for StoredConnectionSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionSettingsView {
     pub setup_complete: bool,
-    pub tdlib_path: String,
-    pub detected_tdlib_path: Option<String>,
     pub bundled_tdlib_available: bool,
     pub api_id: Option<i32>,
     pub api_hash_configured: bool,
@@ -67,8 +62,6 @@ pub struct ConnectionSettingsView {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveConnectionSettingsRequest {
-    #[serde(default)]
-    pub tdlib_path: String,
     pub api_id: Option<i32>,
     #[serde(default)]
     pub api_hash: Option<String>,
@@ -77,7 +70,6 @@ pub struct SaveConnectionSettingsRequest {
 }
 
 pub struct EffectiveLiveSettings {
-    pub library_path: PathBuf,
     pub api_id: i32,
     pub api_hash: Zeroizing<String>,
     pub use_test_dc: bool,
@@ -92,18 +84,9 @@ pub fn get_view<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<ConnectionSetti
         Ok(stored) => (stored, None),
         Err(error) => (StoredConnectionSettings::default(), Some(error.to_string())),
     };
-    let bundled = bundled_tdlib_path(app);
-    let detected = bundled.clone().or_else(detect_unbundled_tdlib_path);
     let environment_overrides = environment_overrides();
     let env_requests_live = environment_requests_live();
 
-    let tdlib_path = std::env::var_os("RETRACT_TDLIB_PATH")
-        .map(PathBuf::from)
-        .or_else(|| bundled.clone())
-        .or_else(|| stored.tdlib_path.clone())
-        .or_else(|| detected.clone())
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let api_id = std::env::var("RETRACT_TELEGRAM_API_ID")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -118,9 +101,7 @@ pub fn get_view<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<ConnectionSetti
 
     Ok(ConnectionSettingsView {
         setup_complete: public_setup_complete(&stored) || env_requests_live,
-        tdlib_path,
-        detected_tdlib_path: detected.map(|path| path.to_string_lossy().into_owned()),
-        bundled_tdlib_available: bundled.is_some(),
+        bundled_tdlib_available: cfg!(target_os = "macos"),
         api_id,
         api_hash_configured,
         use_test_dc,
@@ -145,18 +126,7 @@ pub fn save<R: tauri::Runtime>(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    let tdlib_path = request.tdlib_path.trim();
-    let detected_tdlib = detect_tdlib_path(app);
-    let resolved_tdlib = if tdlib_path.is_empty() {
-        detected_tdlib.clone()
-    } else {
-        Some(PathBuf::from(tdlib_path))
-    };
     validate_live_fields(
-        &resolved_tdlib
-            .as_ref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default(),
         request.api_id,
         supplied_hash.is_some() || secure_store::load_telegram_api_hash(&data_dir)?.is_some(),
     )?;
@@ -170,7 +140,7 @@ pub fn save<R: tauri::Runtime>(
         schema_version: settings_schema_version(),
         setup_complete: true,
         runtime_mode: RuntimePreference::Live,
-        tdlib_path: resolved_tdlib.filter(|path| detected_tdlib.as_ref() != Some(path)),
+        _legacy_tdlib_path: None,
         api_id: request.api_id.or(existing.api_id),
         use_test_dc: request.use_test_dc,
     };
@@ -190,14 +160,6 @@ pub fn effective_live<R: tauri::Runtime>(
         return Ok(None);
     }
 
-    let library_path = std::env::var_os("RETRACT_TDLIB_PATH")
-        .map(PathBuf::from)
-        .or_else(|| bundled_tdlib_path(app))
-        .or(stored.tdlib_path)
-        .or_else(|| detect_tdlib_path(app))
-        .ok_or_else(|| {
-            AppError::InvalidRequest("choose the TDLib dynamic library in Retract Settings".into())
-        })?;
     let api_id = match std::env::var("RETRACT_TELEGRAM_API_ID") {
         Ok(value) => value.parse::<i32>().map_err(|_| {
             AppError::InvalidRequest("RETRACT_TELEGRAM_API_ID must be an integer".into())
@@ -216,14 +178,9 @@ pub fn effective_live<R: tauri::Runtime>(
         .map(|value| value == "1")
         .unwrap_or(stored.use_test_dc);
 
-    validate_live_fields(
-        &library_path.to_string_lossy(),
-        Some(api_id),
-        !api_hash.trim().is_empty(),
-    )?;
+    validate_live_fields(Some(api_id), !api_hash.trim().is_empty())?;
     validate_api_hash(api_hash.trim())?;
     Ok(Some(EffectiveLiveSettings {
-        library_path,
         api_id,
         api_hash,
         use_test_dc,
@@ -264,28 +221,7 @@ fn write_settings(data_dir: &Path, settings: &StoredConnectionSettings) -> Resul
     Ok(())
 }
 
-fn validate_live_fields(
-    path: &str,
-    api_id: Option<i32>,
-    has_api_hash: bool,
-) -> Result<(), AppError> {
-    let library_path = Path::new(path);
-    if path.is_empty() {
-        return Err(AppError::InvalidRequest(
-            "choose the TDLib dynamic library".into(),
-        ));
-    }
-    if !library_path.is_absolute() {
-        return Err(AppError::InvalidRequest(
-            "the TDLib path must be absolute".into(),
-        ));
-    }
-    if !library_path.is_file() {
-        return Err(AppError::InvalidRequest(format!(
-            "TDLib was not found at {}",
-            library_path.display()
-        )));
-    }
+fn validate_live_fields(api_id: Option<i32>, has_api_hash: bool) -> Result<(), AppError> {
     if api_id.is_none_or(|value| value <= 0) {
         return Err(AppError::InvalidRequest(
             "the Telegram API ID must be a positive number".into(),
@@ -315,7 +251,6 @@ fn public_setup_complete(settings: &StoredConnectionSettings) -> bool {
 
 fn environment_overrides() -> Vec<String> {
     [
-        "RETRACT_TDLIB_PATH",
         "RETRACT_TELEGRAM_API_ID",
         "RETRACT_TELEGRAM_API_HASH",
         "RETRACT_TELEGRAM_TEST_DC",
@@ -327,47 +262,9 @@ fn environment_overrides() -> Vec<String> {
 }
 
 fn environment_requests_live() -> bool {
-    [
-        "RETRACT_TDLIB_PATH",
-        "RETRACT_TELEGRAM_API_ID",
-        "RETRACT_TELEGRAM_API_HASH",
-    ]
-    .into_iter()
-    .any(|name| std::env::var_os(name).is_some())
-}
-
-fn detect_tdlib_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    bundled_tdlib_path(app).or_else(detect_unbundled_tdlib_path)
-}
-
-fn bundled_tdlib_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("libtdjson.dylib"));
-        candidates.push(resource_dir.join("lib/libtdjson.dylib"));
-    }
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("vendor/tdlib-dist/libtdjson.dylib"));
-        if let Some(parent) = current_dir.parent() {
-            candidates.push(parent.join("vendor/tdlib-dist/libtdjson.dylib"));
-        }
-    }
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-fn detect_unbundled_tdlib_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("vendor/tdlib-source/build/libtdjson.dylib"));
-        candidates.push(current_dir.join("vendor/tdlib-source/build-retract/libtdjson.dylib"));
-        if let Some(parent) = current_dir.parent() {
-            candidates.push(parent.join("vendor/tdlib-source/build/libtdjson.dylib"));
-            candidates.push(parent.join("vendor/tdlib-source/build-retract/libtdjson.dylib"));
-        }
-    }
-    candidates.push(PathBuf::from("/opt/homebrew/lib/libtdjson.dylib"));
-    candidates.push(PathBuf::from("/usr/local/lib/libtdjson.dylib"));
-    candidates.into_iter().find(|path| path.is_file())
+    ["RETRACT_TELEGRAM_API_ID", "RETRACT_TELEGRAM_API_HASH"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some())
 }
 
 const fn settings_schema_version() -> u8 {
@@ -404,5 +301,22 @@ mod tests {
         )
         .unwrap();
         assert!(!public_setup_complete(&stored));
+    }
+
+    #[test]
+    fn legacy_custom_tdlib_paths_are_never_written_back() {
+        let stored: StoredConnectionSettings = serde_json::from_str(
+            r#"{"schemaVersion":1,"setupComplete":true,"runtimeMode":"live","tdlibPath":"/tmp/untrusted.dylib","apiId":123}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("tdlibPath"));
+        assert!(!json.contains("untrusted.dylib"));
+    }
+
+    #[test]
+    fn live_validation_does_not_accept_a_native_library_path() {
+        assert!(validate_live_fields(Some(123), true).is_ok());
     }
 }

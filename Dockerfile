@@ -43,6 +43,11 @@ USER retract
 
 FROM toolchain AS dependencies
 
+# The npm wrapper constructs this context from Git's tracked-file index. A
+# direct broad-directory build intentionally fails here before any project
+# file is copied into a network-enabled dependency layer.
+COPY --chown=retract:retract .retract-tracked-context ./
+
 # Install exactly the integrity-checked npm lockfile without executing
 # dependency lifecycle scripts. The local nanoid package is the only file:
 # dependency and therefore must be present for npm ci.
@@ -53,12 +58,23 @@ RUN --mount=type=cache,id=retract-npm-cache,target=/home/retract/.npm,uid=10001,
 
 # Cargo fetch is the only Rust dependency step with network access. All lock
 # files are mandatory, and subsequent compilation is explicitly offline.
-COPY --chown=retract:retract . .
+COPY --chown=retract:retract .dockerignore .env.example .gitignore .nvmrc Dockerfile LICENSE *.md ./
+COPY --chown=retract:retract .github/ ./.github/
+COPY --chown=retract:retract assets/ ./assets/
+COPY --chown=retract:retract crates/ ./crates/
+COPY --chown=retract:retract docs/ ./docs/
+COPY --chown=retract:retract scripts/ ./scripts/
+COPY --chown=retract:retract src/ ./src/
+COPY --chown=retract:retract src-tauri/ ./src-tauri/
+COPY --chown=retract:retract vendor/ ./vendor/
+COPY --chown=retract:retract index.html rust-toolchain.toml tsconfig.json vite.config.ts vitest.config.ts ./
 RUN --mount=type=cache,id=retract-cargo-home,target=/home/retract/.cargo,uid=10001,gid=10001,sharing=locked \
-    cargo fetch --locked --manifest-path crates/cleaner-domain/Cargo.toml \
-    && cargo fetch --locked --manifest-path crates/retract-domain/Cargo.toml \
-    && cargo fetch --locked --manifest-path crates/discord-archive/Cargo.toml \
-    && cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+    host_target=$(rustc -vV | sed -n 's/^host: //p') \
+    && test -n "$host_target" \
+    && cargo fetch --locked --target "$host_target" --manifest-path crates/cleaner-domain/Cargo.toml \
+    && cargo fetch --locked --target "$host_target" --manifest-path crates/retract-domain/Cargo.toml \
+    && cargo fetch --locked --target "$host_target" --manifest-path crates/discord-archive/Cargo.toml \
+    && cargo fetch --locked --target "$host_target" --manifest-path src-tauri/Cargo.toml
 
 FROM dependencies AS check-base
 

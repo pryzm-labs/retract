@@ -184,10 +184,25 @@ impl TelegramExecutionRecipe {
     pub fn validate_envelope(plan: &RemediationPlan) -> Result<DeletionPlan, AppError> {
         plan.validate().map_err(|_| invalid_recipe())?;
         let mut legacy = Self::from_envelope(plan)?.legacy(plan)?;
-        let expected = bind_plan(&plan.scope, &mut legacy)?;
+        let mut expected = bind_plan(&plan.scope, &mut legacy)?;
+        // Historical authenticated stores used ResumeFrozenTargets for these
+        // two fully frozen operations. Accept their exact sealed envelopes for
+        // read/migration compatibility, while lifecycle recovery still blocks
+        // every recovered destructive job and all newly produced plans require
+        // a fresh review.
+        if plan.restart_policy == RestartPolicy::ResumeFrozenTargets
+            && matches!(
+                legacy.operation,
+                PlanOperation::SelectedMessages | PlanOperation::DeleteMyMessages
+            )
+        {
+            expected.restart_policy = RestartPolicy::ResumeFrozenTargets;
+            expected.seal().map_err(|_| invalid_recipe())?;
+        }
         if expected != *plan {
             return Err(invalid_recipe());
         }
+        legacy.fingerprint = plan.fingerprint.clone();
         Ok(legacy)
     }
 }
@@ -283,14 +298,7 @@ pub fn bind_plan(scope: &Scope, legacy: &mut DeletionPlan) -> Result<Remediation
             version: 1,
             payload: serde_json::to_value(recipe).map_err(|_| invalid_recipe())?,
         },
-        restart_policy: if matches!(
-            legacy.operation,
-            PlanOperation::SelectedMessages | PlanOperation::DeleteMyMessages
-        ) {
-            RestartPolicy::ResumeFrozenTargets
-        } else {
-            RestartPolicy::RequiresNewReview
-        },
+        restart_policy: RestartPolicy::RequiresNewReview,
         created_at: legacy.created_at,
         fingerprint: String::new(),
     };

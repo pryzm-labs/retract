@@ -1,5 +1,34 @@
 use super::*;
 impl TelegramCleanup {
+    #[cfg(test)]
+    pub(super) async fn pause_next_mutation(&self) -> Arc<TestMutationPause> {
+        let pause = Arc::new(TestMutationPause::default());
+        *self.mutation_pause.lock().await = Some(pause.clone());
+        pause
+    }
+
+    async fn guarded_mutation<F, Fut>(
+        &self,
+        job_id: Uuid,
+        control: &TelegramJobControl,
+        mutation: F,
+    ) -> Result<Option<Result<(), AppError>>, AppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), AppError>>,
+    {
+        #[cfg(test)]
+        if let Some(pause) = self.mutation_pause.lock().await.take() {
+            pause.pause().await;
+        }
+        let _mutation_guard = control.mutation_gate.lock().await;
+        if control.cancelled.load(Ordering::Acquire) {
+            self.finish_cancelled(job_id).await?;
+            return Ok(None);
+        }
+        Ok(Some(mutation().await))
+    }
+
     pub(crate) async fn start_execution(
         &self,
         request: ExecuteRequest,
@@ -36,7 +65,7 @@ impl TelegramCleanup {
             .upgrade()
             .ok_or(AppError::StateUnavailable)?;
         let job = JobRecord::new(&plan);
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(TelegramJobControl::default());
         let mut running = self.cancellation.lock().await;
         self.transition(|_, jobs| {
             self.check_context()?;
@@ -80,7 +109,7 @@ impl TelegramCleanup {
             let Some(service) = self.worker_owner.upgrade() else {
                 return;
             };
-            running.insert(id, Arc::new(AtomicBool::new(false)));
+            running.insert(id, Arc::new(TelegramJobControl::default()));
             drop(running);
             tauri::async_runtime::spawn(async move {
                 service.run_job(id).await;
@@ -89,13 +118,18 @@ impl TelegramCleanup {
     }
 
     pub(super) async fn run_job(&self, job_id: Uuid) {
-        if let Err(error) = self.run_job_inner(job_id).await {
+        let Some(control) = self.cancellation.lock().await.get(&job_id).cloned() else {
+            return;
+        };
+        if let Err(error) = self.run_job_inner(job_id, &control).await {
             // A persistence failure has already quarantined this executor; the
             // committed snapshot remains authoritative and no second save is attempted.
             if !self.persistence_failed.load(Ordering::Acquire)
                 && self
                     .transition(|_, jobs| {
-                        if let Some(job) = jobs.get_mut(&job_id) {
+                        if let Some(job) = jobs.get_mut(&job_id)
+                            && !job.status.is_terminal()
+                        {
                             job.status = if job.deleted > 0 {
                                 JobStatus::Partial
                             } else {
@@ -113,18 +147,16 @@ impl TelegramCleanup {
                 self.persistence_failed.store(true, Ordering::Release);
             }
         }
+        control.mark_finished();
         self.cancellation.lock().await.remove(&job_id);
     }
 
-    pub(super) async fn run_job_inner(&self, job_id: Uuid) -> Result<(), AppError> {
+    pub(super) async fn run_job_inner(
+        &self,
+        job_id: Uuid,
+        cancellation: &Arc<TelegramJobControl>,
+    ) -> Result<(), AppError> {
         self.check_context()?;
-        let cancellation = self
-            .cancellation
-            .lock()
-            .await
-            .get(&job_id)
-            .cloned()
-            .ok_or(AppError::StateUnavailable)?;
         let retry_at = self
             .jobs
             .read()
@@ -133,7 +165,7 @@ impl TelegramCleanup {
             .and_then(|job| job.retry_at);
         if let Some(deadline) = retry_at
             && self
-                .wait_until_retry(job_id, &cancellation, deadline)
+                .wait_until_retry(job_id, cancellation, deadline)
                 .await?
         {
             return Ok(());
@@ -160,7 +192,7 @@ impl TelegramCleanup {
 
         if plan.operation == PlanOperation::ClearHistoryAndLeave
             && self
-                .run_clear_history_and_leave(job_id, &plan, &cancellation)
+                .run_clear_history_and_leave(job_id, &plan, cancellation)
                 .await?
         {
             return Ok(());
@@ -175,7 +207,7 @@ impl TelegramCleanup {
         );
         if deletes_frozen_messages
             && self
-                .run_message_batches(job_id, &plan, &cancellation)
+                .run_message_batches(job_id, &plan, cancellation)
                 .await?
         {
             return Ok(());
@@ -189,7 +221,7 @@ impl TelegramCleanup {
         ) {
             let operation = plan.operation;
             loop {
-                if cancellation.load(Ordering::Acquire) {
+                if cancellation.cancelled.load(Ordering::Acquire) {
                     self.finish_cancelled(job_id).await?;
                     return Ok(());
                 }
@@ -205,20 +237,40 @@ impl TelegramCleanup {
                 } else {
                     self.resolve_plan_chat(&plan).await?
                 };
-                if self.stop_if_cancelled(job_id, &cancellation).await? {
+                if self.stop_if_cancelled(job_id, cancellation).await? {
                     return Ok(());
                 }
                 let result = match operation {
-                    PlanOperation::ClearHistory => {
-                        self.mutation.clear_history_for_everyone(chat_id).await
-                    }
-                    PlanOperation::RemoveChatForSelf => {
-                        self.mutation.remove_chat_for_self(chat_id).await
-                    }
-                    PlanOperation::DeleteGroup => self.mutation.delete_group(chat_id).await,
+                    PlanOperation::ClearHistory => match self
+                        .guarded_mutation(job_id, cancellation, || {
+                            self.mutation.clear_history_for_everyone(chat_id)
+                        })
+                        .await?
+                    {
+                        Some(result) => result,
+                        None => return Ok(()),
+                    },
+                    PlanOperation::RemoveChatForSelf => match self
+                        .guarded_mutation(job_id, cancellation, || {
+                            self.mutation.remove_chat_for_self(chat_id)
+                        })
+                        .await?
+                    {
+                        Some(result) => result,
+                        None => return Ok(()),
+                    },
+                    PlanOperation::DeleteGroup => match self
+                        .guarded_mutation(job_id, cancellation, || {
+                            self.mutation.delete_group(chat_id)
+                        })
+                        .await?
+                    {
+                        Some(result) => result,
+                        None => return Ok(()),
+                    },
                     PlanOperation::DeleteAllMessagesAndLeave | PlanOperation::LeaveChat => {
                         match self
-                            .leave_and_remove_chat(job_id, chat_id, &cancellation)
+                            .leave_and_remove_chat(job_id, chat_id, cancellation)
                             .await
                         {
                             Ok(true) => return Ok(()),
@@ -232,9 +284,15 @@ impl TelegramCleanup {
                                 "sender-scoped plan is missing its sender ID".into(),
                             )
                         })?;
-                        self.mutation
-                            .delete_messages_by_sender(chat_id, sender_id)
-                            .await
+                        match self
+                            .guarded_mutation(job_id, cancellation, || {
+                                self.mutation.delete_messages_by_sender(chat_id, sender_id)
+                            })
+                            .await?
+                        {
+                            Some(result) => result,
+                            None => return Ok(()),
+                        }
                     }
                     PlanOperation::SelectedMessages
                     | PlanOperation::DeleteMyMessages
@@ -246,7 +304,7 @@ impl TelegramCleanup {
                     Ok(()) => break,
                     Err(error) => {
                         if let Some(seconds) = telegram_retry_after(&error) {
-                            if self.wait_for_retry(job_id, &cancellation, seconds).await? {
+                            if self.wait_for_retry(job_id, cancellation, seconds).await? {
                                 return Ok(());
                             }
                             continue;
@@ -259,11 +317,13 @@ impl TelegramCleanup {
 
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-            job.status = if job.failed > 0 {
-                JobStatus::Partial
-            } else {
-                JobStatus::Completed
-            };
+            if job.status != JobStatus::Cancelled {
+                job.status = if job.failed > 0 {
+                    JobStatus::Partial
+                } else {
+                    JobStatus::Completed
+                };
+            }
             job.clear_retry();
             job.updated_at = Utc::now();
             Ok(())
@@ -279,7 +339,7 @@ impl TelegramCleanup {
         &self,
         job_id: Uuid,
         plan: &DeletionPlan,
-        cancellation: &AtomicBool,
+        cancellation: &Arc<TelegramJobControl>,
     ) -> Result<bool, AppError> {
         let batches = plan.everyone_batches(100)?;
         let next = self
@@ -289,23 +349,20 @@ impl TelegramCleanup {
             .get(&job_id)
             .map(|j| j.next_batch)
             .unwrap_or_default();
-        crate::providers::lifecycle::run_frozen_batches(
-            &TelegramFrozenDriver {
-                service: self,
-                job_id,
-                cancellation,
-            },
-            batches,
-            next,
-        )
-        .await
+        let driver = TelegramFrozenDriver {
+            service: self,
+            job_id,
+            cancellation,
+            blocked_mutation: AtomicBool::new(false),
+        };
+        crate::providers::lifecycle::run_frozen_batches(&driver, batches, next).await
     }
 
     pub(super) async fn run_clear_history_and_leave(
         &self,
         job_id: Uuid,
         plan: &DeletionPlan,
-        cancellation: &AtomicBool,
+        cancellation: &Arc<TelegramJobControl>,
     ) -> Result<bool, AppError> {
         let next_phase = self
             .jobs
@@ -316,7 +373,7 @@ impl TelegramCleanup {
             .unwrap_or_default();
         if next_phase == 0 {
             loop {
-                if cancellation.load(Ordering::Acquire) {
+                if cancellation.cancelled.load(Ordering::Acquire) {
                     self.finish_cancelled(job_id).await?;
                     return Ok(true);
                 }
@@ -324,11 +381,15 @@ impl TelegramCleanup {
                 if self.stop_if_cancelled(job_id, cancellation).await? {
                     return Ok(true);
                 }
-                match self
-                    .mutation
-                    .clear_history_for_everyone_keep_chat(chat_id)
-                    .await
-                {
+                let Some(result) = self
+                    .guarded_mutation(job_id, cancellation, || {
+                        self.mutation.clear_history_for_everyone_keep_chat(chat_id)
+                    })
+                    .await?
+                else {
+                    return Ok(true);
+                };
+                match result {
                     Ok(()) => {
                         self.transition(|_, jobs| {
                             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
@@ -353,7 +414,7 @@ impl TelegramCleanup {
         }
 
         loop {
-            if cancellation.load(Ordering::Acquire) {
+            if cancellation.cancelled.load(Ordering::Acquire) {
                 self.finish_cancelled(job_id).await?;
                 return Ok(true);
             }
@@ -382,7 +443,7 @@ impl TelegramCleanup {
         &self,
         job_id: Uuid,
         chat_id: i64,
-        cancellation: &AtomicBool,
+        cancellation: &Arc<TelegramJobControl>,
     ) -> Result<bool, AppError> {
         let current = self
             .lookup_chat_with_timeout(chat_id, "leave-and-remove state check")
@@ -396,7 +457,13 @@ impl TelegramCleanup {
         };
 
         let refreshed = if current.capabilities.can_leave_chat {
-            self.mutation.leave_chat(chat_id).await?;
+            let Some(result) = self
+                .guarded_mutation(job_id, cancellation, || self.mutation.leave_chat(chat_id))
+                .await?
+            else {
+                return Ok(true);
+            };
+            result?;
             // Membership removal is an acknowledged compound step. A failed
             // required save here must prevent the following self-removal call.
             self.transition(|_, jobs| {
@@ -423,7 +490,15 @@ impl TelegramCleanup {
         match refreshed {
             None => Ok(false),
             Some(chat) if chat.capabilities.can_remove_for_self => {
-                self.mutation.remove_chat_for_self(chat_id).await?;
+                let Some(result) = self
+                    .guarded_mutation(job_id, cancellation, || {
+                        self.mutation.remove_chat_for_self(chat_id)
+                    })
+                    .await?
+                else {
+                    return Ok(true);
+                };
+                result?;
                 Ok(false)
             }
             Some(_) => Err(AppError::Gateway("CHAT_DELETE_FOR_SELF_FORBIDDEN".into())),
@@ -433,9 +508,11 @@ impl TelegramCleanup {
     pub(super) async fn finish_cancelled(&self, job_id: Uuid) -> Result<(), AppError> {
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-            job.status = JobStatus::Cancelled;
-            job.clear_retry();
-            job.updated_at = Utc::now();
+            if !job.status.is_terminal() || job.status == JobStatus::Cancelled {
+                job.status = JobStatus::Cancelled;
+                job.clear_retry();
+                job.updated_at = Utc::now();
+            }
             Ok(())
         })
         .await
@@ -444,9 +521,9 @@ impl TelegramCleanup {
     pub(super) async fn stop_if_cancelled(
         &self,
         job_id: Uuid,
-        cancellation: &AtomicBool,
+        cancellation: &TelegramJobControl,
     ) -> Result<bool, AppError> {
-        if !cancellation.load(Ordering::Acquire) {
+        if !cancellation.cancelled.load(Ordering::Acquire) {
             return Ok(false);
         }
         self.finish_cancelled(job_id).await?;
@@ -456,7 +533,7 @@ impl TelegramCleanup {
     pub(super) async fn wait_for_retry(
         &self,
         job_id: Uuid,
-        cancellation: &AtomicBool,
+        cancellation: &TelegramJobControl,
         seconds: u64,
     ) -> Result<bool, AppError> {
         let deadline = Utc::now() + chrono::Duration::seconds(seconds.min(86400) as i64);
@@ -476,11 +553,11 @@ impl TelegramCleanup {
     pub(super) async fn wait_until_retry(
         &self,
         job_id: Uuid,
-        cancellation: &AtomicBool,
+        cancellation: &TelegramJobControl,
         deadline: chrono::DateTime<Utc>,
     ) -> Result<bool, AppError> {
         loop {
-            if cancellation.load(Ordering::Acquire) {
+            if cancellation.cancelled.load(Ordering::Acquire) {
                 self.finish_cancelled(job_id).await?;
                 return Ok(true);
             }
@@ -494,7 +571,7 @@ impl TelegramCleanup {
             tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
             self.check_context()?;
         }
-        if cancellation.load(Ordering::Acquire) {
+        if cancellation.cancelled.load(Ordering::Acquire) {
             self.finish_cancelled(job_id).await?;
             return Ok(true);
         }
@@ -515,7 +592,8 @@ impl TelegramCleanup {
 struct TelegramFrozenDriver<'a> {
     service: &'a TelegramCleanup,
     job_id: Uuid,
-    cancellation: &'a AtomicBool,
+    cancellation: &'a Arc<TelegramJobControl>,
+    blocked_mutation: AtomicBool,
 }
 #[async_trait::async_trait]
 impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_> {
@@ -539,10 +617,22 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
             .map(|r| r == Some(DeletionReach::Everyone))
     }
     async fn mutate(&self, batch: &Self::Batch, ids: &[i64]) -> Result<(), AppError> {
-        self.service
-            .mutation
-            .delete_messages_for_everyone(batch.chat_id, ids)
-            .await
+        let Some(result) = self
+            .service
+            .guarded_mutation(self.job_id, self.cancellation, || {
+                self.service
+                    .mutation
+                    .delete_messages_for_everyone(batch.chat_id, ids)
+            })
+            .await?
+        else {
+            // The shared runner treats a successful mutate as deleted progress.
+            // Remember this cancellation boundary so progress is suppressed;
+            // its following cancellation check then ends the run.
+            self.blocked_mutation.store(true, Ordering::Release);
+            return Ok(());
+        };
+        result
     }
     fn retry(&self, error: &AppError) -> Option<u64> {
         telegram_retry_after(error)
@@ -562,6 +652,9 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
         &self,
         progress: crate::providers::lifecycle::FrozenProgress<'_, AppError>,
     ) -> Result<(), AppError> {
+        if self.blocked_mutation.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
         let crate::providers::lifecycle::FrozenProgress {
             next,
             skipped,

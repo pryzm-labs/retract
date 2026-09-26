@@ -67,7 +67,7 @@ Do not disable Gatekeeper globally. Each release also publishes a manifest tying
 
 ## Build from source
 
-Requirements: Apple-silicon macOS 12+, [Node.js 24.19.0](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 library; a normal build does not require you to compile TDLib manually.
+Requirements: Apple-silicon macOS 12+, [Node.js 24.19.0](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 static archive; a normal build does not require you to compile TDLib manually.
 
 ```sh
 git clone https://github.com/Pryzm-Labs/retract.git
@@ -76,7 +76,9 @@ npm ci --ignore-scripts
 npm run tauri dev
 ```
 
-`npm run tauri dev` verifies the bundled TDLib checksum and architecture before launch. If the artifact is absent or for another architecture, the ensure script can rebuild the exact pinned TDLib revision; only that exceptional path needs CMake, gperf, and OpenSSL 3.
+`npm run tauri dev` verifies the bundled TDLib archive before compilation. Rust links those reviewed bytes directly into Retract, so no runtime path or replaceable TDLib dynamic library exists. Rebuilding the native archive itself is a maintainer workflow; end users build from the integrity-checked archive committed to the repository.
+
+Maintainers can reproduce the archive with [`scripts/build-tdlib-static-macos.sh`](scripts/build-tdlib-static-macos.sh). The script requires the exact OpenSSL 3.6.3 installation produced by Cargo's pinned `openssl-src` dependency, records path-remapping compiler flags, excludes a second OpenSSL copy from the combined archive, and accepts output only when both reviewed hashes reproduce.
 
 Environment variables in [`.env.example`](.env.example) are optional developer and CI overrides—not end-user setup. Do not use `VITE_*` variables for Telegram secrets and never commit an `.env` file.
 
@@ -104,13 +106,13 @@ First request a package in Discord under **User Settings → Data & Privacy → 
 2. Wait for the local import counter to reach **Archive ready**, then choose the imported account.
 3. Search and privacy-scan the archive before connecting to Discord. Importing alone never contacts Discord or deletes anything.
 4. Open Discord connection settings. Read and acknowledge the unsupported-account-automation warning.
-5. Choose any detected Chrome, Edge, Brave, Arc, Vivaldi, Opera, Chromium, or Firefox installation. Retract opens a new isolated temporary browser profile and observes only a plausible `Authorization` header on an HTTPS `discord.com/api` request. It never reads your normal browser profile.
-6. If your browser is unsupported—or automatic capture does not work—use **Enter token manually**, which is always available. Follow the in-app browser-neutral Developer Tools instructions and paste only the `Authorization` header value, never a password, cookie, or bot token.
+5. Use **Enter token manually**. Follow the in-app browser-neutral Developer Tools instructions and paste only the `Authorization` header value, never a password, cookie, or bot token.
+6. Retract verifies `/users/@me` against the archive owner before it enables cleanup. Browser-debug capture exists only in development builds for synthetic compatibility tests and is intentionally absent from release builds.
 7. Retract verifies `/users/@me` and refuses to continue unless the account ID exactly matches the selected archive owner.
 8. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
 9. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
 
-Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
+Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. Release builds use explicit one-way manual token entry: generic browser-debug token capture is disabled because another local process could race or observe those endpoints. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
 
 First archive use obtains an independent key and upgrades the shared vault while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [archive storage details](docs/ARCHIVE_STORAGE.md).
 
@@ -157,7 +159,7 @@ The prune command is interactive and scoped to Retract's named BuildKit caches. 
 - React and TypeScript render the three-pane UI; the webview cannot authorize a destructive operation.
 - Rust freezes plans, binds provider/account/source, rechecks live authority where supported, owns confirmations, batches, encrypted state, retries, and cancellation.
 - Every destructive action requires a fresh, single-use Touch ID or Mac login-password grant whose native prompt identifies the backend-frozen chat, sender, message count, and plan token as applicable.
-- TDLib is pinned by source commit and SHA-256, bundled as a native app resource, and checked before use.
+- TDLib is pinned by source commit and two SHA-256 checks, verified during the Rust build, and statically linked into the executable; runtime settings and IPC cannot select native code.
 - The webview uses a strict content security policy and a minimal Tauri capability allowlist.
 - Production bundles resolve only the desktop IPC adapter. Synthetic fixture data is compiled only for tests and the dedicated screenshot build.
 

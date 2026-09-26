@@ -357,14 +357,44 @@ fn native_authorization_reason_identifies_the_exact_frozen_target() {
     tauri::async_runtime::block_on(async {
         let gateway = DemoGateway::new();
         let chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
-        let plan = DeletionPlan::by_sender(&chat, 714, "Priya".into()).unwrap();
-        let reason = authorization_reason(&plan);
+        let mut plan = DeletionPlan::by_sender(&chat, 714, "Priya".into()).unwrap();
+        plan.fingerprint =
+            "sha256-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
+        let source_id = uuid::Uuid::from_u128(44).try_into().unwrap();
+        let reason = authorization_reason(&plan, Some((9007199254741001, source_id))).unwrap();
 
+        assert!(reason.contains("Telegram plan 0123456789abcdef"));
+        assert!(reason.contains("1 frozen target"));
+        assert!(reason.contains("account 9007199254741001"));
+        assert!(reason.contains(&uuid::Uuid::from_u128(44).to_string()));
         assert!(reason.contains("Design Team"));
         assert!(reason.contains("-1001"));
         assert!(reason.contains("Priya"));
         assert!(reason.contains("714"));
-        assert!(reason.contains(&plan.fingerprint[..12]));
+    });
+}
+
+#[test]
+fn native_authorization_reason_is_bounded_and_strips_untrusted_formatting() {
+    tauri::async_runtime::block_on(async {
+        let gateway = DemoGateway::new();
+        let mut chat = gateway.chat_by_id(-1001).await.unwrap().unwrap();
+        chat.title = format!("Design\n\u{202e}{}", "T".repeat(240));
+        let mut plan =
+            DeletionPlan::by_sender(&chat, 714, format!("Priya\r\u{2066}{}", "S".repeat(240)))
+                .unwrap();
+        plan.fingerprint =
+            "sha256-v1:fedcba98765432100123456789abcdef0123456789abcdef0123456789abcdef".into();
+
+        let source_id = uuid::Uuid::from_u128(45).try_into().unwrap();
+        let reason = authorization_reason(&plan, Some((i64::MAX, source_id))).unwrap();
+
+        assert!(reason.chars().count() <= 256, "{reason}");
+        assert!(!reason.chars().any(char::is_control), "{reason:?}");
+        assert!(!reason.contains('\u{202e}'));
+        assert!(!reason.contains('\u{2066}'));
+        assert!(reason.contains("fedcba9876543210"));
+        assert!(reason.contains("1 frozen target"));
     });
 }
 
@@ -374,6 +404,81 @@ fn native_authorization_labels_strip_line_and_direction_controls() {
         trusted_prompt_label("Design\nTeam \u{202e}123\u{2069}"),
         "Design Team 123"
     );
+}
+
+#[test]
+fn native_authorization_labels_strip_invisible_format_controls() {
+    assert_eq!(
+        trusted_prompt_label("A\u{00ad}\u{180e}\u{200b}B\u{200d}\u{2060}C\u{feff}"),
+        "ABC"
+    );
+}
+
+#[test]
+fn native_authorization_reason_accepts_maximal_valid_identifier_widths() {
+    let chat = ChatSummary {
+        id: i64::MIN,
+        title: "T".repeat(256),
+        kind: cleaner_domain::ChatKind::Supergroup,
+        archived: false,
+        member_count: None,
+        conversation_state: cleaner_domain::ConversationState::Active,
+        capabilities: cleaner_domain::ChatCapabilities {
+            role: cleaner_domain::ChatRole::AdminWithDelete,
+            can_delete_others: true,
+            can_clear_for_everyone: false,
+            can_remove_for_self: false,
+            can_delete_group: false,
+            can_delete_by_sender: true,
+            can_leave_chat: true,
+        },
+        avatar_seed: 0,
+    };
+    let mut plan = DeletionPlan::by_sender(&chat, i64::MAX, "S".repeat(256)).unwrap();
+    plan.fingerprint =
+        "sha256-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
+    let source_id = uuid::Uuid::from_u128(u128::MAX - 1).try_into().unwrap();
+
+    let reason = authorization_reason(&plan, Some((i64::MAX, source_id))).unwrap();
+
+    assert!(reason.chars().count() <= 256, "{reason}");
+    assert!(reason.contains(&i64::MIN.to_string()));
+    assert!(reason.contains(&i64::MAX.to_string()));
+}
+
+#[test]
+fn native_authorization_reason_accepts_the_maximum_frozen_selection() {
+    let sent_at = Utc::now();
+    let messages = (0..100_000)
+        .map(|offset| MessageSnapshot {
+            chat_id: i64::MIN,
+            message_id: i64::MAX - offset,
+            sender_id: 1,
+            sender_name: "Sender".into(),
+            sent_at,
+            is_outgoing: true,
+            content_kind: ContentKind::Text,
+            preview: String::new(),
+            privacy_findings: Vec::new(),
+            album_id: None,
+            is_pinned: false,
+            deletion_reach: DeletionReach::Everyone,
+        })
+        .collect();
+    let mut plan = DeletionPlan::selected_messages(messages).unwrap();
+    plan.fingerprint =
+        "sha256-v1:fedcba98765432100123456789abcdef0123456789abcdef0123456789abcdef".into();
+    let source_id = uuid::Uuid::from_u128(u128::MAX - 2).try_into().unwrap();
+
+    let reason = authorization_reason(&plan, Some((i64::MAX, source_id))).unwrap();
+
+    assert!(reason.chars().count() <= 256, "{reason}");
+    assert!(reason.contains("100000 frozen targets"), "{reason}");
+    assert!(
+        reason.contains("100000 frozen Telegram messages"),
+        "{reason}"
+    );
+    assert!(reason.contains(&i64::MIN.to_string()), "{reason}");
 }
 
 #[test]
@@ -434,6 +539,160 @@ fn cancellation_during_capability_refresh_prevents_the_destructive_call() {
         let finished = wait_for_terminal_job(&service, job.id).await;
         assert_eq!(finished.status, JobStatus::Cancelled);
         assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn cancellation_is_durable_before_the_request_returns() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let key = [53; 32];
+        let store = SecureJobStore::with_test_key(path.clone(), key);
+        let gateway = Arc::new(DemoGateway::new());
+        gateway.delay_current_reach(500);
+        let service = TelegramCleanup::new(gateway.clone(), store).unwrap();
+        let plan = service
+            .prepare_selection(PrepareSelectionRequest {
+                message_refs: vec![MessageRef {
+                    chat_id: 101,
+                    message_id: 1,
+                }],
+            })
+            .await
+            .unwrap();
+        service
+            .authorize_plan(AuthorizePlanRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint.clone(),
+            })
+            .await
+            .unwrap();
+        let job = service
+            .start_execution(ExecuteRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint,
+                irreversible_acknowledged: true,
+                typed_chat_title: None,
+            })
+            .await
+            .unwrap();
+
+        wait_for_current_reach_check(&gateway).await;
+        let cancelled = service.cancel_job(job.id).await.unwrap();
+
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        let persisted = SecureJobStore::with_test_key(path, key).load().unwrap();
+        assert_eq!(
+            persisted
+                .jobs
+                .iter()
+                .find(|candidate| candidate.id == job.id)
+                .unwrap()
+                .status,
+            JobStatus::Cancelled
+        );
+    });
+}
+
+#[test]
+fn cancellation_blocks_a_selected_send_paused_before_mutation() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [54; 32]);
+        let gateway = Arc::new(DemoGateway::new());
+        let service = TelegramCleanup::new(gateway.clone(), store).unwrap();
+        let plan = service
+            .prepare_selection(PrepareSelectionRequest {
+                message_refs: vec![MessageRef {
+                    chat_id: 101,
+                    message_id: 1,
+                }],
+            })
+            .await
+            .unwrap();
+        service
+            .authorize_plan(AuthorizePlanRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint.clone(),
+            })
+            .await
+            .unwrap();
+        let pause = service.pause_next_mutation().await;
+        gateway.clear_operation_log().await;
+        let job = service
+            .start_execution(ExecuteRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint,
+                irreversible_acknowledged: true,
+                typed_chat_title: None,
+            })
+            .await
+            .unwrap();
+        pause.wait_entered().await;
+
+        let mut cancellation = Box::pin(service.cancel_job(job.id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), cancellation.as_mut())
+                .await
+                .is_err(),
+            "cancellation returned before the paused worker quiesced"
+        );
+        pause.release();
+        assert_eq!(cancellation.await.unwrap().status, JobStatus::Cancelled);
+        assert!(gateway.operation_log().await.is_empty());
+        assert_eq!(gateway.messages_by_ids(&[(101, 1)]).await.unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn cancellation_blocks_a_broad_send_paused_before_mutation() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [55; 32]);
+        let gateway = Arc::new(DemoGateway::new());
+        let service = TelegramCleanup::new(gateway.clone(), store).unwrap();
+        let plan = service
+            .prepare_chat_action(PrepareChatActionRequest {
+                chat_id: -1001,
+                operation: PlanOperation::ClearHistory,
+            })
+            .await
+            .unwrap();
+        service
+            .authorize_plan(AuthorizePlanRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint.clone(),
+            })
+            .await
+            .unwrap();
+        let pause = service.pause_next_mutation().await;
+        gateway.clear_operation_log().await;
+        let job = service
+            .start_execution(ExecuteRequest {
+                plan_id: plan.id,
+                fingerprint: plan.fingerprint,
+                irreversible_acknowledged: true,
+                typed_chat_title: Some("Design Team".into()),
+            })
+            .await
+            .unwrap();
+        pause.wait_entered().await;
+
+        let mut cancellation = Box::pin(service.cancel_job(job.id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), cancellation.as_mut())
+                .await
+                .is_err(),
+            "cancellation returned before the paused worker quiesced"
+        );
+        pause.release();
+        assert_eq!(cancellation.await.unwrap().status, JobStatus::Cancelled);
+        assert!(gateway.operation_log().await.is_empty());
+        assert_eq!(
+            gateway.messages_by_ids(&[(-1001, 11)]).await.unwrap().len(),
+            1
+        );
     });
 }
 

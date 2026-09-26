@@ -25,6 +25,8 @@ name = "discord_import_bench"
 required-features = ["discord-import-bench"]
 
 [build-dependencies]
+flate2 = "1"
+sha2 = "0.11"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -38,7 +40,6 @@ retract-domain = { path = "../crates/retract-domain" }
 futures-util = "0.3"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-libloading = "0.9.0"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

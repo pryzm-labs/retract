@@ -158,6 +158,7 @@ struct DiscordSessionData {
     credential: Option<StoredDiscordCredential>,
     identity: Option<VerifiedDiscordIdentity>,
     remembered: bool,
+    generation: u64,
 }
 
 impl Default for DiscordSessionData {
@@ -167,6 +168,7 @@ impl Default for DiscordSessionData {
             credential: None,
             identity: None,
             remembered: false,
+            generation: 0,
         }
     }
 }
@@ -176,6 +178,11 @@ pub(crate) struct DiscordSessionOwner {
     restore_attempts: Mutex<HashSet<String>>,
     identity_client: Arc<dyn DiscordIdentityClient>,
     credential_store: Arc<dyn DiscordCredentialStore>,
+}
+
+pub(crate) struct DiscordSessionAttempt {
+    account_id: String,
+    generation: u64,
 }
 
 impl DiscordSessionOwner {
@@ -211,29 +218,53 @@ impl DiscordSessionOwner {
         token: &str,
         remember: bool,
     ) -> Result<DiscordSessionStatus, AppError> {
-        self.install(
-            expected_account_id,
-            Zeroizing::new(token.to_owned()),
-            remember,
-            true,
-        )
-        .await
+        let attempt = self.begin_install(expected_account_id)?;
+        self.complete_install(attempt, Zeroizing::new(token.to_owned()), remember, true)
+            .await
     }
 
     pub(crate) async fn install_captured(
         &self,
-        expected_account_id: &str,
+        attempt: DiscordSessionAttempt,
         token: Zeroizing<String>,
         remember: bool,
     ) -> Result<DiscordSessionStatus, AppError> {
-        self.install(expected_account_id, token, remember, true)
-            .await
+        self.complete_install(attempt, token, remember, true).await
+    }
+
+    pub(crate) fn begin_install(
+        &self,
+        expected_account_id: &str,
+    ) -> Result<DiscordSessionAttempt, AppError> {
+        if !valid_account_id(expected_account_id) {
+            return Err(invalid_credential());
+        }
+        Ok(DiscordSessionAttempt {
+            account_id: expected_account_id.to_owned(),
+            generation: self.set_verifying()?,
+        })
+    }
+
+    pub(crate) fn abandon_install(&self, attempt: &DiscordSessionAttempt) {
+        self.disconnect_if_current(attempt.generation);
     }
 
     pub(crate) async fn load_remembered(
         &self,
         expected_account_id: &str,
     ) -> Result<DiscordSessionStatus, AppError> {
+        self.load_remembered_after_registration(expected_account_id, || {})
+            .await
+    }
+
+    async fn load_remembered_after_registration(
+        &self,
+        expected_account_id: &str,
+        after_registration: impl FnOnce(),
+    ) -> Result<DiscordSessionStatus, AppError> {
+        if !valid_account_id(expected_account_id) {
+            return Err(invalid_credential());
+        }
         let current = self.status();
         if current.state == DiscordSessionState::Ready {
             if current.account_id.as_deref() == Some(expected_account_id) {
@@ -241,58 +272,87 @@ impl DiscordSessionOwner {
             }
             self.disconnect();
         }
-        let first_attempt = self
-            .restore_attempts
-            .lock()
-            .map_err(|_| AppError::StateUnavailable)?
-            .insert(expected_account_id.to_owned());
+        let attempt = self.begin_install(expected_account_id)?;
+        let first_attempt = match self.restore_attempts.lock() {
+            Ok(mut attempts) => attempts.insert(expected_account_id.to_owned()),
+            Err(_) => {
+                self.abandon_install(&attempt);
+                return Err(AppError::StateUnavailable);
+            }
+        };
         if !first_attempt {
+            self.abandon_install(&attempt);
             return Ok(self.status());
         }
-        let Some(credential) = self.credential_store.load()? else {
-            return Ok(self.status());
+        after_registration();
+        let credential = match self.credential_store.load() {
+            Ok(Some(credential)) => credential,
+            Ok(None) => {
+                self.abandon_install(&attempt);
+                return Ok(self.status());
+            }
+            Err(error) => {
+                self.abandon_install(&attempt);
+                return Err(error);
+            }
         };
         if credential.account_id() != expected_account_id {
+            self.abandon_install(&attempt);
             return Err(account_mismatch());
         }
         let token = credential.expose_token_for_request(|value| Zeroizing::new(value.to_owned()));
-        self.install(expected_account_id, token, true, false).await
+        self.complete_install(attempt, token, true, false).await
     }
 
-    async fn install(
+    #[cfg(test)]
+    pub(crate) async fn load_remembered_with_registration_hook(
         &self,
         expected_account_id: &str,
+        after_registration: impl FnOnce(),
+    ) -> Result<DiscordSessionStatus, AppError> {
+        self.load_remembered_after_registration(expected_account_id, after_registration)
+            .await
+    }
+
+    async fn complete_install(
+        &self,
+        attempt: DiscordSessionAttempt,
         token: Zeroizing<String>,
         remember: bool,
         persist: bool,
     ) -> Result<DiscordSessionStatus, AppError> {
-        if !valid_account_id(expected_account_id) {
-            return Err(invalid_credential());
-        }
-        let candidate = StoredDiscordCredential::new(expected_account_id.to_owned(), token)?;
-        self.set_verifying()?;
-        let request_token =
-            candidate.expose_token_for_request(|value| Zeroizing::new(value.to_owned()));
-        let identity = match self.identity_client.verify(&request_token).await {
-            Ok(identity) if identity.account_id == expected_account_id => identity,
-            Ok(_) => {
-                self.disconnect();
-                return Err(account_mismatch());
-            }
+        let candidate = match StoredDiscordCredential::new(attempt.account_id.clone(), token) {
+            Ok(candidate) => candidate,
             Err(error) => {
-                self.disconnect();
+                self.abandon_install(&attempt);
                 return Err(error);
             }
         };
+        let request_token =
+            candidate.expose_token_for_request(|value| Zeroizing::new(value.to_owned()));
+        let identity = match self.identity_client.verify(&request_token).await {
+            Ok(identity) if identity.account_id == attempt.account_id => identity,
+            Ok(_) => {
+                self.disconnect_if_current(attempt.generation);
+                return Err(account_mismatch());
+            }
+            Err(error) => {
+                self.disconnect_if_current(attempt.generation);
+                return Err(error);
+            }
+        };
+
+        let mut data = self.data.lock().map_err(|_| AppError::StateUnavailable)?;
+        if data.generation != attempt.generation || data.state != DiscordSessionState::Verifying {
+            return Err(session_superseded());
+        }
         if remember
             && persist
             && let Err(error) = self.credential_store.save(&candidate)
         {
-            self.disconnect();
+            clear_session(&mut data);
             return Err(error);
         }
-
-        let mut data = self.data.lock().map_err(|_| AppError::StateUnavailable)?;
         data.state = DiscordSessionState::Ready;
         data.credential = Some(candidate);
         data.identity = Some(identity);
@@ -324,20 +384,37 @@ impl DiscordSessionOwner {
         self.disconnect();
     }
 
-    fn set_verifying(&self) -> Result<(), AppError> {
+    fn set_verifying(&self) -> Result<u64, AppError> {
         let mut data = self.data.lock().map_err(|_| AppError::StateUnavailable)?;
+        data.generation = data.generation.wrapping_add(1);
         data.credential = None;
         data.identity = None;
         data.remembered = false;
         data.state = DiscordSessionState::Verifying;
-        Ok(())
+        Ok(data.generation)
     }
 
     fn disconnect(&self) {
         if let Ok(mut data) = self.data.lock() {
-            *data = DiscordSessionData::default();
+            clear_session(&mut data);
         }
     }
+
+    fn disconnect_if_current(&self, generation: u64) {
+        if let Ok(mut data) = self.data.lock()
+            && data.generation == generation
+        {
+            clear_session(&mut data);
+        }
+    }
+}
+
+fn clear_session(data: &mut DiscordSessionData) {
+    let generation = data.generation.wrapping_add(1);
+    *data = DiscordSessionData {
+        generation,
+        ..DiscordSessionData::default()
+    };
 }
 
 fn status_from(data: &DiscordSessionData) -> DiscordSessionStatus {
@@ -387,6 +464,10 @@ fn verification_failed() -> AppError {
 
 fn account_mismatch() -> AppError {
     AppError::InvalidRequest("Discord account does not match the imported archive".into())
+}
+
+fn session_superseded() -> AppError {
+    AppError::InvalidRequest("Discord sign-in was cancelled or replaced".into())
 }
 
 fn session_required() -> AppError {

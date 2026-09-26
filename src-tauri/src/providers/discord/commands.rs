@@ -521,13 +521,89 @@ fn import_error(error: super::import::DiscordImportError) -> SafeError {
 
 #[cfg(unix)]
 fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "selected archive is not a regular file",
+        ));
+    }
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
 }
 #[cfg(not(unix))]
 fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
     File::open(path)
+}
+
+#[cfg(all(test, unix))]
+mod open_selected_tests {
+    use super::open_selected;
+    use std::{
+        ffi::CString,
+        fs::{self, OpenOptions},
+        os::{fd::AsRawFd, unix::ffi::OsStrExt, unix::fs::OpenOptionsExt},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn selected_fifo_is_rejected_without_blocking_for_a_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("selected.zip");
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+        let selected = fifo.clone();
+        let (sent, received) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            sent.send(open_selected(&selected).map(|_| ())).unwrap();
+        });
+
+        match received.recv_timeout(Duration::from_millis(300)) {
+            Ok(result) => assert!(result.is_err(), "a FIFO was accepted as an archive"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _writer = OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                    .unwrap();
+                let _ = received.recv_timeout(Duration::from_secs(1));
+                worker.join().unwrap();
+                panic!("opening a selected FIFO blocked before validation");
+            }
+            Err(error) => panic!("archive-open worker disconnected: {error}"),
+        }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn selected_directory_is_rejected_after_descriptor_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(open_selected(directory.path()).is_err());
+    }
+
+    #[test]
+    fn selected_regular_file_is_blocking_after_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("selected.zip");
+        fs::write(&path, b"synthetic archive").unwrap();
+
+        let file = open_selected(&path).unwrap();
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+    }
 }

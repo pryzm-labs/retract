@@ -8,6 +8,28 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+const PLAN_FINGERPRINT_PREFIX: &str = "sha256-v1:";
+const PLAN_FINGERPRINT_HEX_BYTES: usize = 64;
+const TRUSTED_PLAN_TOKEN_HEX_BYTES: usize = 16;
+
+/// Returns the first 64 digest bits from a canonical sealed-plan fingerprint.
+/// This short token is intended only to let trusted native confirmation UI
+/// distinguish immutable plans; the complete fingerprint remains the grant
+/// and execution binding.
+pub fn plan_fingerprint_token(fingerprint: &str) -> Result<&str, DomainError> {
+    let digest = fingerprint
+        .strip_prefix(PLAN_FINGERPRINT_PREFIX)
+        .ok_or(DomainError::FingerprintMismatch)?;
+    if digest.len() != PLAN_FINGERPRINT_HEX_BYTES
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DomainError::FingerprintMismatch);
+    }
+    Ok(&digest[..TRUSTED_PLAN_TOKEN_HEX_BYTES])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActionStep {

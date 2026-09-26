@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fs, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cleaner_domain::PlanOperation;
-use retract_domain::{ErrorCode, ExpectedEffect, JobStatus, RemediationPlan};
+use retract_domain::{ErrorCode, ExpectedEffect, JobStatus, RemediationPlan, RestartPolicy};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -87,7 +87,6 @@ struct ManifestEntry {
     job_id: Uuid,
     scope: String,
     fingerprint: String,
-    resumable: bool,
     started_authorized: bool,
 }
 
@@ -132,7 +131,7 @@ fn store_binding(manifest: &Manifest) -> StoreBinding {
 }
 
 #[test]
-fn frozen_base_envelopes_validate_rebind_and_retain_exact_fingerprints() {
+fn frozen_base_envelopes_validate_and_rebind_to_the_current_restart_policy() {
     let manifest = manifest();
     assert_eq!(manifest.artifact_version, 1);
     assert_eq!(manifest.base_commit, BASE_COMMIT);
@@ -173,10 +172,15 @@ fn frozen_base_envelopes_validate_rebind_and_retain_exact_fingerprints() {
         assert_eq!(native.operation, entry.operation);
         assert_eq!(native.fingerprint, expected.fingerprint);
         let rebound = bind_plan(&expected.scope, &mut native).unwrap();
-        assert_eq!(
-            rebound, expected,
-            "base envelope changed for {fixture_name}"
-        );
+        if expected.restart_policy == RestartPolicy::ResumeFrozenTargets {
+            assert_eq!(rebound.restart_policy, RestartPolicy::RequiresNewReview);
+            assert_ne!(rebound.fingerprint, expected.fingerprint);
+        } else {
+            assert_eq!(
+                rebound, expected,
+                "base envelope changed for {fixture_name}"
+            );
+        }
         observed_operations.insert(serde_json::to_string(&entry.operation).unwrap());
     }
 
@@ -252,10 +256,9 @@ fn frozen_authenticated_v3_bytes_load_without_rewrite_and_retain_recovery_decisi
             .unwrap();
         assert_eq!(job.plan_id, plan.id);
         assert_eq!(job.started_authorized, entry.started_authorized);
-        assert_eq!(
-            crate::providers::lifecycle::resumable(plan, job),
-            entry.resumable,
-            "recovery decision changed for {}",
+        assert!(
+            !crate::providers::lifecycle::resumable(plan, job),
+            "recovered destructive work must require a new review for {}",
             entry.fixture
         );
         assert_eq!(

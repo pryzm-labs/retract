@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, c_char, c_double, c_void},
-    path::Path,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -10,20 +9,32 @@ use std::{
     time::Duration,
 };
 
-use libloading::Library;
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::error::AppError;
 
+#[cfg(target_os = "macos")]
 type CreateFn = unsafe extern "C" fn() -> *mut c_void;
 type SendFn = unsafe extern "C" fn(*mut c_void, *const c_char);
 type ReceiveFn = unsafe extern "C" fn(*mut c_void, c_double) -> *const c_char;
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
+#[cfg(target_os = "macos")]
 type SetLogVerbosityFn = unsafe extern "C" fn(i32);
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn td_json_client_create() -> *mut c_void;
+    fn td_json_client_send(client: *mut c_void, request: *const c_char);
+    fn td_json_client_receive(client: *mut c_void, timeout: c_double) -> *const c_char;
+    fn td_json_client_destroy(client: *mut c_void);
+    fn td_set_log_verbosity_level(level: i32);
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const DEFAULT_TDLIB_LOG_VERBOSITY: i32 = 0;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const RECEIVE_TIMEOUT_SECONDS: c_double = 1.0;
 
 /// A narrow, owned wrapper around TDLib's legacy per-client JSON C interface.
@@ -37,6 +48,7 @@ pub struct TdJsonClient {
 
 #[derive(Clone)]
 enum ClientBackend {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Native(Arc<Inner>),
     #[cfg(test)]
     Scripted(Arc<ScriptedState>),
@@ -83,9 +95,9 @@ pub(crate) struct ScriptedDelayedResponse {
 }
 
 struct Inner {
-    _library: Library,
     handle: *mut c_void,
     send: SendFn,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     receive: ReceiveFn,
     destroy: DestroyFn,
     closing: AtomicBool,
@@ -112,30 +124,28 @@ unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 
 impl TdJsonClient {
-    pub fn load(path: &Path) -> Result<Self, AppError> {
-        // Safety: symbol names and signatures are defined by td_json_client.h.
-        // The Library is retained in Inner for at least as long as every copied
-        // function pointer and the opaque client handle.
-        let (library, create, send, receive, destroy, set_log_verbosity) = unsafe {
-            let library = Library::new(path)
-                .map_err(|error| AppError::Gateway(format!("TDLIB_LOAD_FAILED: {error}")))?;
-            let create = *library
-                .get::<CreateFn>(b"td_json_client_create\0")
-                .map_err(|error| AppError::Gateway(format!("TDLIB_SYMBOL_MISSING: {error}")))?;
-            let send = *library
-                .get::<SendFn>(b"td_json_client_send\0")
-                .map_err(|error| AppError::Gateway(format!("TDLIB_SYMBOL_MISSING: {error}")))?;
-            let receive = *library
-                .get::<ReceiveFn>(b"td_json_client_receive\0")
-                .map_err(|error| AppError::Gateway(format!("TDLIB_SYMBOL_MISSING: {error}")))?;
-            let destroy = *library
-                .get::<DestroyFn>(b"td_json_client_destroy\0")
-                .map_err(|error| AppError::Gateway(format!("TDLIB_SYMBOL_MISSING: {error}")))?;
-            let set_log_verbosity = *library
-                .get::<SetLogVerbosityFn>(b"td_set_log_verbosity_level\0")
-                .map_err(|error| AppError::Gateway(format!("TDLIB_SYMBOL_MISSING: {error}")))?;
-            (library, create, send, receive, destroy, set_log_verbosity)
-        };
+    pub fn load() -> Result<Self, AppError> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(AppError::Gateway("TDLIB_PLATFORM_UNSUPPORTED".into()))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::load_macos()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn load_macos() -> Result<Self, AppError> {
+        // TDLib is verified in build.rs and statically linked into Retract. No
+        // renderer-controlled or persisted path can select executable code.
+        let (create, send, receive, destroy, set_log_verbosity) = (
+            td_json_client_create as CreateFn,
+            td_json_client_send as SendFn,
+            td_json_client_receive as ReceiveFn,
+            td_json_client_destroy as DestroyFn,
+            td_set_log_verbosity_level as SetLogVerbosityFn,
+        );
         let verbosity =
             tdlib_log_verbosity(std::env::var("RETRACT_TDLIB_LOG_VERBOSITY").ok().as_deref());
         // Safety: the symbol was loaded with TDLib's documented C signature.
@@ -149,7 +159,6 @@ impl TdJsonClient {
         }
         let (updates, _) = broadcast::channel(512);
         let inner = Arc::new(Inner {
-            _library: library,
             handle,
             send,
             receive,
@@ -365,6 +374,7 @@ impl ScriptedDelayedResponse {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn tdlib_log_verbosity(raw: Option<&str>) -> i32 {
     raw.and_then(|value| value.parse::<i32>().ok())
         .filter(|value| (0..=5).contains(value))
@@ -380,6 +390,7 @@ impl Drop for Inner {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn spawn_receiver(inner: Weak<Inner>) {
     thread::Builder::new()
         .name("retract-tdlib-receive".into())
@@ -409,6 +420,7 @@ fn spawn_receiver(inner: Weak<Inner>) {
         .expect("failed to start TDLib receive thread");
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn route_received(inner: &Inner, value: Value) {
     let extra = value
         .get("@extra")
@@ -455,12 +467,10 @@ mod tests {
         assert_eq!(tdlib_log_verbosity(Some("verbose")), 0);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn loads_bundled_tdlib_and_reports_the_pinned_version_when_requested() {
-        let Ok(path) = std::env::var("RETRACT_TEST_TDLIB_PATH") else {
-            return;
-        };
-        let client = TdJsonClient::load(Path::new(&path)).expect("bundled TDLib must load");
+    fn statically_linked_tdlib_and_sqlcipher_use_the_reviewed_native_stack() {
+        let client = TdJsonClient::load().expect("statically linked TDLib must initialize");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -475,5 +485,33 @@ mod tests {
             response.get("value").and_then(Value::as_str),
             Some("1.8.64")
         );
+
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("native-stack-smoke.sqlite3");
+        let key = format!("x'{}'", "31".repeat(32));
+        {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection.pragma_update(None, "key", &key).unwrap();
+            let provider: String = connection
+                .pragma_query_value(None, "cipher_provider", |row| row.get(0))
+                .unwrap();
+            let provider_version: String = connection
+                .pragma_query_value(None, "cipher_provider_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(provider, "openssl");
+            assert_eq!(provider_version, "OpenSSL 3.6.3 9 Jun 2026");
+            connection
+                .execute_batch(
+                    "CREATE TABLE native_smoke(value TEXT NOT NULL);\
+                     INSERT INTO native_smoke(value) VALUES ('verified');",
+                )
+                .unwrap();
+        }
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.pragma_update(None, "key", &key).unwrap();
+        let value: String = connection
+            .query_row("SELECT value FROM native_smoke", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "verified");
     }
 }

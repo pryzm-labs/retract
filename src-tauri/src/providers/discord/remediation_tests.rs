@@ -1,9 +1,12 @@
-use super::remediation::{DiscordMessageDelete, DiscordRemediationIo};
+use super::remediation::{DiscordMessageDelete, DiscordRemediationIo, authorization_reason};
 use super::session::{
     DiscordCredentialStore, DiscordIdentityClient, DiscordSessionOwner, StoredDiscordCredential,
     VerifiedDiscordIdentity,
 };
-use super::{DiscordNormalizer, http::DeleteOutcome};
+use super::{
+    DiscordNormalizer,
+    http::{DeleteOutcome, DiscordDeleteError, DiscordLiveMessageBinding},
+};
 use async_trait::async_trait;
 use discord_archive::{ChannelContext, DiscordId, ExportAccount, SentMessage};
 use retract_domain::*;
@@ -73,20 +76,87 @@ impl crate::providers::ports::QuerySource for Query {
 }
 
 #[derive(Default)]
-struct Delete(Mutex<Vec<(String, String, String)>>);
+struct Delete {
+    probes: Mutex<Vec<(String, String, String, String)>>,
+    deletes: Mutex<Vec<(String, String, String, String)>>,
+    probe_error: Mutex<Option<DiscordDeleteError>>,
+    expected_binding: Option<DiscordLiveMessageBinding>,
+}
+
+impl Delete {
+    fn rejecting(error: DiscordDeleteError) -> Self {
+        Self {
+            probe_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn requiring(expected_binding: DiscordLiveMessageBinding) -> Self {
+        Self {
+            expected_binding: Some(expected_binding),
+            ..Self::default()
+        }
+    }
+
+    fn check_binding(&self, binding: &DiscordLiveMessageBinding) -> Result<(), DiscordDeleteError> {
+        if self
+            .expected_binding
+            .as_ref()
+            .is_some_and(|expected| expected != binding)
+        {
+            Err(DiscordDeleteError::OwnershipMismatch)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[async_trait]
 impl DiscordMessageDelete for Delete {
-    async fn delete(
+    async fn verify_owned(
         &self,
         channel: &str,
         message: &str,
+        owner: &str,
+        binding: &DiscordLiveMessageBinding,
         token: &str,
-        _: &AtomicBool,
+        cancelled: &AtomicBool,
+    ) -> Result<(), DiscordDeleteError> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(DiscordDeleteError::Cancelled);
+        }
+        self.check_binding(binding)?;
+        self.probes.lock().unwrap().push((
+            channel.into(),
+            message.into(),
+            owner.into(),
+            token.into(),
+        ));
+        if let Some(error) = *self.probe_error.lock().unwrap() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn delete_owned(
+        &self,
+        channel: &str,
+        message: &str,
+        owner: &str,
+        binding: &DiscordLiveMessageBinding,
+        token: &str,
+        cancelled: &AtomicBool,
     ) -> Result<DeleteOutcome, super::http::DiscordDeleteError> {
-        self.0
-            .lock()
-            .unwrap()
-            .push((channel.into(), message.into(), token.into()));
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(DiscordDeleteError::Cancelled);
+        }
+        self.check_binding(binding)?;
+        self.deletes.lock().unwrap().push((
+            channel.into(),
+            message.into(),
+            owner.into(),
+            token.into(),
+        ));
         Ok(DeleteOutcome::Deleted)
     }
 }
@@ -127,6 +197,32 @@ fn fixture() -> (ActiveContext, ContentRecord) {
     (context, record)
 }
 
+fn record_for(scope: Scope, channel_id: &str, message_id: &str) -> ContentRecord {
+    let account = ExportAccount {
+        id: DiscordId::parse(OWNER).unwrap(),
+        username: "owner".into(),
+    };
+    let channel = ChannelContext {
+        id: DiscordId::parse(channel_id).unwrap(),
+        source_type: "direct".into(),
+        name: Some("Archive DM".into()),
+        recipients: Some(vec!["recipient".into()]),
+        guild: None,
+    };
+    let message = SentMessage {
+        id: DiscordId::parse(message_id).unwrap(),
+        account_id: account.id.clone(),
+        channel_id: channel.id.clone(),
+        timestamp_millis: 1_893_553_445_123,
+        contents: "private content must not enter the native prompt".into(),
+        attachments: String::new(),
+    };
+    DiscordNormalizer::new(scope, "2031-01-02T03:04:05Z".parse().unwrap())
+        .unwrap()
+        .content(&account, &channel, &message)
+        .unwrap()
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -157,12 +253,13 @@ fn content_ref(record: &ContentRecord) -> ScopedResourceRef {
 fn reviewed_plan_contains_only_exact_owner_archive_targets_and_risk_confirmation() {
     let (context, record) = fixture();
     let target = content_ref(&record);
+    let delete = Arc::new(Delete::default());
     let io = DiscordRemediationIo::new(
         context.clone(),
         OWNER.into(),
         Arc::new(Query(vec![record])),
         ready_session(),
-        Arc::new(Delete::default()),
+        delete.clone(),
     )
     .unwrap();
     let rt = runtime();
@@ -195,8 +292,201 @@ fn reviewed_plan_contains_only_exact_owner_archive_targets_and_risk_confirmation
     assert_eq!(plan.targets, vec![target]);
     assert_eq!(plan.recipe.schema, "discord.delete_messages.v1");
     assert_eq!(plan.confirmation.tier, ConfirmationTier::High);
-    assert_eq!(plan.restart_policy, RestartPolicy::ResumeFrozenTargets);
+    assert_eq!(plan.restart_policy, RestartPolicy::RequiresNewReview);
     plan.validate().unwrap();
+    assert_eq!(
+        delete.probes.lock().unwrap().as_slice(),
+        &[(CHANNEL.into(), MESSAGE.into(), OWNER.into(), TOKEN.into())]
+    );
+    assert!(delete.deletes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn plan_freeze_fails_closed_when_live_message_is_missing_or_not_owned() {
+    for (failure, expected) in [
+        (DiscordDeleteError::NotFound, ErrorCode::NotFound),
+        (
+            DiscordDeleteError::OwnershipMismatch,
+            ErrorCode::PermissionChanged,
+        ),
+    ] {
+        let (context, record) = fixture();
+        let target = content_ref(&record);
+        let delete = Arc::new(Delete::rejecting(failure));
+        let io = DiscordRemediationIo::new(
+            context.clone(),
+            OWNER.into(),
+            Arc::new(Query(vec![record])),
+            ready_session(),
+            delete.clone(),
+        )
+        .unwrap();
+
+        let error = runtime()
+            .block_on(
+                crate::providers::frozen_lifecycle::FrozenProviderIo::describe(
+                    &io,
+                    &context,
+                    crate::providers::ports::PrepareIntent {
+                        action_id: "selected_messages".into(),
+                        targets: vec![target],
+                        actor: None,
+                    },
+                    uuid::Uuid::from_u128(22),
+                ),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, expected);
+        assert_eq!(delete.probes.lock().unwrap().len(), 1);
+        assert!(delete.deletes.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn archive_content_and_timestamp_must_match_the_live_message_at_plan_freeze() {
+    let (context, mut record) = fixture();
+    let target = content_ref(&record);
+    let live_binding = DiscordLiveMessageBinding::new(
+        "synthetic message",
+        "2030-01-02T03:04:05.123Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+            .timestamp_millis(),
+    );
+    record.searchable_text = "attacker-selected description".into();
+    let delete = Arc::new(Delete::requiring(live_binding));
+    let io = DiscordRemediationIo::new(
+        context.clone(),
+        OWNER.into(),
+        Arc::new(Query(vec![record])),
+        ready_session(),
+        delete.clone(),
+    )
+    .unwrap();
+
+    let error = runtime()
+        .block_on(
+            crate::providers::frozen_lifecycle::FrozenProviderIo::describe(
+                &io,
+                &context,
+                crate::providers::ports::PrepareIntent {
+                    action_id: "selected_messages".into(),
+                    targets: vec![target],
+                    actor: None,
+                },
+                uuid::Uuid::from_u128(23),
+            ),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::PermissionChanged);
+    assert!(delete.probes.lock().unwrap().is_empty());
+    assert!(delete.deletes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_reason_binds_owner_source_count_target_and_plan_token() {
+    let (context, first) = fixture();
+    let second = record_for(
+        context.scope.clone(),
+        "9007199254741102",
+        "1985931830091579394",
+    );
+    let first_target = content_ref(&first);
+    let second_target = content_ref(&second);
+    let io = DiscordRemediationIo::new(
+        context.clone(),
+        OWNER.into(),
+        Arc::new(Query(vec![first, second])),
+        ready_session(),
+        Arc::new(Delete::default()),
+    )
+    .unwrap();
+    let rt = runtime();
+    let plan = rt
+        .block_on(
+            crate::providers::frozen_lifecycle::FrozenProviderIo::describe(
+                &io,
+                &context,
+                crate::providers::ports::PrepareIntent {
+                    action_id: "selected_messages".into(),
+                    targets: vec![first_target, second_target],
+                    actor: None,
+                },
+                uuid::Uuid::from_u128(30),
+            ),
+        )
+        .unwrap();
+
+    let reason = authorization_reason(&plan).unwrap();
+
+    assert!(reason.contains("Discord plan"), "{reason}");
+    assert!(reason.contains(retract_domain::plan_fingerprint_token(&plan.fingerprint).unwrap()));
+    assert!(reason.contains("2 reviewed messages"), "{reason}");
+    assert!(reason.contains(OWNER), "{reason}");
+    assert!(
+        reason.contains(&context.scope.source_id.as_uuid().to_string()),
+        "{reason}"
+    );
+    assert!(reason.contains(CHANNEL), "{reason}");
+    assert!(reason.contains(MESSAGE), "{reason}");
+    assert!(!reason.contains("private content"));
+    assert!(!reason.contains(TOKEN));
+    assert!(reason.chars().count() <= 256, "{reason}");
+}
+
+#[test]
+fn distinct_same_count_discord_plans_have_distinct_native_reasons() {
+    let (context, first) = fixture();
+    let second = record_for(
+        context.scope.clone(),
+        "9007199254741102",
+        "1985931830091579394",
+    );
+    let first_target = content_ref(&first);
+    let second_target = content_ref(&second);
+    let io = DiscordRemediationIo::new(
+        context.clone(),
+        OWNER.into(),
+        Arc::new(Query(vec![first, second])),
+        ready_session(),
+        Arc::new(Delete::default()),
+    )
+    .unwrap();
+    let rt = runtime();
+    let prepare = |target, id| {
+        rt.block_on(
+            crate::providers::frozen_lifecycle::FrozenProviderIo::describe(
+                &io,
+                &context,
+                crate::providers::ports::PrepareIntent {
+                    action_id: "selected_messages".into(),
+                    targets: vec![target],
+                    actor: None,
+                },
+                id,
+            ),
+        )
+        .unwrap()
+    };
+    let first_plan = prepare(first_target, uuid::Uuid::from_u128(31));
+    let second_plan = prepare(second_target, uuid::Uuid::from_u128(32));
+
+    let first_reason = authorization_reason(&first_plan).unwrap();
+    let second_reason = authorization_reason(&second_plan).unwrap();
+
+    assert_ne!(first_reason, second_reason);
+    assert!(first_reason.contains("1 reviewed message"));
+    assert!(second_reason.contains("1 reviewed message"));
+    assert!(
+        first_reason
+            .contains(retract_domain::plan_fingerprint_token(&first_plan.fingerprint).unwrap())
+    );
+    assert!(
+        second_reason
+            .contains(retract_domain::plan_fingerprint_token(&second_plan.fingerprint).unwrap())
+    );
 }
 
 #[test]
@@ -229,11 +519,29 @@ fn mutation_uses_only_frozen_channel_message_and_matching_session_token() {
         .unwrap();
     plan.seal().unwrap();
     rt.block_on(
-        crate::providers::frozen_lifecycle::FrozenProviderIo::mutate(&io, &plan, &[target]),
+        crate::providers::frozen_lifecycle::FrozenProviderIo::mutate(
+            &io,
+            &plan,
+            std::slice::from_ref(&target),
+            &std::sync::atomic::AtomicBool::new(false),
+        ),
     )
     .unwrap();
     assert_eq!(
-        delete.0.lock().unwrap().as_slice(),
-        &[(CHANNEL.into(), MESSAGE.into(), TOKEN.into())]
+        delete.deletes.lock().unwrap().as_slice(),
+        &[(CHANNEL.into(), MESSAGE.into(), OWNER.into(), TOKEN.into())]
     );
+
+    let error = rt
+        .block_on(
+            crate::providers::frozen_lifecycle::FrozenProviderIo::mutate(
+                &io,
+                &plan,
+                &[target],
+                &std::sync::atomic::AtomicBool::new(true),
+            ),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::StaleContext);
+    assert_eq!(delete.deletes.lock().unwrap().len(), 1);
 }

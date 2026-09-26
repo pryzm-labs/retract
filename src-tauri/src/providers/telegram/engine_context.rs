@@ -47,6 +47,9 @@ impl EngineContext {
     pub fn active(&self) -> &ActiveContext {
         &self.active
     }
+    pub(crate) fn verified_user_id(&self) -> i64 {
+        self.identity.user_id
+    }
     pub fn check(&self, gateway: &dyn TelegramSession) -> Result<(), AppError> {
         if self.quarantined.load(std::sync::atomic::Ordering::Acquire) {
             return Err(AppError::StatePersistenceFailed);

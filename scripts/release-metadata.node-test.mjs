@@ -11,14 +11,17 @@ const tdlib = {
   version: "1.8.64",
   commit: "e0943d068ce90b5010f1aea946e6901e25b43bf6",
   architecture: "arm64",
-  sha256: "a89780da629bce37eadba34448622141d89f37bb29a28dfe7293496d5b8ea044"
+  linkage: "static",
+  archiveSha256: "aab5736f737319a13bcb871aa2b8a7a90a33e28ec9708fee53dbd387a24b98e4",
+  compressedSha256: "e93e2134e9fb57f7d019a8802f8518b9c0339806224af17df21fa965785afb95",
+  opensslVersion: "3.6.3",
+  opensslProvider: "sqlcipher-vendored-openssl"
 };
 
 const expectedBundleFiles = [
   "Contents/Info.plist",
   "Contents/MacOS/retract",
   "Contents/Resources/icon.icns",
-  "Contents/Resources/lib/libtdjson.dylib",
   "Contents/Resources/licenses/TDLib-LICENSE_1_0.txt",
   "Contents/Resources/licenses/TDLib-build-stamp.txt",
   "Contents/Resources/licenses/SQLCipher-LICENSE.txt",
@@ -37,7 +40,7 @@ test("release metadata includes the neutral crate across version updates", () =>
   };
   const manifests = ["src-tauri/Cargo.toml", "crates/cleaner-domain/Cargo.toml", "crates/retract-domain/Cargo.toml"];
   try {
-    put("vendor/tdlib-dist/build-stamp.txt", `tdlib=${tdlib.version} commit=${tdlib.commit} arch=arm64 macos=12.0\nsha256=${tdlib.sha256} file=libtdjson.dylib\n`);
+    put("vendor/tdlib-dist/build-stamp.txt", `tdlib=${tdlib.version} commit=${tdlib.commit} arch=arm64 macos=12.0 linkage=static\narchive_sha256=${tdlib.archiveSha256} file=libtdjson_retract.a\ncompressed_sha256=${tdlib.compressedSha256} file=libtdjson_static.a.gz\nopenssl=${tdlib.opensslVersion} provider=${tdlib.opensslProvider}\n`);
     for (const version of ["0.1.0", "0.2.0-preview.1"]) {
       put("package.json", JSON.stringify({ version }));
       put("src-tauri/tauri.conf.json", JSON.stringify({ version, productName: "Retract", bundle: { macOS: { minimumSystemVersion: "12.0" } } }));
@@ -91,8 +94,10 @@ test("rejects inconsistent application versions", () => {
 
 test("parses pinned TDLib provenance", () => {
   assert.deepEqual(parseBuildStamp(
-    "tdlib=1.8.64 commit=e0943d068ce90b5010f1aea946e6901e25b43bf6 arch=arm64 macos=12.0\n" +
-    "sha256=a89780da629bce37eadba34448622141d89f37bb29a28dfe7293496d5b8ea044 file=libtdjson.dylib\n"
+    "tdlib=1.8.64 commit=e0943d068ce90b5010f1aea946e6901e25b43bf6 arch=arm64 macos=12.0 linkage=static\n" +
+    "archive_sha256=aab5736f737319a13bcb871aa2b8a7a90a33e28ec9708fee53dbd387a24b98e4 file=libtdjson_retract.a\n" +
+    "compressed_sha256=e93e2134e9fb57f7d019a8802f8518b9c0339806224af17df21fa965785afb95 file=libtdjson_static.a.gz\n" +
+    "openssl=3.6.3 provider=sqlcipher-vendored-openssl\n"
   ), tdlib);
 });
 
@@ -114,6 +119,17 @@ test("build manifest identifies an unsigned arm64 preview", () => {
     notarized: false,
     tdlib
   });
+});
+
+test("release metadata rejects an adjacent substituted TDLib digest", () => {
+  assert.throws(() => buildManifest({
+    product: "Retract",
+    version: "0.1.0",
+    sourceCommit: "0123456789abcdef",
+    target: "aarch64-apple-darwin",
+    minimumMacosVersion: "12.0",
+    tdlib: { ...tdlib, archiveSha256: "0".repeat(64) }
+  }), /reviewed static provenance/);
 });
 
 test("release bundle validator accepts only the reviewed app contents", () => {

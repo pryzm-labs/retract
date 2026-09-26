@@ -59,7 +59,7 @@ for (const reference of ["assets/retract-icon.png", "docs/images/retract-overvie
 }
 for (const disclosure of [
   "automating a normal user account",
-  "isolated temporary browser profile",
+  "generic browser-debug token capture is disabled",
   "Enter token manually",
   "memory-only session",
   "DELETE DISCORD MESSAGES",

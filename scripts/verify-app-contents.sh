@@ -16,13 +16,13 @@ fi
 find "$APP_PATH" -mindepth 1 -print | while IFS= read -r absolute_path; do
   relative_path=${absolute_path#"$APP_PATH"/}
   case "$relative_path" in
-    Contents|Contents/MacOS|Contents/Resources|Contents/Resources/lib|Contents/Resources/licenses|Contents/_CodeSignature)
+    Contents|Contents/MacOS|Contents/Resources|Contents/Resources/licenses|Contents/_CodeSignature)
       if [ ! -d "$absolute_path" ]; then
         echo "Expected an app-bundle directory: $relative_path" >&2
         exit 1
       fi
       ;;
-    Contents/Info.plist|Contents/MacOS/retract|Contents/Resources/icon.icns|Contents/Resources/lib/libtdjson.dylib|Contents/Resources/licenses/TDLib-LICENSE_1_0.txt|Contents/Resources/licenses/TDLib-build-stamp.txt|Contents/Resources/licenses/SQLCipher-LICENSE.txt|Contents/Resources/licenses/SQLCipher-provenance.json|Contents/Resources/licenses/OpenSSL-LICENSE.txt|Contents/_CodeSignature/CodeResources)
+    Contents/Info.plist|Contents/MacOS/retract|Contents/Resources/icon.icns|Contents/Resources/licenses/TDLib-LICENSE_1_0.txt|Contents/Resources/licenses/TDLib-build-stamp.txt|Contents/Resources/licenses/SQLCipher-LICENSE.txt|Contents/Resources/licenses/SQLCipher-provenance.json|Contents/Resources/licenses/OpenSSL-LICENSE.txt|Contents/_CodeSignature/CodeResources)
       if [ ! -f "$absolute_path" ]; then
         echo "Expected a regular app-bundle file: $relative_path" >&2
         exit 1
@@ -39,7 +39,6 @@ for required_path in \
   Contents/Info.plist \
   Contents/MacOS/retract \
   Contents/Resources/icon.icns \
-  Contents/Resources/lib/libtdjson.dylib \
   Contents/Resources/licenses/TDLib-LICENSE_1_0.txt \
   Contents/Resources/licenses/TDLib-build-stamp.txt \
   Contents/Resources/licenses/SQLCipher-LICENSE.txt \

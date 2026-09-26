@@ -1,5 +1,5 @@
 import type { ActiveContext } from "../providers/identity";
-import { Check, Database, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, X } from "lucide-react";
+import { Check, Hash, KeyRound, LoaderCircle, LockKeyhole, MonitorCog, PackageCheck, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@retract/api";
 import type { ConnectionSettings, SaveConnectionSettingsResult } from "../types";
@@ -14,7 +14,6 @@ interface ConnectionSettingsDialogProps {
 }
 
 export function ConnectionSettingsDialog({ context = null, settings, required, onClose, onSaved, onSaveFailed }: ConnectionSettingsDialogProps) {
-  const [tdlibPath, setTdlibPath] = useState(settings.tdlibPath || settings.detectedTdlibPath || "");
   const [apiId, setApiId] = useState(settings.apiId?.toString() || "");
   const [apiHash, setApiHash] = useState("");
   const [useTestDc, setUseTestDc] = useState(settings.useTestDc);
@@ -39,7 +38,6 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
     setError(null);
     try {
       const result = await api.saveConnectionSettings({
-        tdlibPath,
         apiId: apiId.trim() ? Number(apiId) : null,
         apiHash: apiHash.trim() || null,
         useTestDc
@@ -56,9 +54,8 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
   };
 
   const hashReady = settings.apiHashConfigured || /^[a-fA-F0-9]{32}$/.test(apiHash.trim());
-  const saveReady = Boolean(tdlibPath.trim() && Number(apiId) > 0 && hashReady);
+  const saveReady = Boolean(settings.bundledTdlibAvailable && Number(apiId) > 0 && hashReady);
   const environmentControlled = settings.environmentOverrides.length > 0;
-  const tdlibEnvironmentOverride = settings.environmentOverrides.includes("RETRACT_TDLIB_PATH");
 
   return (
     <dialog
@@ -96,24 +93,16 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
 
       <form onSubmit={save}>
         <div className="connection-fields">
-            {settings.bundledTdlibAvailable && !tdlibEnvironmentOverride ? (
+            {settings.bundledTdlibAvailable ? (
               <div className="bundled-tdlib">
                 <PackageCheck size={19} />
-                <span><strong>TDLib {settings.supportedTdlibVersion} included</strong><small>The pinned, self-contained library is selected automatically.</small></span>
+                <span><strong>TDLib {settings.supportedTdlibVersion} included</strong><small>The pinned native engine is compiled into Retract.</small></span>
                 <span className="ready-pill">READY</span>
               </div>
             ) : (
-              <label>
-                <span className="field-label"><Database size={14} /> TDLib library <small>version {settings.supportedTdlibVersion}</small></span>
-                <input
-                  value={tdlibPath}
-                  onChange={(event) => setTdlibPath(event.target.value)}
-                  placeholder="/absolute/path/to/libtdjson.dylib"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                {settings.detectedTdlibPath && tdlibPath === settings.detectedTdlibPath && <small className="field-success">Auto-detected on this Mac</small>}
-              </label>
+              <div className="connection-error" role="alert">
+                This build does not include the reviewed TDLib engine. Reinstall Retract from a verified package or rebuild the project.
+              </div>
             )}
 
             <div className="credential-grid">

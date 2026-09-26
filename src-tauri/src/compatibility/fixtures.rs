@@ -442,6 +442,7 @@ pub struct SyntheticIo {
     pub preflights: Arc<Mutex<Vec<chrono::DateTime<Utc>>>>,
     pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
     pub preflight_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
+    pub mutation_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
 }
 impl SyntheticIo {
     pub fn new(active: ActiveContext) -> Self {
@@ -457,6 +458,7 @@ impl SyntheticIo {
             preflights: Arc::new(Mutex::new(vec![])),
             preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             preflight_barrier: Arc::new(Mutex::new(None)),
+            mutation_barrier: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -528,7 +530,11 @@ impl FrozenProviderIo for SyntheticIo {
     async fn owner_prompt(&self, _: &RemediationPlan) -> Result<(), SafeError> {
         Ok(())
     }
-    async fn preflight(&self, target: &ScopedResourceRef) -> Result<bool, SafeError> {
+    async fn preflight(
+        &self,
+        target: &ScopedResourceRef,
+        _: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, SafeError> {
         let barrier = self.preflight_barrier.lock().unwrap().take();
         if let Some(barrier) = barrier {
             barrier.entered.notify_one();
@@ -556,7 +562,13 @@ impl FrozenProviderIo for SyntheticIo {
         &self,
         _: &RemediationPlan,
         targets: &[ScopedResourceRef],
+        _: &std::sync::atomic::AtomicBool,
     ) -> Result<(), SafeError> {
+        let barrier = self.mutation_barrier.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            barrier.entered.notify_one();
+            barrier.release.notified().await;
+        }
         self.calls.lock().unwrap().push(targets.to_vec());
         Ok(())
     }
