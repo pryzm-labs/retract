@@ -108,18 +108,30 @@ pub(crate) async fn select_archive_v2(
         .into_iter()
         .find(|entry| entry.source.scope() == request.payload.scope)
         .ok_or_else(|| safe(ErrorCode::NotFound))?;
-    current.shutdown().await;
-    *current = crate::provider_service::ProviderService::new(build_connection(
+    // Prepare and validate the candidate before retiring the usable workspace.
+    // Construction/recovery can fail on retained state; failure must not strand
+    // the user behind a stopped service or prevent a subsequent source retry.
+    let candidate = crate::provider_service::ProviderService::new(build_connection(
         &runtime.application_root,
         entry,
         archives,
         runtime.discord_session.clone(),
     )?);
-    current
+    let snapshot = match candidate
         .bootstrap(
-            serde_json::json!({"contractVersion":2,"context":current.context(),"payload":{}}),
+            serde_json::json!({"contractVersion":2,"context":candidate.context(),"payload":{}}),
         )
         .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            candidate.shutdown().await;
+            return Err(error);
+        }
+    };
+    current.shutdown().await;
+    *current = candidate;
+    Ok(snapshot)
 }
 
 #[derive(Serialize)]
