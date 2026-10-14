@@ -24,6 +24,7 @@ Prepared for an unsigned prerelease. The tag and GitHub release have not been pu
 
 ### Fixed
 
+- Telegram startup preserves supported historical plan seals instead of resealing them under the newer restart policy and rejecting saved history. Recovered destructive work still requires a fresh review.
 - Updated the development-only `source-map-js` transitive dependency to 1.2.2 for GHSA-68fv-2mgg-jv7q (indexed source-map denial of service).
 - TDLib native logging now defaults to verbosity `0`, preventing its internal error logger from printing private message-derived URLs unless a developer explicitly opts into native diagnostics with `RETRACT_TDLIB_LOG_VERBOSITY`.
 - Telegram privacy scans now follow a valid continuation cursor after TDLib omits every message from a converted page, ignore approximate `total_count` values, and stop on repeated cursors or an excessive page count.
