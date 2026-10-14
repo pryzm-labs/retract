@@ -1,7 +1,7 @@
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@retract/api";
-import { CommittedSettingsError } from "./providers/api";
+import { CommittedSettingsError, ProviderApiError } from "./providers/api";
 import { sameContext, sameScope, scopeKey, resourceKey, refKey, type ActiveContext, type ScopedResourceRef, type Uuid } from "./providers/identity";
 import { AuthGate } from "./components/AuthGate";
 import { BrandLogo } from "./components/BrandLogo";
@@ -162,19 +162,31 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
+    const capturedEpoch = epoch.current;
+    const isCurrent = () => !disposed && capturedEpoch === epoch.current;
     void (async () => {
       try {
-        const next = await api.bootstrapSnapshot();
-        if (disposed) return;
-        publish(next);
-        const capturedEpoch = epoch.current;
-        const settings = await api.connectionSettings(next.context);
-        if (disposed || capturedEpoch !== epoch.current) return;
-        setConnectionSettings(settings);
-        if (!settings.setupComplete) setSourceSetupOpen(true);
-        if (next.context && next.identity.state === "ready") {
-          catalogSyncStarted.current = true;
-          void loadSnapshot(next.context);
+        // Identity can finish verifying between these startup reads. Rediscover
+        // only stale read contexts; never replay credentials or mutations.
+        for (let attempt = 0; attempt < 3 && isCurrent(); attempt += 1) {
+          try {
+            const next = await api.bootstrapSnapshot();
+            if (!isCurrent()) return;
+            const settings = await api.connectionSettings(next.context);
+            if (!isCurrent()) return;
+            // Publish the matched pair together, not the superseded bootstrap.
+            publish(next);
+            setConnectionSettings(settings);
+            if (!settings.setupComplete) setSourceSetupOpen(true);
+            if (next.context && next.identity.state === "ready") {
+              catalogSyncStarted.current = true;
+              void loadSnapshot(next.context);
+            }
+            return;
+          } catch (error) {
+            if (!isCurrent()) return;
+            if (!(error instanceof ProviderApiError) || error.code !== "stale_context" || attempt === 2) throw error;
+          }
         }
       } catch (error) {
         if (!disposed) setStartupError(error instanceof Error ? error.message : "The workspace could not be opened.");

@@ -2,6 +2,16 @@
 
 Recorded on 2026-10-14. This is evidence for the unsigned preview, not a claim that every manual acceptance case passed. No live messages were deleted during this validation.
 
+## Cold-start read reconciliation
+
+On the next same-build reopen, the owner completed Keychain prompts and left the app untouched. Native accessibility inspection captured **Workspace not ready** / **The connection has changed. Review this action again.** before Retry. This is the fixed safe `stale_context` diagnostic, not a credential or saved-history reset request.
+
+The startup path reads bootstrap and settings separately. Asynchronous identity verification may finish during bootstrap's final context recheck or between those reads. Strict backend checks correctly reject the stale request; the frontend previously treated it as a terminal startup failure. Synthetic tests reproduced both races through the real App, desktop adapter and decoders (three expected failures, eleven passes before the change).
+
+The narrow frontend fix retries only these read-only startup checks, at most three attempts, and publishes bootstrap/settings together. Other errors retain explicit recovery. Unmounted and superseded StrictMode attempts cannot publish or retry. No backend, mutation, credential, persistence or profile-reset path changed. All sixteen focused connection-recovery tests pass in Linux arm64 Docker (BuildKit `29503g733wesc3g14y67wrond`). Full-gate, review and rebuilt native clean-start evidence are pending; the native startup blocker is not yet declared resolved.
+
+Independent read-only review found no critical or important issues. Its additional contextless-to-ready, catalog/search context and settings-error coverage is included in the expanded suite: 194 frontend tests pass. Docker run `8jigvrndcorqq6d1awdg3ngt9` also passed 505 backend tests (one existing opt-in ignore), domain/parser suites, production checks, release/public/boundary checks, formatting and strict Clippy. The remaining benchmark-feature compile failed with Docker-internal `ENOSPC`, not a failing assertion; retry `voni7gt4odigrku7zqv5zucvm` hit the same disk limit. The complete Docker gate is therefore **not** recorded as passing. Only disposable Retract source/result layers and regenerable app-crate artifacts were reclaimed; dependency caches, other projects, saved profiles and credentials were preserved. Native package/clean-start validation continues separately.
+
 ## Candidate identity
 
 - Merged source: `aa6ccfbabd807251840d962d701824d1197b1c3c` (PR #50).
