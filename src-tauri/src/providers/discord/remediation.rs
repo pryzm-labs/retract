@@ -500,13 +500,27 @@ fn descriptor() -> ActionDescriptor {
 }
 
 pub(crate) fn validate_plan(plan: &RemediationPlan) -> Result<(), crate::error::AppError> {
+    // Read compatibility is not execution authority. Historical seals remain
+    // intact, but every executable plan must use the current review policy.
+    if plan.restart_policy != RestartPolicy::RequiresNewReview {
+        return Err(crate::error::AppError::InvalidRequest(
+            "invalid Discord deletion plan".into(),
+        ));
+    }
+    validate_stored_plan(plan)
+}
+
+pub(super) fn validate_stored_plan(plan: &RemediationPlan) -> Result<(), crate::error::AppError> {
     use crate::error::AppError;
     plan.validate()
         .map_err(|_| AppError::InvalidRequest("invalid Discord deletion plan".into()))?;
     if plan.scope.provider.as_str() != "discord"
         || plan.recipe.schema != DELETE_RECIPE_SCHEMA
         || plan.recipe.version != 1
-        || plan.restart_policy != RestartPolicy::RequiresNewReview
+        || !matches!(
+            plan.restart_policy,
+            RestartPolicy::RequiresNewReview | RestartPolicy::ResumeFrozenTargets
+        )
         || plan.steps.len() != 1
         || plan.steps[0].descriptor != descriptor()
         || plan.steps[0].targets != plan.targets

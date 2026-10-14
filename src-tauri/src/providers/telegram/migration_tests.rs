@@ -295,6 +295,57 @@ fn frozen_authenticated_v3_bytes_load_without_rewrite_and_retain_recovery_decisi
 }
 
 #[test]
+fn frozen_authenticated_v3_history_survives_repository_startup_publication() {
+    use super::engine_context::{FoundationTelegramRepository, TelegramStateRepository};
+    let manifest = manifest();
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("jobs.enc"), store_bytes()).unwrap();
+    let store = FoundationStore::open_with_test_key_and_payload_validator(
+        directory.path().to_path_buf(),
+        store_binding(&manifest),
+        STORE_KEY,
+        Arc::new(TelegramPayloadValidator),
+    )
+    .unwrap();
+    let original = store.snapshot().unwrap();
+    let repository =
+        FoundationTelegramRepository::new(store.clone(), original.plans[0].scope.clone()).unwrap();
+    let recovered = repository.load().unwrap();
+    repository
+        .save(&recovered)
+        .expect("authenticated historical seals must survive startup publication");
+    let after = store.snapshot().unwrap();
+    // Scoped publication may reorder records; every original sealed envelope
+    // must still be present unchanged, including the foreign scope.
+    assert_eq!(after.plans.len(), original.plans.len());
+    for plan in &original.plans {
+        assert_eq!(after.plans.iter().find(|p| p.id == plan.id), Some(plan));
+    }
+    assert_eq!(after.identities, original.identities);
+    assert_eq!(after.sources, original.sources);
+    assert_eq!(after.jobs.len(), original.jobs.len());
+    for old in &original.jobs {
+        let job = after.jobs.iter().find(|j| j.id == old.id).unwrap();
+        assert_eq!(job.plan_id, old.plan_id);
+        assert_eq!(job.scope, old.scope);
+        assert_eq!(job.counters, old.counters);
+        assert_eq!(job.next_batch, old.next_batch);
+        if old.status.is_terminal() {
+            assert_eq!(job, old);
+        } else if old.scope == original.plans[0].scope {
+            assert!(job.status.is_terminal());
+            assert!(
+                job.diagnostics
+                    .iter()
+                    .any(|d| d.code == ErrorCode::RestartRequiresNewReview)
+            );
+        } else {
+            assert_eq!(job.status, JobStatus::Blocked);
+        }
+    }
+}
+
+#[test]
 fn frozen_v3_ciphertext_corruption_and_wrong_key_fail_closed() {
     for (bytes, key) in [
         (store_bytes(), [0x55; 32]),

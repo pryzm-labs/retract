@@ -243,6 +243,210 @@ fn final_review_runtime_retry_recovers_after_profile_lock_release() {
     });
 }
 
+mod discord_source_switch_tests {
+    use crate::{
+        compatibility::{commands_v2, tests::invoke},
+        persistence::{
+            FoundationStore, StoreBinding,
+            archive::{ArchiveKey, ArchiveOwner, ArchiveStore},
+        },
+        provider_service::ProviderService,
+    };
+    use serde_json::json;
+    use std::{fs, sync::Arc};
+
+    struct DrainArchive<'a>(&'a tokio::runtime::Runtime, Arc<ArchiveOwner>);
+    impl Drop for DrainArchive<'_> {
+        fn drop(&mut self) {
+            self.0.block_on(self.1.shutdown());
+        }
+    }
+
+    #[test]
+    fn failed_discord_source_open_preserves_workspace_and_allows_retry() {
+        failed_switch(false);
+    }
+
+    #[test]
+    fn failed_discord_source_open_preserves_telegram_context_and_saved_state() {
+        failed_switch(true);
+    }
+
+    fn failed_switch(with_telegram: bool) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let archive_path = root.join("archive.db");
+        let owner = ArchiveOwner::with_opener(move || {
+            ArchiveStore::open(
+                archive_path.clone(),
+                ArchiveKey::new([0x67; 32]),
+                std::collections::BTreeMap::from([(
+                    crate::providers::discord::locators::discord_provider_key(),
+                    Arc::new(crate::providers::discord::DiscordPayloadValidator)
+                        as Arc<dyn crate::persistence::ProviderPayloadValidator>,
+                )]),
+            )
+        });
+        let telegram_harness = if with_telegram {
+            Some(
+                rt.block_on(crate::compatibility::fixtures::telegram(
+                    &root.join("telegram"),
+                    crate::compatibility::fixtures::context("context"),
+                ))
+                .0,
+            )
+        } else {
+            None
+        };
+        let (initial, telegram_history) = if let Some(harness) = &telegram_harness {
+            let plan = harness.prepare(
+                &crate::compatibility::fixtures::context("context"),
+                vec![crate::compatibility::fixtures::fixture()["messages"][0]["ref"].clone()],
+            );
+            let before = harness.store.snapshot().unwrap();
+            assert!(before.plans.contains(&plan));
+            (
+                harness.service.clone(),
+                Some((harness.store.clone(), before)),
+            )
+        } else {
+            (ProviderService::setup(), None)
+        };
+        let previous_context = initial.context();
+        let mut runtime = crate::RuntimeState::with_archives(initial.clone(), owner);
+        runtime.application_root = root.clone();
+        let _drain = DrainArchive(&rt, runtime.archives.clone());
+        let scope = rt.block_on(async {
+            let path = root.join("synthetic.zip");
+            fs::write(
+                &path,
+                crate::providers::discord::import_tests::package(1, "synthetic", false),
+            )
+            .unwrap();
+            let outcome = runtime
+                .discord_imports
+                .start_or_retry(fs::File::open(path).unwrap())
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            let sources = runtime
+                .archives
+                .open()
+                .await
+                .unwrap()
+                .ready_sources()
+                .await
+                .unwrap();
+            assert_eq!(sources.len(), 1);
+            assert_eq!(outcome.checkpoint.scope, sources[0].source.scope());
+            sources[0].source.scope()
+        });
+        let profile = format!("discord-{}", scope.account_id.as_uuid());
+        let blocked = root.join(&profile);
+        fs::write(&blocked, b"synthetic path obstruction; preserve me").unwrap();
+        let app = commands_v2::register(tauri::test::mock_builder())
+            .manage(Arc::new(runtime))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let request =
+            json!({"contractVersion":2,"context":previous_context,"payload":{"scope":scope}});
+        assert!(invoke(&webview, "select_archive_v2", request.clone()).is_err());
+        assert_eq!(
+            fs::read(&blocked).unwrap(),
+            b"synthetic path obstruction; preserve me"
+        );
+        initial
+            .check_optional(previous_context.as_ref())
+            .expect("failed switch must not stop the old workspace");
+        assert_eq!(initial.context(), previous_context);
+        let bootstrap = invoke(
+            &webview,
+            "get_bootstrap_snapshot_v2",
+            json!({"contractVersion":2,"context":previous_context,"payload":{}}),
+        )
+        .unwrap();
+        assert_eq!(
+            bootstrap["context"],
+            serde_json::to_value(&previous_context).unwrap()
+        );
+        if let Some((store, before)) = &telegram_history {
+            assert_eq!(&store.snapshot().unwrap(), before);
+        }
+        let sources = invoke(
+            &webview,
+            "list_sources_v2",
+            json!({"contractVersion":2,"context":previous_context,"payload":{}}),
+        )
+        .unwrap();
+        assert_eq!(sources["payload"].as_array().unwrap().len(), 1);
+        // Remove only this test's synthetic obstruction and inject a test key; no Keychain access.
+        fs::remove_file(&blocked).unwrap();
+        let store = FoundationStore::open_with_test_key_and_payload_validator(
+            blocked,
+            StoreBinding {
+                provider: scope.provider.clone(),
+                profile,
+            },
+            [0x68; 32],
+            Arc::new(crate::providers::discord::DiscordPayloadValidator),
+        )
+        .unwrap();
+        let opened = invoke(&webview, "select_archive_v2", request).unwrap();
+        assert_eq!(
+            opened["context"]["scope"],
+            serde_json::to_value(scope).unwrap()
+        );
+        assert_eq!(opened["payload"]["identity"]["state"], "ready");
+        assert!(
+            initial.check_optional(None).is_err(),
+            "retire old service only after success"
+        );
+        assert_eq!(store.snapshot().unwrap().sources.len(), 1);
+        let reopened = invoke(
+            &webview,
+            "select_archive_v2",
+            json!({
+                "contractVersion":2,"context":opened["context"],
+                "payload":{"scope":opened["context"]["scope"]}
+            }),
+        )
+        .unwrap();
+        assert_eq!(reopened["context"]["scope"], opened["context"]["scope"]);
+        assert_ne!(
+            reopened["context"]["sessionGeneration"],
+            opened["context"]["sessionGeneration"]
+        );
+        let stale_discord = invoke(
+            &webview,
+            "list_sources_v2",
+            json!({"contractVersion":2,"context":opened["context"],"payload":{}}),
+        )
+        .unwrap_err();
+        assert_eq!(stale_discord["code"], "stale_context");
+        if let Some((store, before)) = &telegram_history {
+            assert_eq!(&store.snapshot().unwrap(), before);
+        }
+        if previous_context.is_some() {
+            let stale = invoke(
+                &webview,
+                "list_sources_v2",
+                json!({"contractVersion":2,"context":previous_context,"payload":{}}),
+            )
+            .unwrap_err();
+            assert_eq!(stale["code"], "scope_mismatch");
+        }
+    }
+}
+
 pub(crate) fn invoke(
     webview: &tauri::WebviewWindow<MockRuntime>,
     command: &str,

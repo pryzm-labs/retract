@@ -302,6 +302,180 @@ fn reviewed_plan_contains_only_exact_owner_archive_targets_and_risk_confirmation
 }
 
 #[test]
+fn historical_discord_plans_reopen_without_resealing_or_replaying() {
+    use crate::persistence::{FoundationStore, ProviderPayloadValidator, StoreBinding};
+    use crate::providers::frozen_lifecycle::{FrozenLifecycle, FrozenProviderIo};
+    use crate::providers::ports::{PrepareIntent, ReviewedLifecycle};
+    let session = ready_session();
+    runtime().block_on(async {
+        let (context, record) = fixture();
+        let delete = Arc::new(Delete::default());
+        let io = Arc::new(
+            DiscordRemediationIo::new(
+                context.clone(),
+                OWNER.into(),
+                Arc::new(Query(vec![record.clone()])),
+                session,
+                delete.clone(),
+            )
+            .unwrap(),
+        );
+        let mut historical = io
+            .describe(
+                &context,
+                PrepareIntent {
+                    action_id: "selected_messages".into(),
+                    targets: vec![content_ref(&record)],
+                    actor: None,
+                },
+                uuid::Uuid::from_u128(21),
+            )
+            .await
+            .unwrap();
+        // Pre-hardening releases used this policy with the same v1 recipe.
+        historical.restart_policy = RestartPolicy::ResumeFrozenTargets;
+        historical.seal().unwrap();
+        super::DiscordPayloadValidator
+            .validate_recipe(&historical)
+            .unwrap();
+        assert!(super::remediation::validate_plan(&historical).is_err());
+        assert!(authorization_reason(&historical).is_err());
+        assert!(io.dirty_refs(&historical).is_err());
+        assert!(
+            io.mutate(&historical, &historical.targets, &AtomicBool::new(false))
+                .await
+                .is_err()
+        );
+
+        let normalizer = DiscordNormalizer::new(context.scope.clone(), chrono::Utc::now()).unwrap();
+        let account = normalizer
+            .account(&ExportAccount {
+                id: DiscordId::parse(OWNER).unwrap(),
+                username: "synthetic_owner".into(),
+            })
+            .unwrap();
+        let source = SourceRecord {
+            id: context.scope.source_id,
+            account_id: context.scope.account_id,
+            provider: context.scope.provider.clone(),
+            kind: SourceKind::ArchiveImport,
+            state: SourceState::Ready,
+            archive_fingerprint: Some("a".repeat(64)),
+            schema_profile: super::model::DiscordSourceProfile::payload(),
+            imported_at: Some(chrono::Utc::now()),
+            updated_at: chrono::Utc::now(),
+            warnings: vec![],
+        };
+        let job = ScopedJobRecord {
+            id: uuid::Uuid::from_u128(22),
+            plan_id: historical.id,
+            scope: context.scope.clone(),
+            dirty_refs: historical.targets.clone(),
+            status: JobStatus::Queued,
+            counters: JobCounters {
+                selected: 1,
+                eligible: 1,
+                deleted: 0,
+                skipped: 0,
+                failed: 0,
+                uncertain: 0,
+            },
+            next_batch: 0,
+            retry_at: Some(chrono::Utc::now()),
+            diagnostics: vec![],
+            started_authorized: true,
+            created_at: historical.created_at,
+            updated_at: chrono::Utc::now(),
+        };
+        let mut terminal_plan = historical.clone();
+        terminal_plan.id = uuid::Uuid::from_u128(23);
+        terminal_plan.seal().unwrap();
+        let mut terminal = job.clone();
+        terminal.id = uuid::Uuid::from_u128(24);
+        terminal.plan_id = terminal_plan.id;
+        terminal.status = JobStatus::Completed;
+        terminal.counters.deleted = 1;
+        terminal.next_batch = 1;
+        terminal.retry_at = None;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(directory.path()).unwrap();
+        let binding = StoreBinding {
+            provider: context.scope.provider.clone(),
+            profile: "discord-history".into(),
+        };
+        let open = || {
+            FoundationStore::open_with_test_key_and_payload_validator(
+                path.clone(),
+                binding.clone(),
+                [0x59; 32],
+                Arc::new(super::DiscordPayloadValidator),
+            )
+            .unwrap()
+        };
+        let store = open();
+        store
+            .transaction(|state| {
+                state.identities.push(account.clone());
+                state.sources.push(source.clone());
+                state
+                    .plans
+                    .extend([historical.clone(), terminal_plan.clone()]);
+                state.jobs.extend([job.clone(), terminal.clone()]);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        let store = open();
+        delete.probes.lock().unwrap().clear();
+        let lifecycle = FrozenLifecycle::new(context.clone(), io.clone(), store.clone()).unwrap();
+        lifecycle.recover(&context).await.unwrap();
+        let state = store.snapshot().unwrap();
+        assert!(state.plans.contains(&historical));
+        assert!(state.plans.contains(&terminal_plan));
+        assert_eq!(state.identities, vec![account]);
+        assert_eq!(state.sources, vec![source]);
+        assert!(state.jobs.contains(&terminal));
+        let recovered = state.jobs.iter().find(|j| j.id == job.id).unwrap();
+        assert_eq!(recovered.status, JobStatus::Failed);
+        assert_eq!(recovered.counters, job.counters);
+        assert_eq!(recovered.next_batch, job.next_batch);
+        assert_eq!(recovered.retry_at, None);
+        assert!(
+            recovered
+                .diagnostics
+                .iter()
+                .any(|d| d.code == ErrorCode::RestartRequiresNewReview)
+        );
+        assert!(delete.probes.lock().unwrap().is_empty());
+        assert!(delete.deletes.lock().unwrap().is_empty());
+        let mut tampered = historical.clone();
+        tampered.targets.clear();
+        assert!(
+            super::DiscordPayloadValidator
+                .validate_recipe(&tampered)
+                .is_err()
+        );
+        let mut unsupported = historical.clone();
+        unsupported.recipe.version = 2;
+        unsupported.seal().unwrap();
+        assert!(
+            super::DiscordPayloadValidator
+                .validate_recipe(&unsupported)
+                .is_err()
+        );
+        let mut weakened = historical.clone();
+        weakened.steps[0].descriptor.batch.max_parallel = 3;
+        weakened.seal().unwrap();
+        assert!(
+            super::DiscordPayloadValidator
+                .validate_recipe(&weakened)
+                .is_err()
+        );
+    });
+}
+
+#[test]
 fn plan_freeze_fails_closed_when_live_message_is_missing_or_not_owned() {
     for (failure, expected) in [
         (DiscordDeleteError::NotFound, ErrorCode::NotFound),

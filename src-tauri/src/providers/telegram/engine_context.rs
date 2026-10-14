@@ -235,14 +235,21 @@ impl TelegramStateRepository for FoundationTelegramRepository {
         }
         let mut plans = Vec::new();
         for legacy in &state.plans {
+            if let Some(previous) = expected.0.iter().find(|p| p.id == legacy.id) {
+                // Existing authenticated history is immutable. Rebinding it
+                // with today's restart policy changes a supported historical
+                // seal and would prevent startup even for completed jobs.
+                // Compare the full validated projection, never only its ID or
+                // fingerprint, then retain the original envelope verbatim.
+                if TelegramExecutionRecipe::validate_envelope(previous)? != *legacy {
+                    return Err(invalid_recipe());
+                }
+                plans.push(previous.clone());
+                continue;
+            }
             let mut rebound = legacy.clone();
             let envelope = bind_plan(self.shared.scope(), &mut rebound)?;
             if rebound != *legacy {
-                return Err(invalid_recipe());
-            }
-            if let Some(previous) = expected.0.iter().find(|p| p.id == legacy.id)
-                && *previous != envelope
-            {
                 return Err(invalid_recipe());
             }
             plans.push(envelope);

@@ -9,6 +9,8 @@ Prepared on 2026-10-14. This document is the current release checklist; the larg
 - [Secure build run 36274011228](https://github.com/pryzm-labs/retract/actions/runs/36274011228) passed on reviewed branch revision `8f2ed78e420c0b3f8680f167e7c276973513702e`, subsequently squash-merged as `d926d8e`. Linux amd64, Linux arm64 and native Apple-silicon tests/unsigned packaging all passed.
 - Local unsigned packaging also passed production fixture exclusion, file allowlists, ad-hoc signature, hardened runtime and developer-path checks.
 - Documentation includes the logo, synthetic screenshot, source setup, unsigned install flow and provider limitations. Release builds use manual Discord token entry.
+- Release preparation and dependency integration merged in [PR #50](https://github.com/pryzm-labs/retract/pull/50), `aa6ccfb`. [Secure build run 38553380236](https://github.com/pryzm-labs/retract/actions/runs/38553380236) passed Linux amd64, Linux arm64, and native macOS tests/unsigned packaging on its reviewed PR head `75453d6`; the merged and reviewed commits have identical source trees. Dependency issue #41 and the seven original dependency PRs are closed.
+- The [macOS 0.1.1 validation record](MACOS_VALIDATION_0.1.1.md) records fresh local checksum, signature, bundle, dependency, deployment-target and Gatekeeper assessment results, native CI privacy/vault evidence, and the remaining interactive checks.
 
 ## Remaining release gates
 
@@ -16,11 +18,11 @@ Tracked in the [0.1.1 unsigned preview milestone](https://github.com/pryzm-labs/
 
 | Gate | Current state | Completion evidence |
 | --- | --- | --- |
-| Release-preparation PR | In preparation | Version/lockfile consistency, public-doc checks, release metadata tests and passing PR CI |
-| [Dependency review #41](https://github.com/pryzm-labs/retract/issues/41) | Tracked in #41 | Combined candidates in [PR #50](https://github.com/pryzm-labs/retract/pull/50); the issue records final CI and merge disposition |
-| [Telegram disposable test-DC acceptance #42](https://github.com/pryzm-labs/retract/issues/42) | Pending | Role/search/destructive/recovery matrix from [TEST_PLAN.md](TEST_PLAN.md), exact commit and independent participant postconditions |
-| [Discord harmless exact-message acceptance #43](https://github.com/pryzm-labs/retract/issues/43) | Pending | Archive/account matching, exact deletion, second-participant verification, cancellation/restart/rate limits and Remember/Forget results |
-| [Native macOS credentials, privacy and accessibility #44](https://github.com/pryzm-labs/retract/issues/44) | Pending | Final packaged identity, Keychain/LocalAuthentication, launch/update, plaintext-canary inspection and rendered accessibility evidence |
+| Release-preparation PR | Complete | PR #50 merged; version/lockfile checks and all three CI jobs passed |
+| [Dependency review #41](https://github.com/pryzm-labs/retract/issues/41) | Complete | Combined candidates merged in PR #50; original dependency PRs and issue #41 closed |
+| [Telegram disposable test-DC acceptance #42](https://github.com/pryzm-labs/retract/issues/42) | Historical smoke pass reported by owner | Earlier tests reported successful on 2026-10-14; exact revision and complete role/recovery matrix not supplied |
+| [Discord harmless exact-message acceptance #43](https://github.com/pryzm-labs/retract/issues/43) | Historical smoke pass reported by owner | Earlier tests reported successful on 2026-10-14; exact revision and complete cancellation/rate-limit matrix not supplied |
+| [Native macOS credentials, privacy and accessibility #44](https://github.com/pryzm-labs/retract/issues/44) | Retained Discord opening and rebuilt clean startup verified; broader matrix open | Startup/history/source fixes passed independent review and the complete Linux arm64 Docker gate at `c61af59`, including 194 frontend/505 backend and three benchmark-feature tests. Native package `cb85f6d` passed artifact checks; the owner completed two prompts and native inspection confirmed the Telegram chat list without Retry and restored Discord import/sign-in. Broader credentials/accessibility/install checks remain in the validation record |
 | [Final tag and unsigned prerelease #45](https://github.com/pryzm-labs/retract/issues/45) | Pending | Final source passes CI and manual gates, published ZIP/checksum/manifest/provenance, independent downloaded-artifact verification |
 
 Keep manual evidence content-free: source commit, platform, role, fixed outcome classes and pass/fail are sufficient. Do not put credentials, tokens, exports, account identifiers, private content or screenshots in public issues. Existing exploratory use is useful feedback but does not close the complete acceptance matrix.
@@ -29,7 +31,7 @@ Keep manual evidence content-free: source commit, platform, role, fixed outcome 
 
 PR #50 integrates #30 (domain UUID 1.26.1), #33 (Vitest 5.0.1), #34 (tokio-tungstenite 0.30.0), #37 (thiserror 2.0.21), #38 (Rust Tauri 2.12.1/dialog 2.8.0) and #40 (npm API/CLI 2.12.1, icons, React plugin, jsdom and Vite updates). Their lockfile overlaps retain the application version `0.1.1` and the reviewed newer dependencies. #32's Tauri 2.11.6 update is superseded by the combined 2.12.1 update.
 
-The individual #38 and #40 macOS jobs failed because one side of Tauri moved to 2.12 while the other remained on 2.11. The combined branch aligns both sides and must pass all three required CI jobs before integration. The original PRs are retained until that validation and merge complete; issue #41 records the final result.
+The individual #38 and #40 macOS jobs failed because one side of Tauri moved to 2.12 while the other remained on 2.11. PR #50 aligned both sides, passed all three required CI jobs, and merged. The original PRs are closed; issue #41 records the final result.
 
 The candidate also refreshes development-only `source-map-js` from 1.2.1 to 1.2.2, using the registry's published tarball/integrity, for [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q). Both parent dependency ranges admit the patch; its acceptance includes a clean lockfile advisory check and locked installation in Docker.
 

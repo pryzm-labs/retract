@@ -1371,6 +1371,125 @@ fn rate_wait_rechecks_binding_before_any_retry_call() {
 }
 
 #[test]
+fn historical_resume_policy_plans_reopen_without_resealing_or_replaying() {
+    tauri::async_runtime::block_on(async {
+        for operation in [
+            PlanOperation::SelectedMessages,
+            PlanOperation::DeleteMyMessages,
+        ] {
+            for terminal_job in [false, true] {
+                let f = fixture();
+                if operation == PlanOperation::SelectedMessages {
+                    selection(&f).await;
+                } else {
+                    f.service.prepare_own_messages(-1001).await.unwrap();
+                }
+                // A pre-hardening envelope: still authenticated and supported,
+                // but its original seal includes the historical restart policy.
+                let mut historical = f.store.snapshot().unwrap().plans[0].clone();
+                historical.restart_policy = RestartPolicy::ResumeFrozenTargets;
+                historical.seal().unwrap();
+                let legacy = TelegramExecutionRecipe::validate_envelope(&historical).unwrap();
+                let mut job = normalize_job(
+                    &historical.scope,
+                    &legacy,
+                    &super::model::JobRecord::new(&legacy),
+                    true,
+                )
+                .unwrap();
+                if terminal_job {
+                    job.status = retract_domain::JobStatus::Cancelled;
+                }
+                f.store
+                    .transaction(|state| {
+                        state.plans = vec![historical.clone()];
+                        state.jobs = vec![job.clone()];
+                        Ok(())
+                    })
+                    .unwrap();
+                let before = f.store.snapshot().unwrap();
+                let repository = Arc::new(
+                    FoundationTelegramRepository::new(f.store.clone(), historical.scope.clone())
+                        .unwrap(),
+                );
+                let reopened = TelegramCleanup::new_scoped(
+                    f.gateway.clone(),
+                    f.gateway.clone(),
+                    f.context.clone(),
+                    repository.clone(),
+                )
+                .expect("valid historical plan must not prevent workspace startup");
+                reopened.resume_incomplete().await;
+                let after = f.store.snapshot().unwrap();
+                assert_eq!(after.plans, vec![historical.clone()]);
+                assert_eq!(after.identities, before.identities);
+                assert_eq!(after.sources, before.sources);
+                assert_eq!(after.jobs[0].id, job.id);
+                assert_eq!(after.jobs[0].counters, job.counters);
+                assert_eq!(after.jobs[0].next_batch, 0);
+                assert!(after.jobs[0].status.is_terminal());
+                if terminal_job {
+                    assert_eq!(after.jobs[0], job);
+                } else {
+                    assert_eq!(after.jobs[0].status, retract_domain::JobStatus::Failed);
+                    assert!(
+                        after.jobs[0]
+                            .diagnostics
+                            .iter()
+                            .any(|d| d.code == retract_domain::ErrorCode::RestartRequiresNewReview)
+                    );
+                }
+                assert!(f.gateway.delete_calls().await.is_empty());
+                assert!(f.gateway.current_reach_calls().await.is_empty());
+                // A subsequent publication must preserve the old envelope,
+                // while newly reviewed plans retain the hardened policy.
+                reopened
+                    .prepare_selection(PrepareSelectionRequest {
+                        message_refs: vec![MessageRef {
+                            chat_id: -1001,
+                            message_id: 14,
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                let published = f.store.snapshot().unwrap();
+                assert!(published.plans.contains(&historical));
+                assert_eq!(
+                    published
+                        .plans
+                        .iter()
+                        .find(|p| p.id != historical.id)
+                        .unwrap()
+                        .restart_policy,
+                    RestartPolicy::RequiresNewReview
+                );
+                let mut changed = repository.load().unwrap();
+                changed
+                    .plans
+                    .iter_mut()
+                    .find(|p| p.id == historical.id)
+                    .unwrap()
+                    .fingerprint = "sha256-v1:changed".into();
+                assert!(repository.save(&changed).is_err());
+                assert_eq!(f.store.snapshot().unwrap().plans, published.plans);
+                let mut changed = repository.load().unwrap();
+                // Retaining the old ID and fingerprint is not enough: frozen
+                // targets must also match the entire authenticated envelope.
+                changed
+                    .plans
+                    .iter_mut()
+                    .find(|p| p.id == historical.id)
+                    .unwrap()
+                    .items[0]
+                    .message_id += 1;
+                assert!(repository.save(&changed).is_err());
+                assert_eq!(f.store.snapshot().unwrap().plans, published.plans);
+            }
+        }
+    });
+}
+
+#[test]
 fn recovery_requires_new_review_and_still_blocks_foreign_scope() {
     tauri::async_runtime::block_on(async {
         let f = fixture();
