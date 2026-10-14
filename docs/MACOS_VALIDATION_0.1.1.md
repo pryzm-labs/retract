@@ -54,7 +54,17 @@ The owner authorized fixing startup without clearing saved data or credentials, 
 
 The compatibility fix compares the entire validated historical projection against its previous sealed envelope, then preserves that envelope verbatim. Only newly prepared plans are bound using the current policy. No schema, vault, credential, or profile-reset path was changed; recovered destructive jobs remain unable to replay automatically. Regression coverage checks unchanged envelopes, account/source records, counters/cursors, terminal-history preservation, safe stopping of queued work, new-policy publication, and rejection of changed targets even when their ID/fingerprint are retained.
 
-The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89jgwzfdcfpkoiq`): 178 frontend tests, 502 backend tests with the existing one opt-in resource-test ignore, domain/parser suites, production/metadata/boundary checks, strict Clippy/formatting, and three benchmark-feature tests. Independent read-only code review found no critical or important issues; its additional changed-target coverage was included in this passing run. A newly packaged native candidate is still pending. The initial candidate's CI and artifact evidence above do not establish native acceptance of the remediation.
+The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89jgwzfdcfpkoiq`): 178 frontend tests, 502 backend tests with the existing one opt-in resource-test ignore, domain/parser suites, production/metadata/boundary checks, strict Clippy/formatting, and three benchmark-feature tests. Independent read-only code review found no critical or important issues; its additional changed-target coverage was included in this passing run.
+
+### Fixed native candidate
+
+- Package source: `18257c88ada9e88e9f1fd0569edb8f045a468af9`.
+- ZIP SHA-256: `e6d9c0485d982754244b2d90b2f3b8f67ef3e43bad0b5566f79824f1facabd83`.
+- Executable CDHash: `3fb634d749d9ff7fc0247b7242cbccdb357ddcd4`.
+- Pinned-toolchain `npm run package:unsigned` passed on the local Apple-silicon host. Production fixture exclusion, extracted-bundle allowlists, arm64/static TDLib, system-only dependencies, developer-path exclusion, ad-hoc hardened signature and ZIP verification passed. The disposable native build directory was confirmed removed afterward.
+- Independent checksum, strict signature, bundle-contents and deployment-target checks passed on the extracted fixed candidate. Gatekeeper assessment still returned the expected unsigned rejection; no bypass was applied.
+- Before launch, a byte-identical copy of only the encrypted job-history file was retained in a private temporary directory with mode `0600`. No vault secrets or decrypted data were copied. With the previous app closed, the candidate was launched against the existing profile; the history file remained byte-identical while startup awaited the owner's Keychain response.
+- Fixed-candidate usable-workspace and subsequent native UI validation are pending that interaction. The initial candidate's CI evidence does not establish a native test-suite run on the fix.
 
 ## Still requiring native observation
 
