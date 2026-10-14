@@ -12,6 +12,15 @@ The narrow frontend fix retries only these read-only startup checks, at most thr
 
 Independent read-only review found no critical or important issues. Its additional contextless-to-ready, catalog/search context and settings-error coverage is included in the expanded suite: 194 frontend tests pass. Docker run `8jigvrndcorqq6d1awdg3ngt9` also passed 505 backend tests (one existing opt-in ignore), domain/parser suites, production checks, release/public/boundary checks, formatting and strict Clippy. The remaining benchmark-feature compile failed with Docker-internal `ENOSPC`, not a failing assertion; retry `voni7gt4odigrku7zqv5zucvm` hit the same disk limit. The complete Docker gate is therefore **not** recorded as passing. Only disposable Retract source/result layers and regenerable app-crate artifacts were reclaimed; dependency caches, other projects, saved profiles and credentials were preserved. Native package/clean-start validation continues separately.
 
+### Startup-fixed native candidate
+
+- Package source: `cb85f6d5c3d701feec62c9425bb8bb6e186a5d7c`.
+- ZIP SHA-256: `fb90efa1640a839b204a97f5b81a6f275dc6b1404c13a35946780fe6111c8f19`.
+- Executable CDHash: `e19ae3dea2250cfc6b3a6ebf245ea660ecca9aa9`.
+- Pinned-toolchain unsigned native packaging, production fixture exclusion, extracted-bundle allowlist, strict signature integrity, static TDLib/system dependencies, developer-path exclusion and checksum verification passed. The disposable native build tree was confirmed removed. The old candidate exited normally before the fresh candidate opened; no profile or credential reset was performed.
+- The owner completed two Keychain prompts and reported **No error**. Before any Retry action, native accessibility independently confirmed the Telegram chat list and retained completed/legacy job views. This cold launch did not require Retry and the prior stale-context startup symptom was absent. A single successful launch does not establish every timing, locked/denied-Keychain or older-macOS case; broader manual acceptance remains open.
+- The source chooser visibly showed **Loading imported accounts…**, then the retained Discord source became available without reimport. Opening it reached grouped navigation, archived results and preserved completed jobs. Connection settings showed **Verified for this archive · stored in Keychain** without token entry. Escape dismissed the dialog and left the usable workspace open. No credential edits, message selection, authorization or deletion occurred.
+
 ## Candidate identity
 
 - Merged source: `aa6ccfbabd807251840d962d701824d1197b1c3c` (PR #50).
