@@ -75,7 +75,7 @@ The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89j
 
 ## Still requiring native observation
 
-- Fix and revalidate the newly observed retained-Discord-source transition failure, keeping both sources recoverable when a candidate connection cannot open.
+- Revalidate the retained-Discord-source transition with the preservation fix below, keeping both sources recoverable when a candidate connection cannot open.
 - Record same-build reopen prompt count and full upgrade/reinstall behavior. Two prompts and usable Telegram startup on the rebuilt identity are verified; no general Keychain ACL or prompt-count guarantee is implied.
 - Touch ID/password fallback, cancel/expiry, and immutable-target reason. Never execute a real deletion merely to test authentication without separate approval.
 - Real Keychain denied/locked behavior and final-identity migration/ACL/update behavior. Do not alter the owner's existing vault to manufacture these tests.
@@ -84,3 +84,24 @@ The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89j
 - macOS 12 baseline: unavailable on the current host; no compatibility pass is claimed.
 
 See [TEST_PLAN.md](TEST_PLAN.md) and [release readiness](RELEASE_READINESS.md) for the full matrix. Keep issue #44 open until remaining outcomes are recorded or explicitly dispositioned.
+
+## Discord source-opening remediation
+
+The owner authorized fixing retained Discord source opening and recovery without clearing saved data or credentials. Synthetic regressions reproduced two independent defects: the persisted-state validator rejected supported historical `ResumeFrozenTargets` plan seals, and a failed candidate construction stopped the previous service, making subsequent source discovery/retry unusable.
+
+Fix `4e58fe8f0a2623cbc7c434dc8291d1f400d536e2` separates historical storage validation from execution validation. Original supported v1 envelopes remain sealed and readable; authorization and mutation still require a newly reviewed `RequiresNewReview` plan. Recovery stops unfinished jobs rather than replaying them, while preserving terminal history, account/source rows and counters. Source selection now constructs and bootstraps its candidate before retiring the previous workspace; candidate bootstrap failure shuts down only the candidate. No schema, credential, Keychain, archive reset or removal path was changed.
+
+Three focused regressions passed after their failures were reproduced. They cover encrypted Discord history reopen, rejection of tampered/unsupported or executable historical plans, no provider probes/deletes during recovery, failed registered source opening from setup and Telegram, saved Telegram plan/state preservation, corrected retry, same-scope Discord reselection and stale-session rejection. Registered IPC tests remain in the existing reviewed compatibility-test boundary; no lint exception was added. Independent read-only code review found no critical or important issue.
+
+The full Linux arm64 Docker gate completed successfully (BuildKit `zcecywjp3h50dfma5up8ejycz`): 178 frontend tests, 505 backend tests with the existing one opt-in resource-test ignore, domain/parser suites, nine release tests, 14 fixture-audit tests, 31 boundary tests, production/public-repository checks, all formatting/strict Clippy and three benchmark-feature tests. Disk exhaustion during earlier attempts was resolved by removing only reproducible Retract build-cache records; no unrelated images/volumes or saved application data were removed.
+
+Before native launch, a byte-identical mode-`0600` rollback copy of the existing encrypted Discord job-history file was retained in the private validation directory. No keys or decrypted data were copied.
+
+### Discord-fixed native candidate
+
+- Package source: `4e58fe8f0a2623cbc7c434dc8291d1f400d536e2`.
+- ZIP SHA-256: `ebc6aa9b2e4be5d02312808983c2dc5d36ac4f8d8dbaf9e56dfc6e3d7b81a50f`.
+- Executable CDHash: `eb5a621d48cd326fdc2ce00a729efa255281e6dc`.
+- Pinned-toolchain unsigned packaging passed on the local Apple-silicon host. Production exclusion, bundle allowlists, ad-hoc hardened signatures, static TDLib, system-only runtime dependencies and developer-path exclusion passed; the disposable native build directory was confirmed removed.
+- Independent ZIP checksum, extracted-bundle allowlist and strict signature verification passed. `file`, `LC_BUILD_VERSION` and Info.plist confirm arm64 and a macOS 12.0 deployment target, not execution on macOS 12. Read-only Gatekeeper assessment returned the expected unsigned rejection (exit 3); no protection was bypassed.
+- The exact candidate was launched against the existing profile, and process inspection confirmed one instance of that candidate. Native accessibility inspection timed out while startup awaited Keychain access; the owner was asked to complete the prompts, never to disclose a password. Retained-source opening remains pending; automated evidence does not establish a successful native source transition.
