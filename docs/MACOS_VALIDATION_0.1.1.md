@@ -64,12 +64,19 @@ The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89j
 - Pinned-toolchain `npm run package:unsigned` passed on the local Apple-silicon host. Production fixture exclusion, extracted-bundle allowlists, arm64/static TDLib, system-only dependencies, developer-path exclusion, ad-hoc hardened signature and ZIP verification passed. The disposable native build directory was confirmed removed afterward.
 - Independent checksum, strict signature, bundle-contents and deployment-target checks passed on the extracted fixed candidate. Gatekeeper assessment still returned the expected unsigned rejection; no bypass was applied.
 - Before launch, a byte-identical copy of only the encrypted job-history file was retained in a private temporary directory with mode `0600`. No vault secrets or decrypted data were copied. With the previous app closed, the candidate was launched against the existing profile; the history file remained byte-identical while startup awaited the owner's Keychain response.
-- Fixed-candidate usable-workspace and subsequent native UI validation are pending that interaction. The initial candidate's CI evidence does not establish a native test-suite run on the fix.
+- The owner completed two Keychain prompts again and reported that the fixed candidate reached the chat list. Native accessibility inspection independently confirmed a usable Telegram workspace with existing scoped job activity and preserved legacy-history entries. The original startup failure is resolved on this host. The initial candidate's CI evidence does not establish a native test-suite run on the fix.
+
+### Non-destructive native UI results
+
+- Telegram connection settings open with configured credentials retained; the stored hash does not need re-entry. No field was changed and **Save settings** was not pressed. Tab navigation reached the hash, test-server checkbox, Cancel and Save controls; Escape dismissed the dialog. Full native pointer-trigger focus restoration was not established by the accessibility tool.
+- Command-K focuses the message search field. Keyboard-only navigation reaches filters and job-details controls. Return opens a preserved job, focus moves to **Close job details**, and Escape returns focus to the original job control. The six outcome-counter labels and retained job/legacy-history views are accessible through the native accessibility tree. This does not replace a spoken VoiceOver test.
+- The source chooser visibly showed **Loading imported accounts…**, then the existing Discord import appeared without reimporting the ZIP. This establishes real loading-state and retained-source discovery evidence.
+- **Additional blocker:** selecting that retained Discord source failed. The UI subsequently showed only the source chooser with **Couldn’t load imported accounts** and a retry control, with no usable main workspace. Process inspection confirmed the same candidate remained running. `select_archive_v2` shuts down the current provider before `build_connection` succeeds; a failed construction can leave the previous provider stopped. The underlying Discord construction failure has not yet been established. No archive was reimported, removed or reset; no live deletion, token entry, Remember/Forget or credential edit was performed. Further source-transition remediation is required before this matrix can pass.
 
 ## Still requiring native observation
 
-- Revalidate the startup fix on a newly packaged candidate with the existing profile. The initial window opening after two prompts is not a usable-workspace pass.
-- Record prompt count and reopen behavior after remediation. Do not record credentials or private account/message data.
+- Fix and revalidate the newly observed retained-Discord-source transition failure, keeping both sources recoverable when a candidate connection cannot open.
+- Record same-build reopen prompt count and full upgrade/reinstall behavior. Two prompts and usable Telegram startup on the rebuilt identity are verified; no general Keychain ACL or prompt-count guarantee is implied.
 - Touch ID/password fallback, cancel/expiry, and immutable-target reason. Never execute a real deletion merely to test authentication without separate approval.
 - Real Keychain denied/locked behavior and final-identity migration/ACL/update behavior. Do not alter the owner's existing vault to manufacture these tests.
 - Keyboard/focus, VoiceOver, 200% effective zoom, reduced motion, both themes, title-bar drag, and large confirmation plans in a short viewport.
