@@ -34,6 +34,7 @@ Prepared for an unsigned prerelease. The tag and GitHub release have not been pu
 
 ### Changed
 
+- Aligned Rust Tauri, the JavaScript API and CLI on 2.12.1, including dialog-plugin 2.8.0; refreshed the frontend tooling and icons, Vitest 5.0.1, domain UUID/thiserror and the development WebSocket dependency.
 - TDLib 1.8.64 is statically linked from a pinned, integrity-checked archive; runtime settings cannot select a native library path.
 - Browser-debug Discord token capture is disabled in release builds; synthetic browser compatibility harnesses remain available in development.
 - Local and GitHub Docker builds share a tracked-files-only context wrapper, target-specific dependency downloads and reusable named caches. Temporary build contexts are cleaned after success or failure.

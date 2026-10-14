@@ -17,13 +17,19 @@ Tracked in the [0.1.1 unsigned preview milestone](https://github.com/pryzm-labs/
 | Gate | Current state | Completion evidence |
 | --- | --- | --- |
 | Release-preparation PR | In preparation | Version/lockfile consistency, public-doc checks, release metadata tests and passing PR CI |
-| [Dependency review #41](https://github.com/pryzm-labs/retract/issues/41) | Pending | Disposition of each current Dependabot PR; covering checks for accepted updates |
+| [Dependency review #41](https://github.com/pryzm-labs/retract/issues/41) | Tracked in #41 | Combined candidates in [PR #50](https://github.com/pryzm-labs/retract/pull/50); the issue records final CI and merge disposition |
 | [Telegram disposable test-DC acceptance #42](https://github.com/pryzm-labs/retract/issues/42) | Pending | Role/search/destructive/recovery matrix from [TEST_PLAN.md](TEST_PLAN.md), exact commit and independent participant postconditions |
 | [Discord harmless exact-message acceptance #43](https://github.com/pryzm-labs/retract/issues/43) | Pending | Archive/account matching, exact deletion, second-participant verification, cancellation/restart/rate limits and Remember/Forget results |
 | [Native macOS credentials, privacy and accessibility #44](https://github.com/pryzm-labs/retract/issues/44) | Pending | Final packaged identity, Keychain/LocalAuthentication, launch/update, plaintext-canary inspection and rendered accessibility evidence |
 | [Final tag and unsigned prerelease #45](https://github.com/pryzm-labs/retract/issues/45) | Pending | Final source passes CI and manual gates, published ZIP/checksum/manifest/provenance, independent downloaded-artifact verification |
 
 Keep manual evidence content-free: source commit, platform, role, fixed outcome classes and pass/fail are sufficient. Do not put credentials, tokens, exports, account identifiers, private content or screenshots in public issues. Existing exploratory use is useful feedback but does not close the complete acceptance matrix.
+
+### Dependency candidates
+
+PR #50 integrates #30 (domain UUID 1.26.1), #33 (Vitest 5.0.1), #34 (tokio-tungstenite 0.30.0), #37 (thiserror 2.0.21), #38 (Rust Tauri 2.12.1/dialog 2.8.0) and #40 (npm API/CLI 2.12.1, icons, React plugin, jsdom and Vite updates). Their lockfile overlaps retain the application version `0.1.1` and the reviewed newer dependencies. #32's Tauri 2.11.6 update is superseded by the combined 2.12.1 update.
+
+The individual #38 and #40 macOS jobs failed because one side of Tauri moved to 2.12 while the other remained on 2.11. The combined branch aligns both sides and must pass all three required CI jobs before integration. The original PRs are retained until that validation and merge complete; issue #41 records the final result.
 
 The minimum supported platform is Apple-silicon macOS 12. Verify that baseline and a current macOS release where available, recording unavailable coverage honestly. Paid Apple signing and notarization are not prerequisites for this unsigned preview.
 
