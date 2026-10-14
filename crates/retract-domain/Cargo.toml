@@ -1,6 +1,6 @@
 [package]
 name = "retract-domain"
-version = "0.1.0"
+version = "0.1.1"
 description = "Provider-neutral identity and remediation contracts for Retract"
 authors = ["Pryzm Labs"]
 edition = "2024"
