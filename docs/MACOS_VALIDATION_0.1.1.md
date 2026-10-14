@@ -75,7 +75,7 @@ The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89j
 
 ## Still requiring native observation
 
-- Revalidate the retained-Discord-source transition with the preservation fix below, keeping both sources recoverable when a candidate connection cannot open.
+- Capture and diagnose the remaining cold-start **Workspace not ready** failure. The owner reports successful opening after **Retry** on the Discord-fixed candidate; clean startup is not established. Retained Discord source opening has now passed the non-destructive checks below.
 - Record same-build reopen prompt count and full upgrade/reinstall behavior. Two prompts and usable Telegram startup on the rebuilt identity are verified; no general Keychain ACL or prompt-count guarantee is implied.
 - Touch ID/password fallback, cancel/expiry, and immutable-target reason. Never execute a real deletion merely to test authentication without separate approval.
 - Real Keychain denied/locked behavior and final-identity migration/ACL/update behavior. Do not alter the owner's existing vault to manufacture these tests.
@@ -104,4 +104,12 @@ Before native launch, a byte-identical mode-`0600` rollback copy of the existing
 - Executable CDHash: `eb5a621d48cd326fdc2ce00a729efa255281e6dc`.
 - Pinned-toolchain unsigned packaging passed on the local Apple-silicon host. Production exclusion, bundle allowlists, ad-hoc hardened signatures, static TDLib, system-only runtime dependencies and developer-path exclusion passed; the disposable native build directory was confirmed removed.
 - Independent ZIP checksum, extracted-bundle allowlist and strict signature verification passed. `file`, `LC_BUILD_VERSION` and Info.plist confirm arm64 and a macOS 12.0 deployment target, not execution on macOS 12. Read-only Gatekeeper assessment returned the expected unsigned rejection (exit 3); no protection was bypassed.
-- The exact candidate was launched against the existing profile, and process inspection confirmed one instance of that candidate. Native accessibility inspection timed out while startup awaited Keychain access; the owner was asked to complete the prompts, never to disclose a password. Retained-source opening remains pending; automated evidence does not establish a successful native source transition.
+- The exact candidate was launched against the existing profile, and process inspection confirmed one instance of that candidate. Native accessibility inspection timed out while startup awaited Keychain access; the owner was asked to complete the prompts, never to disclose a password. Call-stack sampling confirmed `create_service` → `effective_live` → `SecItemCopyMatching` while awaiting owner interaction.
+
+### Retained-source native revalidation
+
+- The owner reported two Keychain prompts and **Workspace not ready** on initial startup; **Retry** then opened the Telegram chat list. Native accessibility independently confirmed the usable Telegram workspace and existing scoped/legacy cleanup history. The error heading is known, but its underlying diagnostic has not been captured. This is not a clean-startup pass.
+- The source chooser showed its imported-account loading state, then the existing Discord import appeared without reimporting. Selecting it successfully opened a populated Discord workspace with grouped navigation, archived results and retained completed job activity. The earlier account/source and unsupported-version failures were not present.
+- Opening Discord connection settings showed **Verified for this archive** and **stored in Keychain**, confirming remembered sign-in restored without token entry. No token was viewed, copied, replaced, forgotten or resaved.
+- Server groups expanded without blanking the workspace. An actual server-channel row opened its populated, channel-filtered results. The unclassified group expanded and collapsed. A harmless local no-match keyword query showed **No messages found**; clearing it restored the selected channel's results. No message selection, review authorization or deletion occurred.
+- With no active cleanup, the candidate was quit normally and process inspection confirmed exit. A same-build reopen was attempted to capture cold-start behavior. The owner pressed **Retry** before the diagnostic could be inspected; the native Telegram workspace was usable again afterward. The prompt count for this second probe was not supplied. Startup root cause and clean same-build reopen remain unresolved; no speculative code fix or data/credential reset was made.
