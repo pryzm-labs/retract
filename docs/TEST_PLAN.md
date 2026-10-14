@@ -30,6 +30,8 @@ PR #50's reviewed revision `75453d6e9e4bd20aa06bc2d5e96a034049fb7d78`, squash-me
 
 The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) separately runs `npm ci --ignore-scripts --no-audit --no-fund` and `npm run package:unsigned` on macOS. It verifies the app, bundled TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. If that job cannot be run for the tested revision, report it as unavailable/not run; do not fabricate a package or access real Keychain/session data for automated proof.
 
+Subsequently, [PR #51](https://github.com/pryzm-labs/retract/pull/51) merged startup/history/source remediation as `3e0ebcb`; [Secure build run 38592158392](https://github.com/pryzm-labs/retract/actions/runs/38592158392) passed both Linux architectures and native macOS on that exact commit. On 2026-10-14 the owner explicitly accepted manual testing as complete for the unsigned preview, based on their extensive previous testing. This is owner disposition, not independently observed completion of every case below; unsupported/unavailable platform coverage remains explicit. The separately authorized browser-quarantine installation/update check and final published-artifact verification are tracked in the validation/readiness records.
+
 An authorized native developer may additionally run `npm run check` to exercise the opt-in bundled TDLib loading smoke test. A separately authorized online `npm audit --audit-level=high` checks current advisories; it is not part of the offline Docker result. Record these outcomes separately, including unexpected network access during live testing.
 
 ### Encrypted archive integration

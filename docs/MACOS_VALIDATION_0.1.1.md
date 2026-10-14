@@ -2,6 +2,16 @@
 
 Recorded on 2026-10-14. This is evidence for the unsigned preview, not a claim that every manual acceptance case passed. No live messages were deleted during this validation.
 
+## Owner disposition and unsigned installation/update check
+
+On 2026-10-14 the owner explicitly instructed that manual testing be accepted as complete, based on their extensive previous tests, and authorized the unsigned installation/update check. Manual provider/usability coverage is therefore accepted by the release owner; exact earlier revisions and a per-case matrix are not independently established. No further live cleanup was performed.
+
+The exact merged-main candidate was rebuilt from `3e0ebcb74ada1eb7c16aa075644ebb821eb751e6`; ZIP SHA-256 is `4c5f03c11c0aafc3c5ee90bc2fc2d6b25cea94d2355f0c0d3c12d5c449e049d7`, and executable CDHash is `2a1abfb3ec5822b4532450983bf20d200b9c1d87`. Pinned-toolchain packaging, production exclusion, strict signature/contents/dependency checks and checksum verification passed; the disposable build tree was removed. Main's [Secure build run 38592158392](https://github.com/pryzm-labs/retract/actions/runs/38592158392) passed both Linux architectures and native macOS tests/unsigned packaging.
+
+There is no public 0.1.1 artifact yet. The install check therefore uses real Brave browser downloads from a temporary loopback-only server serving only the verified package sets, not a simulated quarantine attribute. Baseline (`cb85f6d`) and candidate downloads matched their verified ZIPs byte-for-byte and both acquired browser-added quarantine. Finder's Archive Utility extraction preserved the baseline quarantine; Finder copied it into Applications, and the installed app retained quarantine, a valid ad-hoc signature and the expected baseline CDHash. No prior Applications installation was overwritten. The loopback server was stopped after downloading both packages.
+
+The baseline launched without a new Gatekeeper block because its build identity had already been opened on this Mac; this is **not** a fresh-identity Open Anyway pass. The owner was asked to handle Keychain prompts, with baseline workspace verification and update replacement still pending. The rebuilt candidate has a distinct CDHash and is reserved for the update/trust check. No quarantine was stripped, no Gatekeeper policy was disabled, and no saved profile or credential was reset. Final GitHub-download/provenance verification remains a post-publication check, and macOS 12 execution remains unavailable on this host.
+
 ## Cold-start read reconciliation
 
 On the next same-build reopen, the owner completed Keychain prompts and left the app untouched. Native accessibility inspection captured **Workspace not ready** / **The connection has changed. Review this action again.** before Retry. This is the fixed safe `stale_context` diagnostic, not a credential or saved-history reset request.
@@ -98,7 +108,9 @@ The full Linux arm64 Docker gate completed successfully (BuildKit `392rabgfyq89j
 - The source chooser visibly showed **Loading imported accounts…**, then the existing Discord import appeared without reimporting the ZIP. This establishes real loading-state and retained-source discovery evidence.
 - **Additional blocker:** selecting that retained Discord source failed. The UI subsequently showed only the source chooser with **Couldn’t load imported accounts** and a retry control, with no usable main workspace. Process inspection confirmed the same candidate remained running. `select_archive_v2` shuts down the current provider before `build_connection` succeeds; a failed construction can leave the previous provider stopped. The underlying Discord construction failure has not yet been established. No archive was reimported, removed or reset; no live deletion, token entry, Remember/Forget or credential edit was performed. Further source-transition remediation is required before this matrix can pass.
 
-## Still requiring native observation
+## Native coverage not independently established
+
+The owner has accepted the previous manual testing as complete for this preview. The cases below remain useful additional coverage, not a request to repeat their full manual matrix. The separately authorized unsigned installation/update check is in progress above; published-artifact verification remains a release step. No unavailable case is represented as passed.
 
 - Repeat cold-start/reopen observation across additional timing conditions if available. The captured stale-context race is fixed and one clean startup without Retry is verified on the startup-fixed candidate above; a general timing guarantee is not implied.
 - Record same-build reopen prompt count and full upgrade/reinstall behavior. Two prompts and usable Telegram startup on the rebuilt identity are verified; no general Keychain ACL or prompt-count guarantee is implied.
