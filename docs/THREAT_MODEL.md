@@ -44,7 +44,7 @@ Retract helps a user revoke history that Telegram or Discord still permits the m
 
 ## Encrypted archive backend boundary
 
-The separate archive backend stores only explicitly imported normalized observations. The production Discord importer accepts one bounded, versioned Data Package profile and exposes search/remediation through the same scoped provider contract; X and other archive providers remain unavailable. Its SQLCipher/OpenSSL source provenance, crypto flags and licenses are recorded in [ARCHIVE_STORAGE.md](ARCHIVE_STORAGE.md) and the pinned native provenance manifest. Archive evidence and inert locators alone never grant remote remediation authority.
+The separate archive backend stores only explicitly imported normalized observations. The production Discord importer accepts one bounded, versioned Data Package profile and exposes search/remediation through the same scoped provider contract; X and other archive providers remain unavailable. Its SQLCipher/OpenSSL source provenance, crypto flags and licenses are recorded in [STORAGE.md](STORAGE.md) and the pinned native provenance manifest. Archive evidence and inert locators alone never grant remote remediation authority.
 
 Every import/query/removal binds provider, account and source. Backend-issued sessions and committed checkpoints control mutation; published generations bind query cursors. A bounded blocking worker rejects oversized requests before copying/queueing, allows two pending batches, and observes a shared cancellation signal before queued mutation and commit. Source removal preserves surviving observations and IDs, retires old authority and records pending maintenance durably. Memory-only identity pruning and `VACUUM` can require substantial RAM; memory/disk failure does not permit plaintext temporary storage or restoring logically removed content.
 
@@ -88,4 +88,4 @@ Sensitive-data detection is heuristic. It can miss novel formats, context-depend
 - Verify the verbosity-`0` TDLib default in the packaged macOS app and ensure release launch configuration never enables content-bearing native diagnostics. Explicit developer overrides must remain opt-in and be treated as potentially sensitive.
 - Add a dependency/SBOM and native-library vulnerability scan to CI.
 - Run the entire test-DC matrix and an independent destructive-action security review.
-- Resolve or explicitly reject every finding from the 2026-09-26 delegated Deep Security Scan before release; its baseline report contains 1 high-, 8 medium- and 10 low-severity findings.
+- Review security findings and their remediations before release; retain validated findings, fixes and remaining-risk decisions in the relevant security reports and PRs.

@@ -6,7 +6,7 @@ All notable changes to Retract are documented here. The project follows [Semanti
 
 ## [0.1.1] - Planned
 
-Prepared for an unsigned prerelease. The tag and GitHub release have not been published; manual provider and macOS acceptance remains pending. See [release readiness](docs/RELEASE_READINESS.md).
+Prepared for an unsigned prerelease; not yet tagged or published. See the [release guide](docs/RELEASING.md) for packaging and publication requirements.
 
 ### Added
 

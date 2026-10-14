@@ -31,7 +31,7 @@ Retract is a local-first macOS desktop app for searching and cleaning Telegram a
 - Revoke selected messages, your own history, or the broadest history an administrator can remove before leaving a group.
 - Clear or remove a conversation from your own chat list even when there is nothing you can revoke for the other participant.
 - Permanently delete a group only when Telegram reports that the signed-in owner has that capability, through a separate critical action.
-- Resume eligible, previously authorized frozen-ID cleanup batches after a flood wait or restart only under the same verified account/source, without expanding the reviewed target set. Dynamic whole-history, self-only history, sender-wide, and permanent group-deletion operations stop after an ambiguous restart and require a new review.
+- Continue eligible cleanup after a rate-limit wait under the same verified account/source, without expanding the reviewed target set. After an app restart, destructive work requires a new review and fresh device-owner authorization; saved jobs never replay automatically.
 - Inspect complete cleanup outcomes on demand, including skipped, failed and uncertain results, retry timing, and safe explanations for blocked work.
 - Import a Discord Data Package, search only the messages attributed to that archive's owner, and delete selected exact message IDs after verifying the matching Discord account.
 
@@ -65,7 +65,7 @@ The v0.1.x preview supports Apple-silicon Macs running macOS 12 or newer.
 
 Do not disable Gatekeeper globally. Each release also publishes a manifest tying the archive to its source tag.
 
-Version `0.1.1` is currently being prepared. No GitHub preview release has been published as of 2026-10-14; the older `v0.1.0` tag predates the current security remediation. Follow the source-build instructions while the [release-readiness tasks](docs/RELEASE_READINESS.md) are completed.
+Version `0.1.1` is currently being prepared; the older `v0.1.0` tag predates the current security remediation. Use the source-build instructions until an unsigned preview appears on the Releases page. Maintainers should follow the [release guide](docs/RELEASING.md).
 
 ## Build from source
 
@@ -100,7 +100,7 @@ The API hash, TDLib database key, and encrypted job-store key live in one versio
 ### Import and clean Discord history
 
 > [!WARNING]
-> Discord cleanup is experimental and pre-release. Archive import and local search are non-destructive, but live user-token automation is unsupported by Discord and the complete native/live acceptance matrix has not passed. Use only a disposable owner-authored message for testing, verify the exact account and target, and assume Discord may restrict the account.
+> Discord cleanup is experimental and pre-release. Archive import and local search are non-destructive, but live user-token automation is unsupported by Discord. Use only a disposable owner-authored message for testing, verify the exact account and target, and assume Discord may restrict the account.
 
 First request a package in Discord under **User Settings → Data & Privacy → Request your data**. Discord says package generation can take up to 30 days; its [Data Package guide](https://support.discord.com/hc/en-us/articles/360004957991-Your-Discord-Data-Package) explains the contents and current request flow.
 
@@ -116,9 +116,9 @@ First request a package in Discord under **User Settings → Data & Privacy → 
 
 Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. Release builds use explicit one-way manual token entry: generic browser-debug token capture is disabled because another local process could race or observe those endpoints. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
 
-First archive use obtains an independent key and upgrades the shared vault while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [archive storage details](docs/ARCHIVE_STORAGE.md).
+First archive use obtains an independent key and upgrades the shared vault while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [storage details](docs/STORAGE.md).
 
-When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. This job migration preserves credential values and TDLib session/profile paths; the separate archive-key upgrade is described above. See the [migration contract](docs/TELEGRAM_CHARACTERIZATION.md#current-encrypted-store-and-migration-contract).
+When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. This job migration preserves credential values and TDLib session/profile paths; the separate archive-key upgrade is described above. See the [migration contract](docs/STORAGE.md#job-state-and-migration).
 
 Connection failures show a safe diagnostic with verification retry and connection settings. If a profile is in use, close the other Retract process before retrying. Invalid state remains blocked: preserve the profile and backup rather than deleting or restoring files. A failed settings replacement can be corrected in the app; recovery rediscovers the current connection without automatically repeating a save or cleanup.
 
@@ -165,10 +165,10 @@ The prune command is interactive and scoped to Retract's named BuildKit caches. 
 - The webview uses a strict content security policy and a minimal Tauri capability allowlist.
 - Production bundles resolve only the desktop IPC adapter. Synthetic fixture data is compiled only for tests and the dedicated screenshot build.
 
-Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for trust boundaries and residual risks. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Never attach Telegram or Discord credentials, tokens, sessions, exports, databases, or private screenshots to a public issue.
+Read the [architecture guide](docs/ARCHITECTURE.md) for component ownership and the [threat model](docs/THREAT_MODEL.md) for trust boundaries and residual risks. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md). Never attach Telegram or Discord credentials, tokens, sessions, exports, databases, or private screenshots to a public issue.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Contributions must use synthetic data and preserve the invariant that everyone-scoped deletion never silently becomes self-only deletion.
 
-Retract is licensed under the [MIT License](LICENSE). Bundled dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Release history is in [CHANGELOG.md](CHANGELOG.md), and the original product rationale remains in [PLAN.md](PLAN.md).
+Retract is licensed under the [MIT License](LICENSE). Bundled dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Release history is in [CHANGELOG.md](CHANGELOG.md); proposed work is tracked in [GitHub issues](https://github.com/Pryzm-Labs/retract/issues).

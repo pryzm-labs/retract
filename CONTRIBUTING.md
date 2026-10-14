@@ -1,6 +1,6 @@
 # Contributing to Retract
 
-Thank you for helping make Telegram cleanup safer and clearer.
+Thank you for helping make Telegram and Discord cleanup safer and clearer.
 
 ## Before opening a change
 
@@ -32,6 +32,8 @@ npm run tauri dev
 ```
 
 Telegram credentials are entered in the app. Environment variables in `.env.example` are optional developer/CI overrides and must never be committed.
+
+Read the [architecture](docs/ARCHITECTURE.md), [storage and migration contracts](docs/STORAGE.md), and [threat model](docs/THREAT_MODEL.md) before changing provider or persistence behavior. Use the [test plan](docs/TEST_PLAN.md) for validation and the [release guide](docs/RELEASING.md) for packaging. Keep these documents about current behavior; put task plans, development notes and release-specific evidence in issues or PRs rather than adding repository diaries.
 
 ## Pull requests
 
