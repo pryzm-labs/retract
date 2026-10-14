@@ -31,6 +31,8 @@ PR #50 integrates #30 (domain UUID 1.26.1), #33 (Vitest 5.0.1), #34 (tokio-tungs
 
 The individual #38 and #40 macOS jobs failed because one side of Tauri moved to 2.12 while the other remained on 2.11. The combined branch aligns both sides and must pass all three required CI jobs before integration. The original PRs are retained until that validation and merge complete; issue #41 records the final result.
 
+The candidate also refreshes development-only `source-map-js` from 1.2.1 to 1.2.2, using the registry's published tarball/integrity, for [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q). Both parent dependency ranges admit the patch; its acceptance includes a clean lockfile advisory check and locked installation in Docker.
+
 The minimum supported platform is Apple-silicon macOS 12. Verify that baseline and a current macOS release where available, recording unavailable coverage honestly. Paid Apple signing and notarization are not prerequisites for this unsigned preview.
 
 ## Publication procedure
