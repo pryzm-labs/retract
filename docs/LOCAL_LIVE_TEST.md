@@ -33,7 +33,7 @@ This pinned, non-root/offline project check exercises keyword search, filters, a
 
 When checking an upgrade, `jobs.pre-provider.enc` must retain the exact legacy ciphertext. Active `jobs.enc` becomes v3 and is unreadable by older Retract versions; no automatic backup restoration is attempted. Unfinished legacy work needs a new reviewed plan, and foreign-account jobs stay blocked without retargeting. Credentials, Keychain entries and TDLib session/profile paths do not change. The foundation adds no message-body or private-filename index/persistence.
 
-The fixture UI exists only in the automated tests and the dedicated `npm run screenshot:dev` documentation mode. The normal Tauri app always requires a real Telegram connection.
+The fixture UI exists only in the automated tests and the dedicated `npm run screenshot:dev` documentation mode. The normal Tauri app asks you to connect Telegram or import a Discord package; this guide covers the Telegram path.
 
 ## 3. Verify the included TDLib engine
 

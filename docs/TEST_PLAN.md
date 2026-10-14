@@ -14,11 +14,19 @@ The preferred gate uses pinned Docker toolchains, locked dependencies, shared na
 
 ```sh
 npm run container:check
-docker buildx build --platform linux/amd64 --target checks --output type=cacheonly --progress plain .
-docker buildx build --platform linux/arm64 --target checks --output type=cacheonly --progress plain .
+sh scripts/container-build.sh check linux/amd64
+sh scripts/container-build.sh check linux/arm64
 ```
 
 These commands run unfiltered Vitest, release/public metadata tests, TypeScript/production build, fixture exclusion, provider-boundary controlled tests plus real-tree lint, and Rust tests/formatting/Clippy for `cleaner-domain`, `retract-domain`, `discord-archive` and `src-tauri`. Require no failures or unexpected ignores and treat Clippy warnings as errors. The existing explicitly ignored 100,000-item archive corpus resource gate remains opt-in and is not a failure by itself. Do not export runnable images or prune Docker state for verification. The npm wrapper runs on the host only to dispatch Docker; project tests/builds run inside the container.
+
+The wrapper includes only files already in Git's index, creates the required context sentinel, and removes its temporary context on exit. Stage new source files before checking them. A direct repository-directory Docker build fails intentionally because it lacks that sentinel.
+
+### Current automated and security evidence
+
+[PR #36](https://github.com/pryzm-labs/retract/pull/36) merged security remediation as `d926d8e`. Its reviewed branch revision `8f2ed78e420c0b3f8680f167e7c276973513702e` passed [Secure build run 36274011228](https://github.com/pryzm-labs/retract/actions/runs/36274011228) on 2026-09-27 in Europe/Madrid: Linux amd64 (8m42s), Linux arm64 (8m18s), and native Apple-silicon tests/unsigned packaging (12m44s). The local unsigned package gate also passed. The 19 deep-scan findings and final review cancellation/session races were addressed with regression coverage. This records remediation and automated checks; a new independent scan was not claimed after remediation.
+
+Manual Telegram/Discord deletion, native credential prompts, Gatekeeper launch, rendered accessibility and packaged privacy checks remain pending. [Release readiness](RELEASE_READINESS.md) tracks these separately. Any changed release revision must pass its own CI before tagging.
 
 The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) separately runs `npm ci --ignore-scripts --no-audit --no-fund` and `npm run package:unsigned` on macOS. It verifies the app, bundled TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. If that job cannot be run for the tested revision, report it as unavailable/not run; do not fabricate a package or access real Keychain/session data for automated proof.
 
@@ -42,7 +50,7 @@ The native macOS job now includes parser tests/fmt/Clippy and the Discord backen
 
 ### Discord live acceptance
 
-Exploratory local testing completed before this revision exercised a real private Data Package import, reopening and selecting the imported source, grouped Discord navigation, manual token-based account connection and remembered-session restoration. This establishes useful UX feedback only: no credential, message content, package path or private fixture is retained in the repository, and the run did not complete the destructive, browser-capture, rate-limit, second-participant or full Keychain acceptance matrix below.
+Exploratory local testing completed before this revision exercised a real private Data Package import, reopening and selecting the imported source, grouped Discord navigation, manual token-based account connection and remembered-session restoration. This establishes useful UX feedback only: no credential, message content, package path or private fixture is retained in the repository, and the run did not complete the destructive, rate-limit, second-participant or full Keychain acceptance matrix below. Development browser harness tests use synthetic credentials only and are separate from live acceptance.
 
 - Import a current Data Package through the native picker; confirm the path and raw ZIP bytes never appear in frontend state or logs, progress counters advance, cancellation stops uncommitted work, and the imported source is searchable without Discord authentication.
 - Confirm production/preview builds discover no browser-debug providers and expose the browser-neutral manual-entry path. In a development-only synthetic compatibility run, test Chromium-family and Firefox harnesses separately: each must open a visible fresh temporary profile, bind automation to loopback, never touch the existing browser profile, close on success/cancel/timeout, and complete best-effort profile cleanup. Never use a real Discord credential for the development harness.
@@ -54,19 +62,17 @@ Exploratory local testing completed before this revision exercised a real privat
 
 ### Telegram provider-refactor characterization
 
-The full Docker gate includes frozen v1 readers/native behavior, the immutable pre-extraction Telegram recipe/`RTRCT03` corpus, current v2 lifecycle tests, direct query/cleanup ownership checks and the provider architecture rule. For focused synthetic iteration on Linux `arm64`:
+The full Docker gate includes frozen v1 readers/native behavior, the immutable pre-extraction Telegram recipe/`RTRCT03` corpus, current v2 lifecycle tests, direct query/cleanup ownership checks and the provider architecture rule. Use the current secure entry point on Linux `arm64`:
 
 ```sh
-docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=npm test -- src/provider-lifecycle.test.tsx src/providers/contract.test.ts src/ipc-contract.test.ts' .
-docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=npm run check:provider-boundaries' .
-docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::migration_tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::query_tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml providers::telegram::remediation::tests && cargo test --offline --locked --manifest-path src-tauri/Cargo.toml foundation_lock_tests' .
+sh scripts/container-build.sh check linux/arm64
 ```
 
-These focused filters are not substitutes for the full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. The separate migration corpus freezes all nine native recipes and exact authenticated v3 bytes from the pre-extraction implementation. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for its provenance, the direct provider ownership inventory and preserved native behavior.
+Historical focused filters are not substitutes for this full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. The separate migration corpus freezes all nine native recipes and exact authenticated v3 bytes from the pre-extraction implementation. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for its provenance, the direct provider ownership inventory and preserved native behavior.
 
 For reviewed migration commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`, both required Linux architecture gates passed on 2026-09-06: 158 frontend tests, 329 backend tests with one existing opt-in archive corpus test ignored, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled boundary tests plus the real-tree check, production bundle/public repository verification, all formatting checks and strict Clippy. Both builds copied that exact committed tree and executed the project checks; the BuildKit results were `yafbi07vc0a8p6gv3hjryumwt` for `arm64` and `ado6le3q5vvow7wk1pojcyq9u` for `amd64`. No archive corpus benchmark was run because the provider migration does not alter archive indexing. Independent whole-branch review of `0d799b0..c7f2f5f` completed with no Critical or Important issues. The earlier runtime-only `3a78bd207d89be3d3bc93b8cfac6930ce04017e6` results remain useful historical evidence; do not mistake them for the current accepted head or transfer the full-gate claim to later changes.
 
-This Linux evidence does not complete native macOS packaging, TDLib loading, Keychain/LocalAuthentication, rendered VoiceOver/short-viewport behavior, or live test-DC parity. Those gates remain not run until an exact reviewed revision is authorized and, for CI, published. Changes after the reviewed `c7f2f5f` baseline require proportionate covering checks and review; the immediate documentation-only closure uses the focused public-repository check and scoped re-review rather than claiming another full runtime gate.
+This historical Linux evidence did not establish native macOS acceptance. The current automated evidence above supersedes its packaging status. Keychain/LocalAuthentication, rendered VoiceOver/short-viewport behavior and live test-DC parity remain manual gates. Changes after each reviewed baseline require covering checks and review.
 
 ## Test identities
 
@@ -159,7 +165,7 @@ For every accepted operation, verify from both participating accounts after TDLi
 ## Production exit criteria
 
 - Two-person review of evidence for every destructive and confirmation case.
-- The 2026-09-26 delegated Deep Security Scan of baseline `2e71a25` reported 1 high-, 8 medium- and 10 low-severity findings. Release is blocked until the high finding is fixed and verified and every remaining finding is fixed, rejected with source-backed evidence, or explicitly accepted with a documented rationale.
+- The 2026-09-26 delegated Deep Security Scan of baseline `2e71a25` reported 1 high-, 8 medium- and 10 low-severity findings; remediation is merged in PR #36. Preserve that evidence and assess later changes for regressions. The outstanding manual gates above still require acceptance before publication.
 - No unresolved critical/high security findings and no untriaged medium/low findings.
 - TDLib binary digest matches the reviewed artifact and is bundled/ad-hoc-signed with the preview app.
 - Privacy copy and support documentation state the residual-copy limitations.

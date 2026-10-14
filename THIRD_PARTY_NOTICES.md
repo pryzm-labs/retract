@@ -20,17 +20,17 @@ SQLCipher uses the statically linked OpenSSL source supplied by `openssl-src` 30
 
 ## Discord remediation dependencies
 
-Discord identity/deletion HTTPS uses `reqwest` 0.12.28 with rustls rather than native TLS. Isolated Chromium/Firefox protocol capture uses `tokio-tungstenite` 0.28.0. The native ZIP picker uses `tauri-plugin-dialog` 2.7.3 and `rfd` 0.16.0; Unix regular-file opening uses `libc` 0.2.189. Their declared licenses are MIT, Apache-2.0, or the stated MIT/Apache-2.0 alternatives. The exact registry checksums are frozen in `src-tauri/Cargo.lock`:
+Discord identity/deletion HTTPS uses `reqwest` 0.12.28 with rustls rather than native TLS. Development-only isolated Chromium/Firefox protocol capture uses `tokio-tungstenite` 0.30.0. The native ZIP picker uses `tauri-plugin-dialog` 2.8.0 and `rfd` 0.16.0; Unix regular-file opening uses `libc` 0.2.189. Their declared licenses are MIT, Apache-2.0, or the stated MIT/Apache-2.0 alternatives. The exact registry checksums are frozen in `src-tauri/Cargo.lock`:
 
 | Package | Version | Cargo registry checksum (SHA-256) |
 | --- | --- | --- |
 | reqwest | 0.12.28 | `eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147` |
-| tokio-tungstenite | 0.28.0 | `d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857` |
-| tauri-plugin-dialog | 2.7.3 | `61854a36651aa48381e5e209f69a01273b77f3f9f91f0c430b1b98d33bd47229` |
+| tokio-tungstenite | 0.30.0 | `17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71` |
+| tauri-plugin-dialog | 2.8.0 | `7527c5fd1678032d116c1a82e5d609c67370e56f858ae6cfd376bbca37fe0490` |
 | rfd | 0.16.0 | `a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672` |
 | libc | 0.2.189 | `3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2` |
 
-No browser binary is bundled. Browser discovery targets an already installed supported browser, and automatic sign-in uses a fresh temporary profile rather than the user's existing profile.
+No browser binary is bundled. Release builds use manual token entry and disable browser-debug capture. The development compatibility harness discovers an installed browser and uses a fresh temporary profile with synthetic credentials.
 
 Other dependencies and their resolved versions are recorded in `package-lock.json` and the Cargo lockfiles. Their licenses remain the property of their respective authors.
 

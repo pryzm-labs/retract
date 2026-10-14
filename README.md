@@ -65,6 +65,8 @@ The v0.1.x preview supports Apple-silicon Macs running macOS 12 or newer.
 
 Do not disable Gatekeeper globally. Each release also publishes a manifest tying the archive to its source tag.
 
+Version `0.1.1` is currently being prepared. No GitHub preview release has been published as of 2026-10-14; the older `v0.1.0` tag predates the current security remediation. Follow the source-build instructions while the [release-readiness tasks](docs/RELEASE_READINESS.md) are completed.
+
 ## Build from source
 
 Requirements: Apple-silicon macOS 12+, [Node.js 24.19.0](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 static archive; a normal build does not require you to compile TDLib manually.

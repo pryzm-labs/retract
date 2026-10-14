@@ -100,8 +100,17 @@ Schema v2 preserves the frozen encrypted v1 artifact, its DDL hash, legacy recei
 The generated benchmark runs exactly 10,000 and 100,000 records through the actual reader, normalizer, import owner, encrypted archive owner, paged query and source-removal service:
 
 ```sh
-docker buildx build --platform linux/arm64 --target discord-import-benchmark --output type=cacheonly --progress plain .
+sh <<'SH'
+set -eu
+benchmark_context=$(mktemp -d "${TMPDIR:-/tmp}/retract-benchmark-context.XXXXXX")
+trap 'rm -rf -- "$benchmark_context"' EXIT HUP INT TERM
+git ls-files --cached -z | tar --null --files-from=- --create --file=- | tar --extract --file=- --directory="$benchmark_context"
+: > "$benchmark_context/.retract-tracked-context"
+docker buildx build --platform linux/arm64 --target discord-import-benchmark --output type=cacheonly --progress plain "$benchmark_context"
+SH
 ```
+
+Run this from the repository root after staging new source files. It follows the same tracked-files-only context rule as `scripts/container-build.sh`; the direct repository-directory form intentionally lacks the required sentinel and is rejected.
 
 The non-default `discord-import-bench` example accepts one empty canonical private temporary directory, validates ownership/mode/symlinks, and accepts no archive path, credentials or corpus-size override. It generates four deterministic stored ZIP entries with one record buffered at a time. It verifies every message and stable pagination ordering, email findings and indexed hits, closes/reopens the encrypted store, confirms identical-import reuse without reparsing, removes the source, and verifies the source is gone. Generated inputs/stores are removed and the Docker target verifies that its temporary directory is empty before removing it. Named Cargo caches hold compilation output only; the target exports no runnable image.
 
