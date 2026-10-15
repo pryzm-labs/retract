@@ -65,7 +65,7 @@ The v0.1.x preview supports Apple-silicon Macs running macOS 12 or newer.
 
 Do not disable Gatekeeper globally. Each release also publishes a manifest tying the archive to its source tag.
 
-Version `0.1.1` is currently being prepared; the older `v0.1.0` tag predates the current security remediation. Use the source-build instructions until an unsigned preview appears on the Releases page. Maintainers should follow the [release guide](docs/RELEASING.md).
+The older `v0.1.0` tag predates the current security remediation. Use current source or a `0.1.1` or newer preview. Maintainers should follow the [release guide](docs/RELEASING.md).
 
 ## Build from source
 
