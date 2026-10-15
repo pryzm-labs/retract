@@ -1,4 +1,4 @@
-# Destructive integration and release gate
+# Testing and release validation
 
 ## Rule
 
@@ -22,13 +22,11 @@ These commands run unfiltered Vitest, release/public metadata tests, TypeScript/
 
 The wrapper includes only files already in Git's index, creates the required context sentinel, and removes its temporary context on exit. Stage new source files before checking them. A direct repository-directory Docker build fails intentionally because it lacks that sentinel.
 
-### Current automated and security evidence
+### Native checks and evidence
 
-[PR #36](https://github.com/pryzm-labs/retract/pull/36) merged security remediation as `d926d8e`. Its reviewed branch revision `8f2ed78e420c0b3f8680f167e7c276973513702e` passed [Secure build run 36274011228](https://github.com/pryzm-labs/retract/actions/runs/36274011228) on 2026-09-27 in Europe/Madrid: Linux amd64 (8m42s), Linux arm64 (8m18s), and native Apple-silicon tests/unsigned packaging (12m44s). The local unsigned package gate also passed. The 19 deep-scan findings and final review cancellation/session races were addressed with regression coverage. This records remediation and automated checks; a new independent scan was not claimed after remediation.
+The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) runs synthetic Rust/parser/archive/injected-vault tests and unsigned packaging on Apple silicon. It verifies the app, pinned TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. Automated tests must not access a real Keychain, session or private export.
 
-PR #50's reviewed revision `75453d6e9e4bd20aa06bc2d5e96a034049fb7d78`, squash-merged as `aa6ccfb` with an identical source tree, passed [Secure build run 38553380236](https://github.com/pryzm-labs/retract/actions/runs/38553380236) on 2026-10-14. Both Linux architectures and native macOS tests/unsigned packaging passed. The [macOS validation record](MACOS_VALIDATION_0.1.1.md) separates fresh local artifact checks and native CI canary/vault tests from outstanding interactive coverage. The owner reported earlier Telegram/Discord smoke testing successful; the complete acceptance matrices are not implied by that report. [Release readiness](RELEASE_READINESS.md) tracks remaining gates. Any changed release revision must pass its own CI before tagging.
-
-The native `native-macos-package` job in [secure-build.yml](../.github/workflows/secure-build.yml) separately runs `npm ci --ignore-scripts --no-audit --no-fund` and `npm run package:unsigned` on macOS. It verifies the app, bundled TDLib, ad-hoc signing, checksum and manifest. Linux container success does not establish macOS packaging, native authentication, launch or accessibility success. If that job cannot be run for the tested revision, report it as unavailable/not run; do not fabricate a package or access real Keychain/session data for automated proof.
+Record outcomes in the relevant PR or release: immutable source revision, platform, commands/CI links, fixed result classes and unrun cases. Distinguish independently observed results from release-owner acceptance of earlier manual coverage. Never publish credentials, archive paths, private account/message identifiers, contents or screenshots. A later code revision requires affected checks again; an unavailable case is not a pass. Use the [release guide](RELEASING.md) for artifact and install/update checks.
 
 An authorized native developer may additionally run `npm run check` to exercise the opt-in bundled TDLib loading smoke test. A separately authorized online `npm audit --audit-level=high` checks current advisories; it is not part of the offline Docker result. Record these outcomes separately, including unexpected network access during live testing.
 
@@ -36,7 +34,7 @@ An authorized native developer may additionally run `npm run check` to exercise 
 
 The automated archive gate uses synthetic files and disposable injected keys only. Both macOS packaging workflows run `persistence::archive::` and `secure_store::vault` test filters; these include original codec tests, store/recovery/ingestion/query/removal tests, bounded-worker lifecycle tests, and real-file/process credential-lease tests with injected I/O. No real-Keychain or Telegram test is included in these filters. Normal packaging leaves the optional benchmark feature disabled.
 
-Verify lazy construction, settings-first and archive-first credential access, fail-fast second-process contention without vault I/O, cancelled open/shutdown waiters, rejection after terminal clearing, two pending batches, cancellation while both slots are occupied, exact retry progress, wrong scopes, and surviving-source queries after removal. Use the opt-in [100,000-item benchmark](ARCHIVE_STORAGE.md#opt-in-synthetic-benchmark) once for a relevant implementation revision, recording cumulative OS peak RSS, exact phase DB/WAL lengths, sampled disk highs, elapsed phases and committed progress. It is not part of every test run.
+Verify lazy construction, settings-first and archive-first credential access, fail-fast second-process contention without vault I/O, cancelled open/shutdown waiters, rejection after terminal clearing, two pending batches, cancellation while both slots are occupied, exact retry progress, wrong scopes, and surviving-source queries after removal. Use the opt-in [100,000-item benchmark](STORAGE.md#opt-in-synthetic-benchmark) once for a relevant implementation revision, recording cumulative OS peak RSS, exact phase DB/WAL lengths, sampled disk highs, elapsed phases and committed progress. It is not part of every test run.
 
 Before shipping an archive importer, an authorized native operator must quit all older Retract copies, then verify final-identity Keychain prompts/ACLs, v1/v2-to-v3 secret preservation, denied/locked Keychain behavior, competing app/profile ownership and complete shutdown drain. Verify that database/WAL/journal/temporary files and diagnostic logs contain no plaintext canaries, and that memory/disk-pressure compaction failures leave removal durable and maintenance visibly pending. Vault downgrades and forensic-erasure claims are unsupported. Record these manual results separately from synthetic CI and rerun the Apple-silicon test/package job on the final reviewed commit.
 
@@ -44,15 +42,15 @@ Before shipping an archive importer, an authorized native operator must quit all
 
 Startup regression coverage uses the real App, desktop adapter and decoders with synthetic native IPC: identity advancing during bootstrap or before settings is rediscovered at most three times. Other structured failures retain explicit recovery; unmounted and superseded StrictMode attempts cannot publish or retry. Mutation, credential and context-validation paths remain strict.
 
-Discord source selection and remediation are user-facing but remain pre-release until this complete gate passes. The backend automated gate includes the frozen profile/privacy audit, malformed ZIP/JSON and injected-ceiling suites, typed normalization, encrypted migration, exact replay/duplicates, hidden failures, full-queue cancellation, retained-file changes and shutdown ownership. It also covers account-bound token validation, manual one-way submission, isolated Chromium/Firefox protocol fixtures, origin/header rejection, exact message planning, REST outcome mapping, bounded network/5xx retries, rate limits, cancellation, and content-free durable results. Success/failure diagnostics are tested with synthetic content/path/token sentinels. Architecture controlled violations cover parser dependencies/codecs and Discord network/browser/credential ownership; production bundles reject Discord fixture/benchmark markers.
+The backend automated gate includes the frozen profile/privacy audit, malformed ZIP/JSON and injected-ceiling suites, typed normalization, encrypted migration, exact replay/duplicates, hidden failures, full-queue cancellation, retained-file changes and shutdown ownership. It also covers account-bound token validation, manual one-way submission, isolated Chromium/Firefox protocol fixtures, origin/header rejection, exact message planning, REST outcome mapping, bounded network/5xx retries, rate limits, cancellation, and content-free durable results. Success/failure diagnostics are tested with synthetic content/path/token sentinels. Architecture controlled violations cover parser dependencies/codecs and Discord network/browser/credential ownership; production bundles reject Discord fixture/benchmark markers.
 
-The normal Docker `checks` target runs parser tests/fmt/strict Clippy on both architectures and separately compiles/tests the opt-in benchmark. Run the [generated 10k/100k resource target](ARCHIVE_STORAGE.md#discord-backend-acceptance) on ARM64 once for the final relevant code, retaining its complete output, build ID, phase timings, independent byte metrics and RSS limitations. Require full pagination, findings/search hits, reopen/idempotency, source removal, no sampled errors and successful temporary-directory cleanup. Do not infer million-record behavior.
+The normal Docker `checks` target runs parser tests/fmt/strict Clippy on both architectures and separately compiles/tests the opt-in benchmark. Run the [generated 10k/100k resource target](STORAGE.md#discord-backend-acceptance) on ARM64 once for the final relevant code, retaining its complete output, build ID, phase timings, independent byte metrics and RSS limitations. Require full pagination, findings/search hits, reopen/idempotency, source removal, no sampled errors and successful temporary-directory cleanup. Do not infer million-record behavior.
 
-The native macOS job now includes parser tests/fmt/Clippy and the Discord backend tests before existing archive/vault tests and unsigned packaging. Wiring this job is not execution evidence. Native CI on the exact final revision, separately authorized real-export/Keychain/manual validation, independent whole-branch review, publication, merge and release remain distinct gates. No Apple account or notarization requirement is introduced.
+Native CI on the exact final revision, separately authorized real-export/Keychain/manual validation, code review and publication are distinct gates. No Apple account or notarization requirement is introduced.
 
 ### Discord live acceptance
 
-Exploratory local testing completed before this revision exercised a real private Data Package import, reopening and selecting the imported source, grouped Discord navigation, manual token-based account connection and remembered-session restoration. This establishes useful UX feedback only: no credential, message content, package path or private fixture is retained in the repository, and the run did not complete the destructive, rate-limit, second-participant or full Keychain acceptance matrix below. Development browser harness tests use synthetic credentials only and are separate from live acceptance.
+Development browser harness tests use synthetic credentials only and are separate from live acceptance. Import/search validation alone does not establish deletion, rate-limit or native credential behavior.
 
 - Import a current Data Package through the native picker; confirm the path and raw ZIP bytes never appear in frontend state or logs, progress counters advance, cancellation stops uncommitted work, and the imported source is searchable without Discord authentication.
 - Open a retained Discord import with supported pre-hardening sealed plans. Confirm original seals, account/source records, terminal outcomes and counters remain intact; unfinished jobs stop for a fresh review and never replay automatically. Historical plans cannot receive execution authorization.
@@ -64,19 +62,9 @@ Exploratory local testing completed before this revision exercised a real privat
 - Exercise 204, already-absent 404, 401, 403, route/global 429, recoverable 5xx, exhausted 5xx/network ambiguity, cancel, and restart. Confirm deleted/failed/uncertain counters are truthful, duplicate execution is blocked, and no live response widens the frozen archive targets.
 - Measure a multi-channel harmless run. Confirm each channel is serialized, the 1.5-second-plus-jitter floor and account ceiling are respected, four-channel concurrency is not exceeded, and the UI remains explicit when a server-provided wait delays completion.
 
-### Telegram provider-refactor characterization
+### Telegram compatibility
 
-The full Docker gate includes frozen v1 readers/native behavior, the immutable pre-extraction Telegram recipe/`RTRCT03` corpus, current v2 lifecycle tests, direct query/cleanup ownership checks and the provider architecture rule. Use the current secure entry point on Linux `arm64`:
-
-```sh
-sh scripts/container-build.sh check linux/arm64
-```
-
-Historical focused filters are not substitutes for this full gate. The frozen numeric v1 fixture remains unchanged historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. The separate migration corpus freezes all nine native recipes and exact authenticated v3 bytes from the pre-extraction implementation. See [TELEGRAM_CHARACTERIZATION.md](TELEGRAM_CHARACTERIZATION.md) for its provenance, the direct provider ownership inventory and preserved native behavior.
-
-For reviewed migration commit `c7f2f5f29387a71c9ac4051b7dd66508baee1311`, both required Linux architecture gates passed on 2026-09-06: 158 frontend tests, 329 backend tests with one existing opt-in archive corpus test ignored, 17 cleaner-domain tests, 19 retract-domain tests, 7 release tests, 10 controlled boundary tests plus the real-tree check, production bundle/public repository verification, all formatting checks and strict Clippy. Both builds copied that exact committed tree and executed the project checks; the BuildKit results were `yafbi07vc0a8p6gv3hjryumwt` for `arm64` and `ado6le3q5vvow7wk1pojcyq9u` for `amd64`. No archive corpus benchmark was run because the provider migration does not alter archive indexing. Independent whole-branch review of `0d799b0..c7f2f5f` completed with no Critical or Important issues. The earlier runtime-only `3a78bd207d89be3d3bc93b8cfac6930ce04017e6` results remain useful historical evidence; do not mistake them for the current accepted head or transfer the full-gate claim to later changes.
-
-This historical Linux evidence did not establish native macOS acceptance. The current automated evidence above supersedes its packaging status. Keychain/LocalAuthentication, rendered VoiceOver/short-viewport behavior and live test-DC parity remain manual gates. Changes after each reviewed baseline require covering checks and review.
+The full Docker gate includes frozen v1 readers/native behavior, the immutable pre-extraction Telegram recipe/`RTRCT03` corpus, current v2 lifecycle tests, direct query/cleanup ownership checks and the provider architecture rule. Focused filters are not substitutes for the full gate. The frozen numeric v1 fixture is historical evidence; actual v2 commands use scope, session generation and opaque refs without a numeric fallback. See [architecture](ARCHITECTURE.md#compatibility-and-verification) and [storage](STORAGE.md#job-state-and-migration) for fixture provenance and migration guarantees. Native authentication, live parity and rendered accessibility require separate observations.
 
 ## Test identities
 
@@ -144,7 +132,7 @@ For every accepted operation, verify from both participating accounts after TDLi
 
 - Inject `FLOOD_WAIT_2`/429 for capability fetch and deletion. Job becomes queued, stays cancellable, persists its wait, rechecks permissions, and resumes.
 - Cancel while queued for flood wait. Job becomes cancelled and makes no later call.
-- Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Resume requires durable start authorization, supported frozen-idempotent work, a valid cursor and the same verified account/source. Ambiguous outcomes require new review and never become confirmed deletions.
+- Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Recovered jobs must not replay old authorization or auto-resume, even under the same account/source. Retain counters, stop unfinished work for a new plan/review and fresh device-owner grant, and never turn ambiguous outcomes into confirmed deletions.
 - Kill the app around whole-history, self-only history, sender-wide, and permanent group-deletion calls. An ambiguous nonterminal job must stop with `restart_requires_new_review`; it must not replay against later messages until the user creates and authorizes a new plan.
 - Copy an authenticated test-DC job store into the production profile. Startup must reject it as profile-bound ciphertext and execute nothing. A legacy unbound nonterminal store must be retained only as a stopped job requiring new review.
 - Disconnect/reconnect network during search and deletion; errors remain explicit and UI stays responsive.
@@ -169,7 +157,7 @@ For every accepted operation, verify from both participating accounts after TDLi
 ## Production exit criteria
 
 - Two-person review of evidence for every destructive and confirmation case.
-- The 2026-09-26 delegated Deep Security Scan of baseline `2e71a25` reported 1 high-, 8 medium- and 10 low-severity findings; remediation is merged in PR #36. Preserve that evidence and assess later changes for regressions. The outstanding manual gates above still require acceptance before publication.
+- Assess security findings and later changes for regressions. Record fixes, review and manual acceptance in the release PR rather than treating old test counts or scan results as evidence for a new revision.
 - No unresolved critical/high security findings and no untriaged medium/low findings.
 - TDLib binary digest matches the reviewed artifact and is bundled/ad-hoc-signed with the preview app.
 - Privacy copy and support documentation state the residual-copy limitations.

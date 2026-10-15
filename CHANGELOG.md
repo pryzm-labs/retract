@@ -4,9 +4,9 @@ All notable changes to Retract are documented here. The project follows [Semanti
 
 ## [Unreleased]
 
-## [0.1.1] - Planned
+## [0.1.1] - 2026-10-15
 
-Prepared for an unsigned prerelease. The tag and GitHub release have not been published; manual provider and macOS acceptance remains pending. See [release readiness](docs/RELEASE_READINESS.md).
+Unsigned, unnotarized preview for Apple-silicon macOS. See the [release guide](docs/RELEASING.md) for packaging and publication requirements.
 
 ### Added
 
@@ -58,6 +58,6 @@ Prepared for an unsigned prerelease. The tag and GitHub release have not been pu
 - Synthetic-only fixture mode for automated tests and project screenshots.
 - Reproducible, ad-hoc-signed unsigned preview packaging for macOS 12+ on Apple silicon.
 
-[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.0...HEAD
-[0.1.1]: https://github.com/Pryzm-Labs/retract/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Pryzm-Labs/retract/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Pryzm-Labs/retract/tree/v0.1.0

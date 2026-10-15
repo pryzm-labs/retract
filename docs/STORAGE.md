@@ -1,4 +1,18 @@
-# Archive storage
+# Storage and compatibility
+
+Retract keeps Telegram's encrypted TDLib session database, authenticated cleanup state and explicitly imported Discord content in separate stores. Credentials and independent encryption keys live in the versioned macOS Keychain vault. None of these stores provides forensic erasure or a safe automatic downgrade.
+
+## Job state and migration
+
+`FoundationStore` is the sole Telegram profile writer, shared in-process by `Arc` and protected by a cooperative interprocess lock. The final store owner releases the lock, including failed initialization paths. Lock acquisition precedes key loading; competing processes fail with `profile_in_use` before credential I/O. AES-GCM authenticates the `RTRCT03` schema/provider/profile binding and validates account/source/plan/job relationships. Discord's encrypted job state likewise retains account/source-bound plans and outcomes separately from archive content.
+
+Jobs persist IDs, reach expectations, confirmation titles, counters and timestamps—not message bodies, private attachment names or tokens. Exact titles needed for confirmation are encrypted plan data. Terminal outcomes and valid historical plan seals are preserved, not resealed under a newer restart policy. Changed targets, unsupported seals and invalid relationships fail closed. Historical Discord seals are storage-compatible only; new execution authorization requires the current policy. No recovered destructive job automatically resumes after restart, including historically frozen-ID work. New review and a fresh device-owner grant are required.
+
+Legacy Telegram migration retains the exact authenticated ciphertext as `jobs.pre-provider.enc`, validates a separate private v3 candidate, then atomically replaces `jobs.enc` and syncs the directory. A different existing backup is never overwritten. Every unfinished legacy job stops for new review; no account is inferred for historical work. Invalid active state, conflicting artifacts or interrupted migration cannot silently initialize empty history or restore old jobs. The retained backup is never automatically removed or restored and is not a rollback mechanism. Older readers cannot read active v3. This migration preserves credentials and TDLib session/profile paths.
+
+Frozen synthetic fixtures under [`src-tauri/test-fixtures/`](../src-tauri/test-fixtures/) cover both legacy versions, authenticated v3 recipes, interrupted publication, wrong bindings and tampering. Refactors must preserve their interpretation; changing a fixture is not a substitute for an explicit compatibility decision.
+
+## Imported archive storage
 
 Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a production Discord Data Package importer. The source-selection UI can import, search, privacy-scan, and remediate exact owner-authored Discord message IDs after a matching live account is verified. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database. Other archive providers remain unavailable.
 
@@ -44,13 +58,13 @@ Each batch is limited to 500 records and 4 MiB of normalized encoded input, incl
 
 Internal queries select one provider/account/source and return that source's complete observation, even if another export contains a newer version of the same resource. Search uses literal FTS phrases rather than raw MATCH operators, with author, content-kind and exclusive date filters. Attachment display names are searchable and use the shared privacy detector; attachment contents and remote locators are not fetched. Queries accept at most 4 KiB of text and return at most 200 records per page; resolution is also limited to 200 references.
 
-Pagination preserves exact timestamp ordering and binds its cursor to scope, filters and the completed import generation. A missing or replaced generation rejects old cursors. These are backend interfaces, not a newly enabled archive search screen or importer.
+Pagination preserves exact timestamp ordering and binds its cursor to scope, filters and the completed import generation. A missing or replaced generation rejects old cursors. The Discord UI queries these interfaces through the scoped provider adapter; other archive providers are not enabled.
 
 ## Source removal and maintenance
 
 Source removal deletes only Retract's imported observations. It never modifies the original export or calls a remote provider. Surviving sources keep their observations and stable resource IDs. Removal retires the source UUID and invalidates its sessions and cursors. The durable outcome contains the removed-item count and `maintenance_pending`; successful logical deletion must remain visible even when later checkpoint/compaction fails.
 
-A future UI must distinguish imported-copy removal from physical maintenance, display pending maintenance honestly, and offer an explicit retry without restoring content or implying remote deletion. Retrying maintenance cannot resurrect a removed source. No destructive archive IPC or maintenance UI is added here.
+Imported-copy removal and physical maintenance are distinct backend outcomes. Any UI exposing these operations must display pending maintenance honestly and must not imply remote deletion. Retrying maintenance cannot resurrect a removed source; a dedicated maintenance-retry UI is not currently provided.
 
 Identity pruning constructs a memory-only membership set of surviving identities, and `VACUUM` uses memory temporary storage. These operations are **not constant-memory**. Compaction, indexes, WAL growth and recovery staging are additional to the normalized-input quota; low memory/disk failures can leave maintenance pending.
 
@@ -60,8 +74,6 @@ The focused codec suite creates a real encrypted database, enables FTS5 secure-d
 
 Linux checks run offline and non-root in the existing Docker build on both arm64 and amd64 with reusable named caches. The required Apple-silicon macOS workflows run the entire synthetic archive suite (including the original codec gate) and injected vault/lease tests before unsigned packaging, check the packaged executable and TDLib runtime dependencies, and reject developer-machine library paths. The benchmark feature is not enabled by ordinary packaging. Linux success is not evidence of macOS linkage: the native test/package job must pass for the final reviewed commit.
 
-The initial dependency gate passed on 2026-09-05 in [Secure build run 33979891484](https://github.com/pryzm-labs/retract/actions/runs/33979891484), at commit `cdcc083e8c604fba58b13ecb85e883276e3ec40a`. Both Linux architectures passed their checks; Apple silicon passed all 12 codec tests and the unsigned app's bundle, signature, architecture, checksum and runtime-dependency validation. This verifies the native dependency foundation, not archive functionality or real Keychain prompt behavior. The final integrated archive implementation must run the gates again.
-
 The integrated synthetic suites cover rejected WAL/hot-journal byte preservation, supported crash recovery, private staging, partial-copy failure, retained-account validation, bounded imports and queries, source removal, process contention, cancellation and terminal shutdown. The same-worker resource benchmark below is separate from the ordinary suite. See [the test plan](TEST_PLAN.md) for final automated and manual acceptance gates.
 
 ## Opt-in synthetic benchmark
@@ -69,14 +81,23 @@ The integrated synthetic suites cover rejected WAL/hot-journal byte preservation
 Run only in Docker, with no real credentials or Telegram data:
 
 ```sh
-docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=retract_bench_dir=$(mktemp -d) && cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --features archive-bench --example archive_storage_bench -- "$retract_bench_dir"' .
+sh <<'SH'
+set -eu
+benchmark_context=$(mktemp -d "${TMPDIR:-/tmp}/retract-benchmark-context.XXXXXX")
+trap 'rm -rf -- "$benchmark_context"' EXIT HUP INT TERM
+git ls-files --cached -z | tar --null --files-from=- --create --file=- | tar --extract --file=- --directory="$benchmark_context"
+: > "$benchmark_context/.retract-tracked-context"
+docker buildx build --platform linux/arm64 --target focused-checks --output type=cacheonly --progress plain --build-arg 'RETRACT_CHECK=retract_bench_dir=$(mktemp -d) && cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --features archive-bench --example archive_storage_bench -- "$retract_bench_dir"' "$benchmark_context"
+SH
 ```
+
+Run from the repository root after staging new files. Like the normal container wrapper, this uses only indexed paths and the required context sentinel; a direct repository-directory build is rejected.
 
 The example accepts only an exclusively owned, empty, canonical private disposable directory. Its non-default `archive-bench` feature constructs synthetic adapters/keys internally and uses the real service/repository/query ports. It imports exactly 100,000 items across two 50,000-item sources, verifies complete bounded pagination and 1,000 literal search hits, removes one source, and rechecks all 50,000 survivors plus 500 surviving search hits. It measures the schema's actual FTS, scope/author/kind ordering, identity-membership and reference indexes, along with pruning and memory-backed compaction.
 
 Reported Linux `VmHWM` is the OS's cumulative whole-process peak RSS, not a separate peak for each phase. Exact quiescent phase DB/WAL lengths are reported separately from 10 ms sampled disk high values; sampling can miss short-lived peaks. The measured process includes the worker, runtime, bounded input/page buffers and sampler. This synthetic workload does not establish resource usage for maximum-size records or the million-item/two-GiB source caps.
 
-The Linux arm64 Docker run at reviewed code commit `08a67cc3deb595cd6d4f27664467e550eaf636d1` used the unoptimized dev profile with debug info disabled. It committed 100,000 items / 85,701,212 encoded input bytes in 113.329 s (202 batches), verified all records and 1,000 search hits in 3.043 s, and removed 50,000 items with 50,000 survivors in 22.799 s. Maintenance completed and all survivors plus 500 surviving search hits were rechecked. This run includes the independently reviewed shutdown, reverse-reference and pre-admission fixes, including the conversation-parent reference index; it replaces the earlier development measurements.
+Reference measurement at source `08a67cc3deb595cd6d4f27664467e550eaf636d1`, using Linux arm64 Docker's unoptimized dev profile with debug info disabled: 100,000 items / 85,701,212 encoded input bytes committed in 113.329 s (202 batches), full pagination and 1,000 search hits in 3.043 s, and removal of 50,000 items in 22.799 s. Maintenance completed; all 50,000 survivors and 500 surviving search hits were rechecked. These measurements describe that synthetic workload/revision, not a current performance guarantee.
 
 | Measurement | Observed bytes |
 | --- | ---: |
@@ -89,13 +110,26 @@ The Linux arm64 Docker run at reviewed code commit `08a67cc3deb595cd6d4f27664467
 | Sampled DB high | 314,793,984 |
 | Sampled total disk high, including rollback journal | 498,728,136 |
 
-This run used the repository's rollback-journal behavior; no WAL growth was observed. The sampled disk values are lower bounds on actual peaks. The increase in process high-water RSS during removal includes both identity pruning and memory-backed `VACUUM`; it does not isolate their individual costs. The benchmark was refreshed once after the final fix review because both admission and schema changed; it is not part of standard packaging or recurring gates. Native/manual verification remains separate.
+This workload used rollback journals; no WAL growth was observed. Sampled disk values are lower bounds on actual peaks. The process high-water RSS during removal includes identity pruning and memory-backed `VACUUM`, not their isolated costs. Benchmark execution is separate from standard packaging and native/manual verification.
 
-## Discord backend acceptance
+## Discord Data Package profile
 
-The importer accepts the single frozen `discord.data_package.messages_json` v1 profile described in the [design](superpowers/specs/2026-09-07-discord-archive-import-design.md) and [synthetic provenance manifest](../src-tauri/test-fixtures/discord-import/manifest.json). Its interpretation is deliberately narrow: account-owned sent messages, canonical `u64` IDs, unzoned calendar text checked against the message Snowflake, opaque channel types represented as `Other`, and empty or one inert HTTPS attachment reference. It does not fetch/open links, authenticate an account, expose remediation, infer a complete conversation, or certify unrelated ZIP payload CRCs.
+The importer accepts the frozen `discord.data_package.messages_json` v1 profile and `discord.import_policy.v1` interpretation documented in the [synthetic provenance manifest](../src-tauri/test-fixtures/discord-import/manifest.json). It represents the export owner's sent messages, not a complete conversation. CSV and guessed wrappers are unsupported; new formats require structural evidence, synthetic fixtures and review.
+
+Required, case-sensitive entries are:
+
+- `Account/user.json`: object with canonical positive `u64` decimal-string `id` and string `username`. This entry alone determines the archive owner.
+- `Messages/index.json`: bounded object with no identity authority.
+- Paired `Messages/c<canonical-positive-u64>/channel.json` and `messages.json` entries. The channel `id` must match the directory; `type` is an opaque string. Optional `name`, `recipients` and `guild` fields retain their validated shapes. Guild metadata requires a named channel and excludes recipients.
+- Transcripts: arrays of objects with `ID` as an original canonical positive `u64` integer token, and string `Timestamp`, `Contents` and `Attachments` fields. Empty arrays are valid. Unknown fields are bounded and ignored; ambiguous required fields, duplicate keys and explicit author overrides reject.
+
+Timestamps use calendar-valid, unzoned `YYYY-MM-DD HH:MM:SS`. Accept them only when their components equal the message Snowflake UTC through seconds precision, then preserve the full Snowflake millisecond instant. Never infer host-local time. The reader retains opaque attachment strings; normalization validates supported inert HTTPS attachment references, without fetching them. Unknown channel types are not interpreted as roles or authority; verified/display grouping metadata may organize navigation but cannot grant cleanup permission.
+
+ZIP handling accepts bounded classic stored/deflate archives and rejects ZIP64, encryption, data descriptors, unsupported metadata, unsafe/colliding paths and contradictory headers/ranges. Entries are never extracted, executed or rendered. Consumed payloads must reach CRC-checked EOF with exact observed sizes before readiness; unrelated ZIP payload CRCs are not certified. The format parser itself does not authenticate or delete anything; those are separate provider boundaries.
 
 Schema v2 preserves the frozen encrypted v1 artifact, its DDL hash, legacy receipts and existing observations. Import identity resolution, warning receipts, fixed failures, hidden incomplete sources and explicit deterministic retries use the same store and worker as indexed queries/removal. Input identity is checked using the retained regular-file descriptor and two complete hashes. This detects ordinary changes; it is not a guarantee against a malicious same-user race. Cancellation/shutdown retain and drain the owned blocking task before archive/credential shutdown.
+
+## Discord backend acceptance
 
 The generated benchmark runs exactly 10,000 and 100,000 records through the actual reader, normalizer, import owner, encrypted archive owner, paged query and source-removal service:
 
@@ -142,7 +176,7 @@ The named 40,000 context ceiling currently bounds all selected evidence entries 
 
 ### Observed Discord benchmark
 
-The ARM64 Docker run on 2026-09-10, build `aaeycmix7jeyhaq956hjcp6ho`, used the unoptimized dev profile with debug information disabled, UID 10001 and no network after locked dependency fetch. Both complete corpora passed all pagination, findings/search, reopen/reuse and removal assertions. Neither corpus reported a sampling error; temporary-file high water was zero and the generated directory cleanup succeeded.
+Reference measurement recorded with the original importer benchmark on 2026-09-10, using ARM64 Docker's unoptimized dev profile with debug information disabled, UID 10001 and no network after locked dependency fetch. Both corpora completed pagination, findings/search, reopen/reuse and removal checks. No sampling errors were reported; temporary-file high water was zero and generated directory cleanup succeeded. Rerun for performance claims about later revisions.
 
 | Measurement | 10,000 records | 100,000 records |
 | --- | ---: | ---: |
