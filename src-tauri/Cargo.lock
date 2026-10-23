@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "cleaner-domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "regex",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "retract"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "retract-domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "serde",

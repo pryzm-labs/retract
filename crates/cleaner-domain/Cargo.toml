@@ -1,6 +1,6 @@
 [package]
 name = "cleaner-domain"
-version = "0.1.1"
+version = "0.1.2"
 description = "Capability and deletion-plan invariants for Retract"
 authors = ["Pryzm Labs"]
 edition = "2024"
