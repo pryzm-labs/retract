@@ -445,7 +445,8 @@ impl DiscordDeleteClient {
         if !limit.retry_after.is_finite() || limit.retry_after <= 0.0 {
             return DiscordDeleteError::Transient;
         }
-        let duration = Duration::from_secs_f64(limit.retry_after).min(MAX_RETRY_AFTER);
+        let duration =
+            Duration::from_secs_f64(limit.retry_after.min(MAX_RETRY_AFTER.as_secs_f64()));
         let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         if limit.global {
             *self.global_deadline.lock().await = Some(Instant::now() + duration);

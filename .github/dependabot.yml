@@ -23,6 +23,7 @@ updates:
       - /src-tauri
       - /crates/cleaner-domain
       - /crates/retract-domain
+      - /crates/discord-archive
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
