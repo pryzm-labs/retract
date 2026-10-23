@@ -213,6 +213,48 @@ fn authentication_permission_and_rate_limits_have_closed_outcomes() {
 }
 
 #[test]
+fn rate_limit_caps_finite_delays_before_duration_conversion() {
+    for (seconds, expected_millis) in [
+        ("1e300", 300_000),
+        ("18446744073709551616", 300_000),
+        ("300.5", 300_000),
+        ("300", 300_000),
+        ("0.125", 125),
+    ] {
+        for global in [false, true] {
+            let body = format!(r#"{{"retry_after":{seconds},"global":{global}}}"#);
+            let (result, request) = run_verify(
+                "429 Too Many Requests",
+                &[("Content-Type", "application/json")],
+                &body,
+            );
+            assert_eq!(
+                result,
+                Err(DiscordDeleteError::RateLimited {
+                    retry_after_millis: expected_millis,
+                    global,
+                }),
+                "retry_after={seconds}, global={global}"
+            );
+            assert!(request.starts_with("GET "));
+        }
+    }
+}
+
+#[test]
+fn rate_limit_rejects_invalid_delays_without_panicking() {
+    for seconds in ["0", "-1", "1e400", "null", r#""not-a-number""#] {
+        let body = format!(r#"{{"retry_after":{seconds},"global":true}}"#);
+        let (result, _) = run_verify(
+            "429 Too Many Requests",
+            &[("Content-Type", "application/json")],
+            &body,
+        );
+        assert_eq!(result, Err(DiscordDeleteError::Transient), "{seconds}");
+    }
+}
+
+#[test]
 fn deletion_proves_the_exact_live_message_owner_before_issuing_delete() {
     let (base, server) = scripted_server(vec![
         ("200 OK".into(), live_message()),
