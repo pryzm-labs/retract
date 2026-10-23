@@ -4,6 +4,25 @@ All notable changes to Retract are documented here. The project follows [Semanti
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-23
+
+Unsigned, unnotarized patch preview for Apple-silicon macOS. Existing data formats and native TDLib, OpenSSL, and SQLCipher pins are unchanged.
+
+### Fixed
+
+- Prevent non-ASCII IBAN-like text from panicking during Telegram privacy scans and Discord archive imports, with synthetic regression coverage for both paths.
+- Clamp excessively large Discord rate-limit delays before duration conversion, avoiding a cleanup-worker panic while preserving bounded waits and cancellation.
+
+### Changed
+
+- Refreshed frontend, Tauri, Rust, and test dependencies, including Tokio runtime fixes, zeroization improvements, and corrected macOS Objective-C object retention.
+- Updated the pinned Node toolchain and SHA-pinned GitHub Actions, and added Dependabot coverage for the standalone Discord archive parser lockfile.
+
+### Known limitations
+
+- The native OpenSSL/SQLCipher refresh remains deferred pending compatible upstream Rust bindings; this release does not claim those native components are updated.
+- Privacy detection remains heuristic and cannot remove screenshots, exports, backups, or other external copies.
+
 ## [0.1.1] - 2026-10-15
 
 Unsigned, unnotarized preview for Apple-silicon macOS. See the [release guide](docs/RELEASING.md) for packaging and publication requirements.
@@ -58,6 +77,7 @@ Unsigned, unnotarized preview for Apple-silicon macOS. See the [release guide](d
 - Synthetic-only fixture mode for automated tests and project screenshots.
 - Reproducible, ad-hoc-signed unsigned preview packaging for macOS 12+ on Apple silicon.
 
-[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Pryzm-Labs/retract/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Pryzm-Labs/retract/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Pryzm-Labs/retract/tree/v0.1.0
