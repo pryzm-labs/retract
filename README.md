@@ -69,7 +69,7 @@ The older `v0.1.0` tag predates the current security remediation. Use current so
 
 ## Build from source
 
-Requirements: Apple-silicon macOS 12+, [Node.js 24.19.0](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 static archive; a normal build does not require you to compile TDLib manually.
+Requirements: Apple-silicon macOS 12+, [Node.js 24.22.1](.nvmrc), Rust 1.97.1, npm, Git, and the Xcode Command Line Tools. The repository includes the pinned TDLib 1.8.64 static archive; a normal build does not require you to compile TDLib manually.
 
 ```sh
 git clone https://github.com/Pryzm-Labs/retract.git

@@ -232,7 +232,7 @@ if (existsSync(archiveManifest)) {
       if (!allowed.has(dependency) || /\b(?:package|path|git|workspace)\s*=/.test(line)) {
         failures.push("archive parser dependency is outside the reviewed allowlist");
       }
-      if (dependency === "zip" && !/^zip\s*=\s*\{\s*version\s*=\s*"=8\.6\.0",\s*default-features\s*=\s*false,\s*features\s*=\s*\["deflate-flate2-zlib-rs"\]\s*\}\s*(?:#.*)?$/.test(line)) {
+      if (dependency === "zip" && !/^zip\s*=\s*\{\s*version\s*=\s*"=9\.0\.5",\s*default-features\s*=\s*false,\s*features\s*=\s*\["deflate-flate2-zlib-rs"\]\s*\}\s*(?:#.*)?$/.test(line)) {
         failures.push("archive parser must preserve the reviewed ZIP dependency pin and codec features");
       }
     }
