@@ -75,7 +75,7 @@ regex!(
 );
 regex!(SSN, r"\b\d{3}-\d{2}-\d{4}\b");
 regex!(PAYMENT_CARD, r"\b(?:\d[ -]?){13,19}\b");
-regex!(IBAN, r"(?i)\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b");
+regex!(IBAN, r"\b[A-Za-z]{2}[0-9]{2}(?: ?[A-Za-z0-9]){11,30}\b");
 regex!(ETHEREUM_ADDRESS, r"(?i)\b0x[0-9a-f]{40}\b");
 regex!(
     BITCOIN_LEGACY_ADDRESS,
@@ -167,6 +167,10 @@ fn has_iban(text: &str) -> bool {
             .filter(|character| !character.is_ascii_whitespace())
             .collect::<String>()
             .to_ascii_uppercase();
+        // The IBAN format is ASCII; byte offsets must never split message UTF-8.
+        if !compact.is_ascii() {
+            return false;
+        }
         let rearranged = format!("{}{}", &compact[4..], &compact[..4]);
         let mut remainder = 0_u32;
         for character in rearranged.chars() {
@@ -451,6 +455,47 @@ mod tests {
             !detect_sensitive_data("build 1234567", ContentKind::Text)
                 .contains(&SensitiveDataKind::PhoneNumber)
         );
+    }
+
+    #[test]
+    fn rejects_non_ascii_iban_candidates_without_panicking() {
+        for sample in [
+            "GB\u{0967}\u{0968}AAAAAAAAAAA",
+            "GB\u{0661}\u{0662}AAAAAAAAAAA",
+            "GB\u{ff11}\u{ff12}AAAAAAAAAAA",
+            "GB1\u{0968}AAAAAAAAAAA",
+            "GB\u{1d7cf}\u{1d7d0}AAAAAAAAAAA",
+            "\u{212a}\u{212a}12AAAAAAAAAAA",
+            "\u{017f}\u{212a}12AAAAAAAAAAA",
+        ] {
+            assert!(
+                !detect_sensitive_data(sample, ContentKind::Text)
+                    .contains(&SensitiveDataKind::FinancialAccount),
+                "accepted a non-ASCII IBAN candidate: {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_ascii_iban_detection_and_checksum_validation() {
+        for sample in [
+            "GB82WEST12345698765432",
+            "gb82west12345698765432",
+            "GB82 WEST 1234 5698 7654 32",
+            "DE89370400440532013000",
+        ] {
+            assert!(
+                detect_sensitive_data(sample, ContentKind::Text)
+                    .contains(&SensitiveDataKind::FinancialAccount),
+                "missed a valid ASCII IBAN: {sample}"
+            );
+        }
+        assert!(!has_iban("GB83WEST12345698765432"));
+        assert!(!has_iban("GB82WE\u{017f}T12345698765432"));
+        assert!(!has_iban("éGB82WEST12345698765432"));
+        assert!(has_iban(
+            "GB\u{0967}\u{0968}AAAAAAAAAAA; GB82 WEST 1234 5698 7654 32"
+        ));
     }
 
     #[test]
