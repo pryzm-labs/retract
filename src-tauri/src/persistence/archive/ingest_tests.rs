@@ -719,6 +719,39 @@ fn unsupported_adapter_hooks_and_unknown_nested_payload_versions_are_rejected() 
 }
 
 #[test]
+fn unicode_iban_candidates_do_not_interrupt_archive_ingestion() {
+    let fixture = Fixture::new();
+    let mut store = registered(&fixture);
+    let session = store.begin_import(&source().scope()).unwrap();
+    let mut input = batch("unicode", "GB\u{0967}\u{0968}AAAAAAAAAAA bodymarker");
+    input.contents[0]
+        .attachments
+        .push(attachment("\u{212a}\u{212a}12AAAAAAAAAAA.txt"));
+    store.append_batch(&session, 0, input).unwrap();
+    store
+        .append_batch(
+            &session,
+            1,
+            batch("later", "latermarker alice@example.test"),
+        )
+        .unwrap();
+    assert_eq!(fts_count(&store, "bodymarker"), 1);
+    assert_eq!(fts_count(&store, "latermarker"), 1);
+    let findings: Vec<String> = store
+        .transaction(|tx| {
+            Ok(tx
+                .prepare("SELECT kind FROM privacy_findings ORDER BY kind")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(findings, vec!["email_address"]);
+}
+
+#[test]
 fn findings_come_from_shared_detector_and_attachment_names_have_their_own_index() {
     let fixture = Fixture::new();
     let mut store = registered(&fixture);

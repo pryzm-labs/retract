@@ -4446,6 +4446,49 @@ mod tests {
     }
 
     #[test]
+    fn privacy_search_handles_unicode_iban_candidates() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            gateway
+                .chat_kinds
+                .write()
+                .await
+                .insert(1101, ChatKind::Direct);
+            script.respond(
+                json!({
+                    "@type": "searchChatMessages", "chat_id": 1101, "topic_id": null,
+                    "query": "", "sender_id": null, "from_message_id": 0,
+                    "offset": 0, "limit": 100, "filter": null
+                }),
+                json!({
+                    "@type": "foundChatMessages",
+                    "messages": [raw_text_message(
+                        1101, 7031, 1_700_000_031, false, false, 4401,
+                        "GB\u{0967}\u{0968}AAAAAAAAAAA \u{212a}\u{212a}12AAAAAAAAAAA alice@example.invalid"
+                    )],
+                    "next_from_message_id": 0
+                }),
+            );
+            script.respond(
+                json!({ "@type": "getUser", "user_id": 4401 }),
+                json!({ "@type": "user", "id": 4401, "first_name": "Synthetic", "last_name": "Sender" }),
+            );
+            respond_with_reach(&script, 1101, 7031, DeletionReach::Everyone);
+            let mut request = search_request("");
+            request.chat_ids = vec![1101];
+            request.privacy_scan = true;
+            let matches = gateway.search(&request).await.unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].message_id, 7031);
+            assert_eq!(
+                matches[0].privacy_findings,
+                vec![cleaner_domain::SensitiveDataKind::EmailAddress]
+            );
+            script.assert_drained();
+        });
+    }
+
+    #[test]
     fn privacy_search_follows_a_cursor_after_tdlib_omits_an_invalid_preview_page() {
         tauri::async_runtime::block_on(async {
             let (gateway, script, _directory) = scripted_gateway();

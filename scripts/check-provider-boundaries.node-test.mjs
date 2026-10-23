@@ -245,8 +245,12 @@ test("lexical IPC check does not taint unrelated shadowed aliases", () => {
   assert.equal(check(root).status, 0);
 });
 
-test("parser ZIP dependency cannot silently enable codecs or drift from the reviewed pin", () => {
-  for (const dependency of ['zip = "8"', 'zip = { version = "=8.6.0", features = ["aes-crypto"] }', 'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }']) {
+test("parser ZIP dependency accepts only the reviewed patched pin and codecs", () => {
+  const accepted = fixture();
+  write(accepted, "parser/src/lib.rs", "use std::io::Read;");
+  write(accepted, "parser/Cargo.toml", '[dependencies]\nzip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }\n');
+  assert.equal(check(accepted, join(accepted, "parser/src")).status, 0);
+  for (const dependency of ['zip = "9"', 'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }', 'zip = { version = "=9.0.5", features = ["aes-crypto"] }', 'zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }']) {
     const root = fixture();
     write(root, "parser/src/lib.rs", "use std::io::Read;");
     write(root, "parser/Cargo.toml", `[dependencies]\n${dependency}\n`);
