@@ -39,7 +39,7 @@ function installRecoveryTransport(mode: "replacement_fails" | "settings_read_fai
       return wireSnapshot(lifecycle.syntheticContext);
     }
     if (command === "retry_identity_v2") { state = "b"; return wireSnapshot(lifecycle.syntheticContext); }
-    if (command === "search_messages_v2") return envelope({ items: (state === "a" ? lifecycle.messages.slice(0, 2) : [lifecycle.messages[2]]).map(wireMessage), nextCursor: null });
+    if (command === "search_messages_v2") return envelope({ items: (state === "a" ? lifecycle.messages.slice(0, 2) : [lifecycle.messages[2]]).map(wireMessage), nextCursor: null, completion: "complete" });
     if (command === "get_jobs_v2" || command === "get_intents_v2") return envelope([]);
     throw new Error(`Unexpected command: ${command}`);
   });
@@ -73,7 +73,7 @@ describe("connection bootstrap and replacement recovery", () => {
       const envelope = (payload: unknown) => ({ contractVersion: 2, context: settled, payload });
       if (command === "get_connection_settings_v2") return envelope(lifecycle.connectionSettings);
       if (command === "get_snapshot_v2") return wireSnapshot(settled);
-      if (command === "search_messages_v2") return envelope({ items: lifecycle.messages.slice(0, 2).map(wireMessage), nextCursor: null });
+      if (command === "search_messages_v2") return envelope({ items: lifecycle.messages.slice(0, 2).map(wireMessage), nextCursor: null, completion: "complete" });
       if (command === "get_jobs_v2" || command === "get_intents_v2") return envelope([]);
       throw new Error(`Startup must not issue a mutation: ${command}`);
     });

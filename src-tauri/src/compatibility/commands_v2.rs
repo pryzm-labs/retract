@@ -26,7 +26,28 @@ macro_rules! active_command {
     };
 }
 active_command!(get_snapshot_v2, "snapshot");
-active_command!(search_messages_v2, "search");
+#[tauri::command]
+pub(crate) async fn search_messages_v2(
+    runtime: State<'_, Arc<RuntimeState>>,
+    request: Value,
+) -> Result<Value, SafeError> {
+    // Admit while holding the short runtime guard so a source transition also
+    // cancels commands that have not yet begun polling their provider future.
+    let (service, flight) = {
+        let service = runtime.service.read().await;
+        let flight = service.prepare_search(request)?;
+        (service.clone(), flight)
+    };
+    service.run_search(flight).await
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_search_v2(
+    runtime: State<'_, Arc<RuntimeState>>,
+    request: Value,
+) -> Result<Value, SafeError> {
+    runtime.service.read().await.cancel_search(request)
+}
 active_command!(refresh_chats_v2, "refresh");
 active_command!(prepare_selection_v2, "prepare_selection");
 active_command!(prepare_intent_v2, "prepare_intent");
@@ -175,6 +196,7 @@ pub fn register<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         get_snapshot_v2,
         get_bootstrap_snapshot_v2,
         search_messages_v2,
+        cancel_search_v2,
         refresh_chats_v2,
         prepare_selection_v2,
         prepare_intent_v2,

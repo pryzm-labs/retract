@@ -37,7 +37,7 @@ impl ImportTestLaunch for DiscordImportOwner {
 }
 
 #[path = "../../../../crates/discord-archive/tests/common/mod.rs"]
-mod zip_fixture;
+pub(crate) mod zip_fixture;
 
 const FROZEN: &[u8] = include_bytes!("../../../test-fixtures/discord-import/current-json.zip");
 fn runtime() -> tokio::runtime::Runtime {
@@ -125,6 +125,8 @@ async fn query(service: &ArchiveService, outcome: &DiscordImportOutcome) -> Vec<
         scope: outcome.checkpoint.scope.clone(),
         text: String::new(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,
@@ -287,6 +289,36 @@ fn discord_import_frozen_snapshot_restart_identity_privacy_and_removal() {
                 .windows(b"owner@example.test".len())
                 .any(|part| part == b"owner@example.test")
         );
+    });
+}
+
+#[test]
+fn discord_import_rejects_nonfinal_deflate_with_correct_expanded_size_and_crc() {
+    runtime().block_on(async {
+        for final_block in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let archives = archive(&directory.path().join("content.db"));
+            let imports = DiscordImportOwner::new(archives.clone());
+            let bytes = zip_fixture::deflate_last_entry(
+                package(1, "synthetic complete payload", false),
+                final_block,
+            );
+            let handle = imports
+                .start(selected(&directory.path().join("selected.zip"), &bytes))
+                .await
+                .unwrap();
+            let outcome = handle.wait().await;
+            let phase = handle.latest_progress().phase;
+            imports.shutdown().await;
+            archives.shutdown().await;
+            if final_block {
+                assert_eq!(outcome.unwrap().checkpoint.progress.committed_items, 1);
+                assert_eq!(phase, DiscordImportPhase::Ready);
+            } else {
+                assert_eq!(outcome.err(), Some(DiscordImportError::InvalidArchive));
+                assert_eq!(phase, DiscordImportPhase::Failed);
+            }
+        }
     });
 }
 
@@ -509,6 +541,8 @@ fn discord_import_cancellation_inventory_both_hashes_json_and_finalization() {
                             scope: checkpoint.scope,
                             text: String::new(),
                             kinds: vec![],
+                            conversations: vec![],
+                            privacy_only: false,
                             author: None,
                             before: None,
                             after: None,

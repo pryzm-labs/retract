@@ -99,6 +99,7 @@ type WireSearchResponse = {
   readonly messages: readonly WireMessageSnapshot[];
   readonly returned: number;
   readonly truncated: boolean;
+  readonly completion: "complete" | "result_limit" | "candidate_limit" | "incomplete";
 };
 
 type WirePlanSummary = {
@@ -183,6 +184,7 @@ const typedContract = {
     ],
     returned: 1,
     truncated: false,
+    completion: "complete",
   },
   planView: {
     id: "11111111-1111-4111-8111-111111111111",
@@ -396,7 +398,7 @@ describe("Telegram IPC contract fixture", () => {
     ]);
     expectExactKeys(contract.catalogProgress, ["phase", "total", "processed"]);
     expectExactKeys(contract.authSnapshot, ["stage", "hint", "qrLink"]);
-    expectExactKeys(contract.searchResponse, ["messages", "returned", "truncated"]);
+    expectExactKeys(contract.searchResponse, ["messages", "returned", "truncated", "completion"]);
     expectExactKeys(contract.searchResponse.messages[0], [
       "chatId", "messageId", "senderId", "senderName", "sentAt", "isOutgoing",
       "contentKind", "preview", "privacyFindings", "albumId", "isPinned",

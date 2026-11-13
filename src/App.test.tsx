@@ -28,6 +28,79 @@ describe("Retract desktop UI", () => {
     vi.restoreAllMocks();
   });
 
+  it("focused keeps failed privacy searches visibly unavailable", async () => {
+    vi.spyOn(api, "search").mockRejectedValue(new Error("Search incomplete. Narrow the chat, date, or filters and try again."));
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Privacy scan" }));
+    const results = screen.getByRole("region", { name: "Search results" });
+    await waitFor(() => expect(within(results).getByText(/Search incomplete/)).toBeVisible());
+    expect(within(results).queryByText("No sensitive information found")).not.toBeInTheDocument();
+  });
+
+  it("focused never searches globally for an empty restricted category", async () => {
+    const snapshot = await api.snapshot(fixtureContext);
+    const sample = await api.search({ query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 1 }, fixtureContext);
+    snapshot.chats = snapshot.chats.map(chat => ({ ...chat, archived: false }));
+    vi.spyOn(api, "snapshot").mockResolvedValue(snapshot);
+    let finish: (value: SearchResponse) => void = () => {};
+    let pendingSignal: AbortSignal | undefined;
+    const search = vi.spyOn(api, "search").mockImplementation((_request, _context, signal) => {
+      pendingSignal = signal;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    render(<App />);
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    const calls = search.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /^Archive/ }));
+    expect(pendingSignal?.aborted).toBe(true);
+    finish(sample);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    expect(search).toHaveBeenCalledTimes(calls);
+    expect(screen.getByText("No messages in this scope")).toBeVisible();
+    expect(screen.queryByText(sample.messages[0].preview)).not.toBeInTheDocument();
+  });
+
+  it.each(["resolve", "reject"])("focused ignores stale query %s after a newer filter search", async outcome => {
+    const sample = await api.search({ query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 1 }, fixtureContext);
+    let finishOld: (value: SearchResponse) => void = () => {};
+    let rejectOld: (error: Error) => void = () => {};
+    let oldSignal: AbortSignal | undefined;
+    const search = vi.spyOn(api, "search").mockImplementation((request, _context, signal) => {
+      if (request.query === "old") {
+        oldSignal = signal;
+        return new Promise((resolve, reject) => { finishOld = resolve; rejectOld = reject; });
+      }
+      return Promise.resolve({ ...sample, messages: sample.messages.map(message => ({ ...message, preview: request.query === "new" ? `New ${request.direction} result` : "Initial result" })) });
+    });
+    render(<App />);
+    await screen.findByText("Initial result");
+    fireEvent.change(screen.getByRole("textbox", { name: "Search message history" }), { target: { value: "old" } });
+    await waitFor(() => expect(search.mock.calls.some(([request]) => request.query === "old")).toBe(true));
+    expect(screen.queryByText("Initial result")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Search message history" }), { target: { value: "new" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mine" }));
+    await screen.findByText("New mine result");
+    expect(oldSignal?.aborted).toBe(true);
+    if (outcome === "reject") rejectOld(new Error("Obsolete search failed"));
+    else finishOld({ ...sample, messages: sample.messages.map(message => ({ ...message, preview: "Obsolete result" })) });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.getByText("New mine result")).toBeVisible();
+    expect(screen.queryByText(/Obsolete/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Search unavailable")).not.toBeInTheDocument();
+  });
+
+  it("focused keeps partial current findings selectable and labels incomplete coverage", async () => {
+    const sample = await api.search({ query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 1 }, fixtureContext);
+    vi.spyOn(api, "search").mockResolvedValue({ ...sample, truncated: true, completion: "candidate_limit" });
+    render(<App />);
+    await screen.findByText(/candidate limit was reached/);
+    expect(screen.getByText(/Showing up to the first 500 matches/)).toBeVisible();
+    fireEvent.click(screen.getByLabelText(`Select message from ${sample.messages[0].senderName}`));
+    expectSelectionCount(1);
+    fireEvent.click(screen.getByRole("button", { name: "Review deletion" }));
+    expect(await screen.findByRole("dialog")).toBeVisible();
+  });
+
   it("never exposes fixture controls in the end-user shell", async () => {
     render(<App />);
     expect(await screen.findByText("Search every chat")).toBeInTheDocument();
@@ -102,8 +175,8 @@ describe("Retract desktop UI", () => {
     vi.spyOn(api, "search").mockImplementation((request, context) => {
       if (context.scope.provider === sourceScope.provider) {
         return Promise.resolve(request.direction === "any"
-          ? { messages: [discordMessage], returned: 1, truncated: false }
-          : { messages: [], returned: 0, truncated: false });
+          ? { messages: [discordMessage], returned: 1, truncated: false, completion: "complete" }
+          : { messages: [], returned: 0, truncated: false, completion: "complete" });
       }
       if (holdTelegramSearch) return new Promise((_, reject) => { rejectStaleSearch = reject; });
       return telegramSearch(request, context);
@@ -485,11 +558,11 @@ describe("Retract desktop UI", () => {
       await vi.advanceTimersByTimeAsync(120);
       await waitFor(() => expect(search).toHaveBeenCalledTimes(2));
 
-      resolveSecond({ messages: [secondMessage], returned: 1, truncated: false });
+      resolveSecond({ messages: [secondMessage], returned: 1, truncated: false, completion: "complete" });
       expect(await screen.findByText("Second current result")).toBeInTheDocument();
       expect(screen.queryByText("First stale result")).not.toBeInTheDocument();
 
-      resolveFirst({ messages: [firstMessage], returned: 1, truncated: false });
+      resolveFirst({ messages: [firstMessage], returned: 1, truncated: false, completion: "complete" });
       await vi.advanceTimersByTimeAsync(0);
       expect(screen.getByText("Second current result")).toBeInTheDocument();
       expect(screen.queryByText("First stale result")).not.toBeInTheDocument();

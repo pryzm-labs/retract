@@ -365,6 +365,16 @@ impl ScriptedTdJson {
 
 #[cfg(test)]
 impl ScriptedDelayedResponse {
+    pub(crate) fn assert_cancelled(mut self) {
+        assert!(
+            self.sender
+                .take()
+                .expect("scripted delayed response is single use")
+                .is_closed(),
+            "cancelled search must drop its pending response receiver"
+        );
+    }
+
     pub(crate) fn respond(mut self, response: Value) {
         self.sender
             .take()

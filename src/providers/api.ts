@@ -21,7 +21,20 @@ export class CommittedSettingsError extends Error {
     this.snapshot = snapshot;
   }
 }
+
+function createSearchClientId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  // Older supported WebKit exposes getRandomValues but not randomUUID.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+}
+
 export function createApi(transport: Transport, isDesktop: () => boolean): RetractApi {
+  const searchClientId = createSearchClientId();
+  let searchSequence = 0;
   async function call(command: string, payload: unknown, context: ActiveContext | null) {
     if (context) decodeContext(context);
     try { return await transport(command, { contractVersion: 2, context, payload }); }
@@ -51,14 +64,26 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
         return { snapshot, connectionSettings };
       } catch (cause) { throw new CommittedSettingsError(snapshot, cause); }
     },
-    search: async (request, context) => {
+    search: async (request, context, signal) => {
       decodeRefs(request.conversations, context.scope, "conversation");
       const filters = context.scope.provider === "discord" ? discordSearchFilters(request) : searchFilters(request);
-      const p = object(await active("search_messages_v2", { query: request.query, conversations: request.conversations, filters, limit: request.limit }, context));
+      if (signal?.aborted) throw new ProviderApiError(decodeError({ code: "search_cancelled", retryAt: null }));
+      const searchToken = { clientId: searchClientId, sequence: ++searchSequence };
+      if (!Number.isSafeInteger(searchToken.sequence)) return invalid();
+      const cancel = () => { void active("cancel_search_v2", searchToken, context).catch(() => {}); };
+      signal?.addEventListener("abort", cancel, { once: true });
+      let raw: unknown;
+      try {
+        raw = await active("search_messages_v2", { query: request.query, conversations: request.conversations, filters, limit: request.limit, searchToken }, context);
+      } finally { signal?.removeEventListener("abort", cancel); }
+      if (signal?.aborted) throw new ProviderApiError(decodeError({ code: "search_cancelled", retryAt: null }));
+      const p = object(raw);
       const records = array(p.items, item => decodeContent(item, context.scope));
       decodeRefs(records.map(recordRef), context.scope, "content");
       const nextCursor = nullable(p.nextCursor, text);
-      return { messages: records.map(projectContent), returned: records.length, truncated: nextCursor !== null || records.length >= request.limit };
+      const completion = p.completion;
+      if (completion !== "complete" && completion !== "result_limit" && completion !== "candidate_limit" && completion !== "incomplete") return invalid();
+      return { messages: records.map(projectContent), returned: records.length, truncated: completion !== "complete" || nextCursor !== null || records.length >= request.limit, completion };
     },
     refreshChats: async (conversations, context) => {
       decodeRefs(conversations, context.scope, "conversation");

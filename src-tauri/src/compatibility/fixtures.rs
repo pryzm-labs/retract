@@ -443,6 +443,7 @@ pub struct SyntheticIo {
     pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
     pub preflight_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
     pub mutation_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
+    pub search_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
 }
 impl SyntheticIo {
     pub fn new(active: ActiveContext) -> Self {
@@ -459,6 +460,7 @@ impl SyntheticIo {
             preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             preflight_barrier: Arc::new(Mutex::new(None)),
             mutation_barrier: Arc::new(Mutex::new(None)),
+            search_barrier: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -615,10 +617,16 @@ impl ApplicationQuery for SyntheticIo {
         &self,
         _: &ActiveContext,
         _: SearchRequest,
-    ) -> Result<Page<ContentRecord>, SafeError> {
-        Ok(Page {
+    ) -> Result<crate::providers::ports::SearchPage<ContentRecord>, SafeError> {
+        let barrier = self.search_barrier.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            barrier.entered.notify_one();
+            barrier.release.notified().await;
+        }
+        Ok(crate::providers::ports::SearchPage {
             items: vec![],
             next_cursor: None,
+            completion: crate::providers::ports::SearchCompletion::Complete,
         })
     }
     async fn refresh(
@@ -778,6 +786,10 @@ impl ProviderPayloadValidator for SyntheticValidator {
     }
 }
 pub fn synthetic(path: &Path, io: Arc<SyntheticIo>) -> Harness {
+    Harness::new(Arc::new(synthetic_connection(path, io)))
+}
+
+fn synthetic_connection(path: &Path, io: Arc<SyntheticIo>) -> Connection {
     let context = context("syntheticContext");
     let store = open(path, &context, Arc::new(SyntheticValidator));
     seed(
@@ -795,9 +807,58 @@ pub fn synthetic(path: &Path, io: Arc<SyntheticIo>) -> Harness {
         },
     );
     let lifecycle = FrozenLifecycle::new(context.clone(), io.clone(), store.clone()).unwrap();
-    Harness::new(Arc::new(Connection {
+    Connection {
         active: io.active.clone(),
         store,
         provider: Arc::new(SyntheticRegistration { io, lifecycle }),
-    }))
+    }
+}
+
+pub struct RolloverConnection {
+    pub base: Connection,
+    pub io: Arc<SyntheticIo>,
+    pub constructions: AtomicUsize,
+}
+impl RolloverConnection {
+    pub fn new(path: &Path, io: Arc<SyntheticIo>) -> Arc<Self> {
+        Arc::new(Self {
+            base: synthetic_connection(path, io.clone()),
+            io,
+            constructions: AtomicUsize::new(0),
+        })
+    }
+}
+#[async_trait]
+impl ApplicationConnection for RolloverConnection {
+    fn context(&self) -> Option<ActiveContext> {
+        self.base.context()
+    }
+    fn store(&self) -> Option<Arc<FoundationStore>> {
+        self.base.store()
+    }
+    fn bootstrap(&self) -> Result<BootstrapSnapshot, SafeError> {
+        self.base.bootstrap()
+    }
+    async fn registration(&self) -> Result<Arc<dyn ProviderRegistration>, SafeError> {
+        if self.constructions.fetch_add(1, Ordering::SeqCst) == 0 {
+            return self.base.registration().await;
+        }
+        let context = self
+            .context()
+            .ok_or_else(|| safe(ErrorCode::IdentityUnavailable))?;
+        let lifecycle = FrozenLifecycle::new(context, self.io.clone(), self.base.store.clone())?;
+        Ok(Arc::new(SyntheticRegistration {
+            io: self.io.clone(),
+            lifecycle,
+        }))
+    }
+    async fn auth(&self, request: AuthRequest) -> Result<(), SafeError> {
+        self.base.auth(request).await
+    }
+    async fn retry_identity(&self) -> Result<(), SafeError> {
+        self.base.retry_identity().await
+    }
+    async fn shutdown(&self) {
+        self.base.shutdown().await;
+    }
 }

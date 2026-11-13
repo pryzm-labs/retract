@@ -53,6 +53,24 @@ pub struct Page<T> {
     pub next_cursor: Option<String>,
 }
 
+/// Coverage belongs to an application search, never to archive pagination cursors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCompletion {
+    Complete,
+    ResultLimit,
+    CandidateLimit,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub completion: SearchCompletion,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationQuery {
@@ -385,7 +403,7 @@ pub trait ApplicationQuery: Send + Sync {
         &self,
         context: &ActiveContext,
         request: crate::compatibility::model_v2::SearchRequest,
-    ) -> Result<Page<ContentRecord>, retract_domain::SafeError>;
+    ) -> Result<SearchPage<ContentRecord>, retract_domain::SafeError>;
     async fn refresh(
         &self,
         context: &ActiveContext,

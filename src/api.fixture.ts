@@ -25,6 +25,7 @@ export const api = createApi(async (command, raw) => {
     case "get_bootstrap_snapshot_v2":
     case "get_snapshot_v2": { const s = await demoSnapshot(); payload = { identity: s.identity, auth: { schema: "telegram.auth", version: 1, payload: s.auth }, catalog: s.catalog, chats: s.chats.map(fixtureConversation), recentJobs: s.recentJobs, legacyHistory: [] }; break; }
     case "get_connection_settings_v2": payload = connectionDefaults; break;
+    case "cancel_search_v2": payload = null; break;
     case "search_messages_v2": {
       const filters = object(p.filters), f = object(filters.payload);
       if (filters.schema !== "telegram.search_filters" || filters.version !== 1) return invalid();
@@ -32,7 +33,7 @@ export const api = createApi(async (command, raw) => {
         chatKinds: array(f.chatKinds, v => choice(v, ["direct", "basic_group", "supergroup", "channel", "secret"])),
         contentKinds: array(f.contentKinds, v => choice(v, ["text", "photo", "video", "file", "voice", "audio", "animation", "sticker", "poll", "location", "contact", "service", "other"])),
         direction: choice(f.direction, ["any", "mine", "others"]), minDate: nullable(f.minDate, date), maxDate: nullable(f.maxDate, date), excludePinned: bool(f.excludePinned), privacyScan: bool(f.privacyScan) });
-      payload = { items: response.messages.map(fixtureContent), nextCursor: response.truncated ? "more" : null }; break;
+      payload = { items: response.messages.map(fixtureContent), nextCursor: null, completion: response.truncated ? "result_limit" : "complete" }; break;
     }
     case "refresh_chats_v2": payload = (await demoRefreshChats(decodeRefs(p.conversations, fixtureContext.scope, "conversation").map(ref => uuid<"ConversationId">(ref.id)))).map(fixtureConversation); break;
     case "get_intents_v2": payload = await demoIntents(decodeRefs(p.targets, fixtureContext.scope)); break;

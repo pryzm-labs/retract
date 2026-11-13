@@ -82,6 +82,16 @@ fn duplicate_case_and_file_directory_conflicts_are_rejected() {
 }
 
 #[test]
+fn duplicate_raw_names_with_different_encoding_flags_are_rejected() {
+    let mut bytes = zip(&[("x", b""), ("x", b"")]);
+    let second = central(&bytes) + 47;
+    let local = u32::from_le_bytes(bytes[second + 42..second + 46].try_into().unwrap()) as usize;
+    put16(&mut bytes, second + 8, 0x0800);
+    put16(&mut bytes, local + 6, 0x0800);
+    rejected(bytes, ArchiveError::UnsafeEntryName);
+}
+
+#[test]
 fn encryption_and_unsupported_compression_are_rejected() {
     for flag in [1, 0x40, 0x2000] {
         let mut bytes = zip(&[("x", b"")]);
@@ -122,6 +132,37 @@ fn multidisk_prefixed_truncated_and_trailing_archives_are_rejected() {
     rejected(bytes, ArchiveError::InvalidArchive);
     let mut bytes = zip(&[("x", b"")]);
     bytes.push(0);
+    rejected(bytes, ArchiveError::InvalidArchive);
+}
+
+#[test]
+fn eocd_disk_and_entry_counts_must_match_the_checked_directory() {
+    for (field, value, error) in [
+        (6, 1, ArchiveError::UnsupportedFeature),
+        (8, 0, ArchiveError::UnsupportedFeature),
+        (10, 0, ArchiveError::UnsupportedFeature),
+    ] {
+        let mut bytes = zip(&[("x", b"")]);
+        let end = eocd(&bytes);
+        put16(&mut bytes, end + field, value);
+        rejected(bytes, error);
+    }
+    for count in [0, 2] {
+        let mut bytes = zip(&[("x", b"")]);
+        let end = eocd(&bytes);
+        put16(&mut bytes, end + 8, count);
+        put16(&mut bytes, end + 10, count);
+        rejected(bytes, ArchiveError::InvalidArchive);
+    }
+}
+
+#[test]
+fn a_trailing_central_directory_digital_signature_is_outside_the_policy() {
+    let mut bytes = zip(&[("x", b"")]);
+    let end = eocd(&bytes);
+    // A well-formed empty digital-signature record is still unindexed metadata.
+    bytes.splice(end..end, *b"PK\x05\x05\0\0");
+    put32(&mut bytes, end + 6 + 12, 47 + 6);
     rejected(bytes, ArchiveError::InvalidArchive);
 }
 
@@ -195,6 +236,50 @@ fn lied_expanded_sizes_cannot_validate_either_codec() {
             Err(ArchiveError::IntegrityFailure)
         );
         assert!(!archive.is_validated(EntryIndex(0)));
+    }
+}
+
+#[test]
+fn expanded_sizes_above_actual_output_cannot_validate_either_codec() {
+    use std::io::Write;
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+    for method in [CompressionMethod::Stored, CompressionMethod::Deflated] {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("x", SimpleFileOptions::default().compression_method(method))
+            .unwrap();
+        writer.write_all(b"{}").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let at = central(&bytes);
+        put32(&mut bytes, 22, 3);
+        put32(&mut bytes, at + 24, 3);
+        let mut archive =
+            ArchiveInventory::inspect(Cursor::new(bytes), limits(), &NeverCancel).unwrap();
+        assert_eq!(
+            archive.validate_entry(EntryIndex(0)),
+            Err(ArchiveError::IntegrityFailure)
+        );
+        assert!(!archive.is_validated(EntryIndex(0)));
+    }
+}
+
+#[test]
+fn nonfinal_deflate_with_correct_expanded_size_and_crc_never_validates() {
+    for payload in [b"".as_slice(), b"synthetic complete payload".as_slice()] {
+        for final_block in [true, false] {
+            let bytes = deflate_last_entry(zip(&[("x", payload)]), final_block);
+            let mut archive =
+                ArchiveInventory::inspect(Cursor::new(bytes), limits(), &NeverCancel).unwrap();
+            assert_eq!(
+                archive.validate_entry(EntryIndex(0)),
+                if final_block {
+                    Ok(())
+                } else {
+                    Err(ArchiveError::IntegrityFailure)
+                }
+            );
+            assert_eq!(archive.is_validated(EntryIndex(0)), final_block);
+        }
     }
 }
 

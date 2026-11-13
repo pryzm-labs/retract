@@ -55,7 +55,7 @@ function installTransport(options: {
       case "search_messages_v2": {
         const filters = request.payload.filters as { payload: { contentKinds: string[] } };
         const visible = filters.payload.contentKinds.length ? [] : options.search && request.payload.query === "late" ? await options.search("late") : messages;
-        return envelope({ items: visible.map(wireMessage), nextCursor: null });
+        return envelope({ items: visible.map(wireMessage), nextCursor: null, completion: "complete" });
       }
       case "prepare_selection_v2": return envelope(wirePlan(captured, request.payload.messageRefs as unknown[]));
       case "prepare_intent_v2": {
@@ -406,7 +406,7 @@ describe("late v2 responses across account and source changes", () => {
         next.payload.chats = next.payload.chats.map(chat => ({ ...chat, scope: nextContext.scope }));
         return next;
       }
-      if (command === "search_messages_v2") return { contractVersion: 2, context: nextContext, payload: { items: [wireMessage(message)], nextCursor: null } };
+      if (command === "search_messages_v2") return { contractVersion: 2, context: nextContext, payload: { items: [wireMessage(message)], nextCursor: null, completion: "complete" } };
       if (command === "get_intents_v2") return { contractVersion: 2, context: nextContext, payload: [] };
       throw new Error(`Unexpected native boundary command: ${command}`);
     });

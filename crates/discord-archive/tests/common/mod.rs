@@ -47,6 +47,45 @@ pub fn eocd(bytes: &[u8]) -> usize {
     signature(bytes, b"PK\x05\x06")
 }
 
+/// Replace the last stored payload with one raw DEFLATE stored block. Clearing
+/// BFINAL keeps the expanded bytes, size and CRC correct but omits stream EOF.
+pub fn deflate_last_entry(mut bytes: Vec<u8>, final_block: bool) -> Vec<u8> {
+    let directory = central(&bytes);
+    let end = eocd(&bytes);
+    let read16 = |at| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+    let read32 = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let mut last = directory;
+    loop {
+        let next = last
+            + 46
+            + usize::from(read16(last + 28))
+            + usize::from(read16(last + 30))
+            + usize::from(read16(last + 32));
+        if next == end {
+            break;
+        }
+        assert!(next < end);
+        last = next;
+    }
+    assert_eq!(read16(last + 10), 0);
+    let local = read32(last + 42) as usize;
+    let payload = local + 30 + usize::from(read16(local + 26));
+    let length = u16::try_from(read32(last + 24)).unwrap();
+    assert_eq!(payload + usize::from(length), directory);
+    let [lo, hi] = length.to_le_bytes();
+    let [not_lo, not_hi] = (!length).to_le_bytes();
+    bytes.splice(
+        payload..payload,
+        [u8::from(final_block), lo, hi, not_lo, not_hi],
+    );
+    put16(&mut bytes, local + 8, 8);
+    put32(&mut bytes, local + 18, u32::from(length) + 5);
+    put16(&mut bytes, last + 5 + 10, 8);
+    put32(&mut bytes, last + 5 + 20, u32::from(length) + 5);
+    put32(&mut bytes, end + 5 + 16, directory as u32 + 5);
+    bytes
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &byte in data {

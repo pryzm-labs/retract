@@ -2,6 +2,36 @@ use retract_domain::{ErrorCode, SafeError};
 
 use crate::error::AppError;
 
+#[test]
+fn focused_search_diagnostics_are_explicit_and_safe() {
+    for (sentinel, code) in [
+        ("TDLIB_SEARCH_SUPERSEDED", "search_cancelled"),
+        ("TDLIB_SEARCH_PAGE_LIMIT", "search_incomplete"),
+    ] {
+        let value = serde_json::to_value(search_error(AppError::Gateway(sentinel.into()))).unwrap();
+        assert_eq!(value["code"], code);
+        assert!(!value.to_string().contains(sentinel));
+        assert_eq!(
+            boundary_error(AppError::Gateway(sentinel.into())).code,
+            ErrorCode::PermissionChanged,
+            "generic plan and execution mapping must remain unchanged"
+        );
+    }
+}
+
+/// Read-search completion never changes generic plan or execution diagnostics.
+pub(crate) fn search_error(error: AppError) -> SafeError {
+    match error {
+        AppError::Gateway(ref message) if message == "TDLIB_SEARCH_SUPERSEDED" => {
+            crate::provider_service::safe(ErrorCode::SearchCancelled)
+        }
+        AppError::Gateway(ref message) if message == "TDLIB_SEARCH_PAGE_LIMIT" => {
+            crate::provider_service::safe(ErrorCode::SearchIncomplete)
+        }
+        other => boundary_error(other),
+    }
+}
+
 /// Telegram-native failures are interpreted at the provider boundary. Shared
 /// storage and authentication variants retain the core mapping.
 pub(crate) fn boundary_error(error: AppError) -> SafeError {
@@ -48,6 +78,9 @@ pub(crate) fn safe_diagnostic(code: &str) -> SafeError {
 
 pub(crate) fn legacy_diagnostic_code(code: ErrorCode) -> &'static str {
     match code {
+        ErrorCode::SearchCancelled => "search_cancelled",
+        ErrorCode::SearchSessionLimit => "search_session_limit",
+        ErrorCode::SearchIncomplete => "search_incomplete",
         ErrorCode::AuthenticationRequired => "authentication_required",
         ErrorCode::PermissionChanged => "telegram_rejected",
         ErrorCode::NotFound => "not_found",

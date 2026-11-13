@@ -127,6 +127,7 @@ pub struct SearchResponse {
     pub messages: Vec<MessageSnapshot>,
     pub returned: usize,
     pub truncated: bool,
+    pub completion: crate::providers::ports::SearchCompletion,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,6 +434,7 @@ mod wire_contract_tests {
             deletion_reach: cleaner_domain::DeletionReach::Everyone,
         };
         let response = SearchResponse {
+            completion: crate::providers::ports::SearchCompletion::Complete,
             messages: vec![message],
             returned: 1,
             truncated: false,

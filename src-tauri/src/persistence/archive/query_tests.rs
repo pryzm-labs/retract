@@ -13,6 +13,8 @@ fn request(text: &str) -> ArchiveSearch {
         scope: source().scope(),
         text: text.into(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,
@@ -36,6 +38,216 @@ fn ids(items: &[ContentRecord]) -> Vec<&str> {
         .iter()
         .map(|item| item.resource.canonical_key.as_str())
         .collect()
+}
+
+fn in_room(mut input: ImportBatch, name: &str) -> ImportBatch {
+    let room = &mut input.conversations[0];
+    room.resource.canonical_key = name.into();
+    room.resource.locator_payload = serde_json::json!({"nativeId": name});
+    room.id = room.resource.resource_id().unwrap().try_into().unwrap();
+    input.contents[0].conversation_id = room.id;
+    input
+}
+
+#[test]
+fn focused_archive_selection_and_privacy_precede_limit_and_deserialization() {
+    let fixture = Fixture::new();
+    let mut store = registered(&fixture);
+    let mut selected = in_room(batch("rare", "alpha person@example.test"), "selected");
+    selected.contents[0].timestamp = "2026-09-04T00:00:00.000000001Z".parse().unwrap();
+    let wanted = selected.conversations[0].id;
+    let author = selected.contents[0].author_id;
+    let mut inputs = vec![selected, in_room(batch("plain", "alpha"), "selected")];
+    for index in 0..205 {
+        inputs.push(batch(
+            &format!("unrelated-{index}"),
+            "alpha outside@example.test",
+        ));
+    }
+    publish(&mut store, &source().scope(), inputs);
+    // Valid JSON with an invalid domain shape also preserves expression indexes.
+    // A Rust-side filter or a LIMIT before the predicates would decode this row.
+    store
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE content_observations SET record_json='{}' WHERE conversation_id != ?",
+                [wanted.as_uuid().to_string()],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE content_observations SET record_json='{}' WHERE searchable_text='alpha'",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let mut query = request("alpha");
+    query.conversations = vec![wanted];
+    query.privacy_only = true;
+    query.author = Some(author);
+    query.after = Some("2026-09-03T00:00:00Z".parse().unwrap());
+    query.before = Some("2026-09-05T00:00:00Z".parse().unwrap());
+    query.limit = 1;
+    let page = store.search(query.clone()).unwrap();
+    assert_eq!(ids(&page.items), ["rare"]);
+    assert!(page.next_cursor.is_none());
+    query.after = None;
+    query.before = None;
+    assert_eq!(ids(&store.search(query).unwrap().items), ["rare"]);
+}
+
+#[test]
+fn focused_archive_filter_cursor_canonicalization_empty_selection_and_bounds() {
+    let fixture = Fixture::new();
+    let mut store = registered(&fixture);
+    let one = in_room(batch("a", "alpha person@example.test"), "one");
+    let two = in_room(batch("b", "alpha other@example.test"), "two");
+    let a = one.conversations[0].id;
+    let b = two.conversations[0].id;
+    publish(
+        &mut store,
+        &source().scope(),
+        vec![one, two, batch("c", "alpha")],
+    );
+    let mut query = request("alpha");
+    query.conversations = vec![a, b];
+    query.privacy_only = true;
+    query.kinds = vec![ContentKind::Text];
+    query.limit = 1;
+    let first = store.search(query.clone()).unwrap();
+    query.cursor = first.next_cursor.clone();
+    assert!(query.cursor.is_some());
+    query.conversations = vec![b, a, a];
+    let second = store.search(query.clone()).unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+    assert_ne!(first.items[0].id, second.items[0].id);
+    query.conversations = vec![a];
+    assert_eq!(store.search(query.clone()), Err(ArchiveError::StaleCursor));
+    query.conversations = vec![a, b];
+    query.privacy_only = false;
+    assert_eq!(store.search(query.clone()), Err(ArchiveError::StaleCursor));
+    query.cursor = None;
+    query.conversations.clear(); // Empty explicitly means all scoped conversations.
+    query.limit = 200;
+    assert_eq!(store.search(query.clone()).unwrap().items.len(), 3);
+    query.conversations = vec![a; 1001];
+    assert_eq!(store.search(query), Err(ArchiveError::LimitExceeded));
+}
+
+#[test]
+fn focused_archive_privacy_findings_cannot_cross_source_scope() {
+    let fixture = Fixture::new();
+    let mut store = registered(&fixture);
+    publish(&mut store, &source().scope(), vec![batch("a", "alpha")]);
+    let mut other = source();
+    other.id = uuid::Uuid::from_u128(7).try_into().unwrap();
+    other.archive_fingerprint = Some("other-export".into());
+    store.register_source(account(), other.clone()).unwrap();
+    let mut input = batch("a", "alpha person@example.test");
+    input.contents[0].scope = other.scope();
+    input.conversations[0].scope = other.scope();
+    input.actors[0].scope = other.scope();
+    publish(&mut store, &other.scope(), vec![input]);
+    let mut query = request("alpha");
+    query.privacy_only = true;
+    assert!(store.search(query.clone()).unwrap().items.is_empty());
+    query.scope = other.scope();
+    assert_eq!(ids(&store.search(query).unwrap().items), ["a"]);
+}
+
+#[test]
+fn focused_archive_privacy_only_excludes_unrelated_records_and_deduplicates_findings() {
+    let fixture = Fixture::new();
+    let mut store = registered(&fixture);
+    let mut private = batch("private", "alpha person@example.test 192.168.1.1");
+    private.contents[0].timestamp = "2026-09-04T00:00:00.000000001Z".parse().unwrap();
+    let author = private.contents[0].author_id;
+    publish(
+        &mut store,
+        &source().scope(),
+        vec![private, batch("plain", "alpha")],
+    );
+    store
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE content_observations SET record_json='{}' WHERE searchable_text='alpha'",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let mut query = request("alpha");
+    query.privacy_only = true;
+    query.kinds = vec![ContentKind::Text];
+    query.author = Some(author);
+    query.limit = 1;
+    let page = store.search(query).unwrap();
+    assert_eq!(ids(&page.items), ["private"]);
+    assert!(page.items[0].privacy_findings.len() >= 2);
+    assert!(page.next_cursor.is_none());
+}
+
+#[test]
+fn focused_archive_selected_and_privacy_candidate_plans_use_existing_indexes() {
+    let fixture = Fixture::new();
+    let store = registered(&fixture);
+    for (sql, values, expected) in [
+        (
+            "WITH candidates AS MATERIALIZED (SELECT observation_key FROM content_observations INDEXED BY content_conversation_reference WHERE provider=? AND account_id=? AND source_id=? AND conversation_id IN (?)) SELECT c.record_json FROM candidates k CROSS JOIN content_observations c ON c.observation_key=k.observation_key WHERE c.provider=? AND c.account_id=? AND c.source_id=? ORDER BY c.timestamp_seconds DESC, c.timestamp_nanos DESC, c.resource_id DESC LIMIT 201",
+            vec![
+                "synthetic",
+                "account",
+                "source",
+                "room",
+                "synthetic",
+                "account",
+                "source",
+            ],
+            "content_conversation_reference",
+        ),
+        (
+            "SELECT c.record_json FROM (SELECT DISTINCT provider, account_id, source_id, resource_id FROM privacy_findings WHERE provider=? AND account_id=? AND source_id=?) p CROSS JOIN content_observations c ON c.provider=p.provider AND c.account_id=p.account_id AND c.source_id=p.source_id AND c.resource_id=p.resource_id WHERE c.provider=? AND c.account_id=? AND c.source_id=? ORDER BY c.timestamp_seconds DESC, c.timestamp_nanos DESC, c.resource_id DESC LIMIT 201",
+            vec![
+                "synthetic",
+                "account",
+                "source",
+                "synthetic",
+                "account",
+                "source",
+            ],
+            "SEARCH privacy_findings",
+        ),
+    ] {
+        let plans: Vec<String> = store
+            .transaction(|tx| {
+                Ok(tx
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap()
+                    .query_map(rusqlite::params_from_iter(values), |row| row.get(3))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap())
+            })
+            .unwrap();
+        println!("focused archive query plan: {}", plans.join("; "));
+        assert!(
+            plans.iter().any(|plan| plan.contains(expected)),
+            "{plans:?}"
+        );
+        assert!(
+            !plans
+                .iter()
+                .any(|plan| plan == "SCAN c" || plan.starts_with("SCAN c ")),
+            "{plans:?}"
+        );
+        assert!(
+            plans.iter().any(|plan| plan.starts_with("SEARCH c ")),
+            "{plans:?}"
+        );
+    }
 }
 
 #[test]

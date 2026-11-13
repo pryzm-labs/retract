@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@retract/api";
 import { CommittedSettingsError, ProviderApiError } from "./providers/api";
 import { sameContext, sameScope, scopeKey, resourceKey, refKey, type ActiveContext, type ScopedResourceRef, type Uuid } from "./providers/identity";
@@ -38,10 +38,9 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceSetupOpen, setSourceSetupOpen] = useState(false);
   const [discordConnectionOpen, setDiscordConnectionOpen] = useState(false);
-  const [results, setResults] = useState<SearchResponse>({ messages: [], returned: 0, truncated: false });
+  const [results, setResults] = useState<SearchResponse>({ messages: [], returned: 0, truncated: false, completion: "complete" });
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [query, setQuery] = useState("");
-  const deferredQuery = useDeferredValue(query);
   const [direction, setDirection] = useState<MessageDirection>("any");
   const [contentFilter, setContentFilter] = useState<ContentFilter>("all");
   const [dateFilter, setDateFilter] = useState<DateFilter>("any");
@@ -59,6 +58,7 @@ export default function App() {
   const [refreshingCatalog, setRefreshingCatalog] = useState(false);
   const [settlingRemovalChatIds, setSettlingRemovalChatIds] = useState<Set<string>>(new Set());
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [searchVersion, setSearchVersion] = useState(0);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -92,11 +92,12 @@ export default function App() {
       setSelectedMessages(new Map());
       setCompletedDiscordMessageKeys(new Set());
       setPlan(null);
-      setResults({ messages: [], returned: 0, truncated: false });
+      setResults({ messages: [], returned: 0, truncated: false, completion: "complete" });
       setSettlingRemovalChatIds(new Set());
       setRefreshingCatalog(false);
       setSyncingCatalog(false);
       setSearching(false);
+      setSearchError(null);
       catalogSyncStarted.current = false;
     }
     currentContext.current = next.context;
@@ -285,17 +286,24 @@ export default function App() {
   }, [chats, scope, selectedChatId]);
 
   const dateBounds = useMemo(() => searchDateBounds(dateFilter), [dateFilter]);
+  const emptySearchScope = (selectedChatId !== null || scope !== "all") && scopedChatIds.length === 0;
 
   useEffect(() => {
     if (!snapshot?.context || snapshot.identity.state !== "ready" || syncingCatalog || snapshot.catalog.phase !== "ready") return;
+    setResults({ messages: [], returned: 0, truncated: false, completion: "complete" });
+    setSearchError(null);
+    setSearching(false);
+    if (emptySearchScope) return;
     const context = snapshot.context;
     const capturedEpoch = epoch.current;
     let disposed = false;
+    setSearching(true);
+    const controller = new AbortController();
     const timeout = window.setTimeout(async () => {
       setSearching(true);
       try {
         const response = await api.search({
-          query: deferredQuery,
+          query,
           conversations: scopedChatIds,
           chatKinds: [],
           contentKinds: contentKindsForFilter[contentFilter],
@@ -305,10 +313,10 @@ export default function App() {
           excludePinned,
           privacyScan,
           limit: 500
-        }, context);
+        }, context, controller.signal);
         if (!disposed && capturedEpoch === epoch.current) setResults(response);
       } catch (error) {
-        if (!disposed && capturedEpoch === epoch.current) showError(error, setToast);
+        if (!disposed && capturedEpoch === epoch.current) setSearchError(error instanceof Error ? error.message : "Search unavailable. Try the search again.");
       } finally {
         if (!disposed && capturedEpoch === epoch.current) setSearching(false);
       }
@@ -316,8 +324,9 @@ export default function App() {
     return () => {
       disposed = true;
       window.clearTimeout(timeout);
+      controller.abort();
     };
-  }, [snapshot, deferredQuery, scopedChatIds, contentFilter, direction, dateBounds, excludePinned, privacyScan, searchVersion]);
+  }, [snapshot, query, scopedChatIds, emptySearchScope, contentFilter, direction, dateBounds, excludePinned, privacyScan, searchVersion, syncingCatalog]);
 
   const hasActiveJobs = jobs.some(job => job.status === "queued" || job.status === "running");
   const pendingRemovalChatIds = settlingRemovalChatIds;
@@ -773,6 +782,9 @@ export default function App() {
           query={query}
           privacyScan={privacyScan}
           truncated={results.truncated}
+          completion={results.completion}
+          searchError={searchError}
+          onRetry={() => setSearchVersion(value => value + 1)}
           onToggle={toggleMessage}
           onToggleAll={toggleAll}
         />

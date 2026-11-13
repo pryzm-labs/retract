@@ -103,6 +103,7 @@ pub(crate) async fn select_archive_v2(
     if current.has_workers().await {
         return Err(safe(ErrorCode::PermissionChanged));
     }
+    current.cancel_searches();
     let (archives, entries) = ready_entries(&runtime).await?;
     let entry = entries
         .into_iter()

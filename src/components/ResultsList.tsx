@@ -14,13 +14,16 @@ interface ResultsListProps {
   query: string;
   privacyScan: boolean;
   truncated: boolean;
+  completion?: import("../providers/contract").SearchCompletion;
+  searchError?: string | null;
+  onRetry?: () => void;
   onToggle: (message: MessageSnapshot) => void;
   onToggleAll: () => void;
 }
 
 export const messageKey = (message: Pick<MessageSnapshot, "scope" | "messageId">) => resourceKey(message.scope, "content", message.messageId);
 
-export function ResultsList({ provider, messages, chats, selectedKeys, completedKeys, loading, refreshing, query, privacyScan, truncated, onToggle, onToggleAll }: ResultsListProps) {
+export function ResultsList({ provider, messages, chats, selectedKeys, completedKeys, loading, refreshing, query, privacyScan, truncated, completion, searchError, onRetry, onToggle, onToggleAll }: ResultsListProps) {
   const chatMap = new Map(chats.map((chat) => [resourceKey(chat.scope, "conversation", chat.id), chat]));
   const selectable = messages.filter(message => !completedKeys.has(messageKey(message)));
   const allSelected = selectable.length > 0 && selectable.every((message) => selectedKeys.has(messageKey(message)));
@@ -31,18 +34,21 @@ export function ResultsList({ provider, messages, chats, selectedKeys, completed
         <label className="select-all">
           <input type="checkbox" checked={allSelected} onChange={onToggleAll} disabled={selectable.length === 0} />
           <span className="custom-checkbox">{allSelected && <Check size={12} />}</span>
-          <span>{loading ? "Searching…" : plural(messages.length, "result")}</span>
+          <span>{loading ? "Searching…" : searchError ? "Search unavailable" : plural(messages.length, "result")}</span>
         </label>
         <span className="results-note">
-          {refreshing ? <><LoaderCircle className="spin" size={12} /> Syncing cleanup…</> : truncated ? "Result limit reached · refine the search" : privacyScan ? "Privacy findings · review each match" : "Newest first"}
+          {refreshing ? <><LoaderCircle className="spin" size={12} /> Syncing cleanup…</> : truncated ? "Showing up to the first 500 matches · refine the search" : privacyScan ? "Privacy findings · review each match" : "Newest first"}
         </span>
       </div>
 
       <div className="message-list" aria-busy={loading}>
+        {!loading && searchError && <div className="center-state" role="alert"><ShieldAlert size={24} /><h2>Search unavailable</h2><p>{searchError}</p>{onRetry && <button type="button" onClick={onRetry}>Retry search</button>}</div>}
+        {!loading && !searchError && completion === "candidate_limit" && <div role="status"><p>Search incomplete: the candidate limit was reached. These matches cover only part of the scope. Narrow the chat, date, or filters and try again.</p></div>}
+        {!loading && !searchError && completion === "incomplete" && <div role="status"><p>Search incomplete: some message history could not be checked. These matches cover only part of the scope. Narrow the chat, date, or filters and try again.</p>{onRetry && <button type="button" onClick={onRetry}>Retry search</button>}</div>}
         {loading && messages.length === 0 && (
           <div className="center-state"><LoaderCircle className="spin" size={24} /><p>{privacyScan ? "Scanning message history locally for sensitive information…" : provider === "discord" ? "Searching the local Discord archive…" : "Searching local and Telegram indexes…"}</p></div>
         )}
-        {!loading && messages.length === 0 && (
+        {!loading && !searchError && !truncated && messages.length === 0 && (
           <div className="center-state">
             <SearchX size={31} strokeWidth={1.5} />
             <h2>{privacyScan ? "No sensitive information found" : query ? "No messages found" : "No messages in this scope"}</h2>
