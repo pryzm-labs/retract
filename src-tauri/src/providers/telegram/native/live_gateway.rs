@@ -4839,7 +4839,9 @@ mod tests {
             let gateway = Arc::clone(&gateway);
             tokio::spawn(async move { gateway.search(&request).await })
         };
-        wait_for_request_count(&script, "getMessageProperties", 1).await;
+        // Block the complete first batch before superseding so every request
+        // that passed its generation check has already recorded its trace.
+        wait_for_request_count(&script, "getMessageProperties", 12).await;
         assert!(
             gateway
                 .search(&search_request(""))
@@ -4847,13 +4849,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // The implementation may already have started a bounded batch.
         let started = script
             .traces()
             .iter()
             .filter(|trace| trace.kind == "getMessageProperties")
             .count();
-        assert!(started <= 12);
+        assert_eq!(started, 12);
         for response in pending.drain(..) {
             response.respond(focused_reach());
         }
