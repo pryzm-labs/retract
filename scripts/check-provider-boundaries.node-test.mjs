@@ -248,9 +248,19 @@ test("lexical IPC check does not taint unrelated shadowed aliases", () => {
 test("parser ZIP dependency accepts only the reviewed patched pin and codecs", () => {
   const accepted = fixture();
   write(accepted, "parser/src/lib.rs", "use std::io::Read;");
-  write(accepted, "parser/Cargo.toml", '[dependencies]\nzip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }\n');
+  write(accepted, "parser/Cargo.toml", '[dependencies]\nzip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }\n');
   assert.equal(check(accepted, join(accepted, "parser/src")).status, 0);
-  for (const dependency of ['zip = "9"', 'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }', 'zip = { version = "=9.0.5", features = ["aes-crypto"] }', 'zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }']) {
+  for (const dependency of [
+    'zip = "9"',
+    'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.1.2", features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.1.2", default-features = true, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.1.2", default-features = false, features = ["aes-crypto"] }',
+    'zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }',
+    'zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs", "zstd"] }',
+  ]) {
     const root = fixture();
     write(root, "parser/src/lib.rs", "use std::io::Read;");
     write(root, "parser/Cargo.toml", `[dependencies]\n${dependency}\n`);

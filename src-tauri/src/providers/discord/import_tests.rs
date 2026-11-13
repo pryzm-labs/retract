@@ -293,6 +293,36 @@ fn discord_import_frozen_snapshot_restart_identity_privacy_and_removal() {
 }
 
 #[test]
+fn discord_import_rejects_nonfinal_deflate_with_correct_expanded_size_and_crc() {
+    runtime().block_on(async {
+        for final_block in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let archives = archive(&directory.path().join("content.db"));
+            let imports = DiscordImportOwner::new(archives.clone());
+            let bytes = zip_fixture::deflate_last_entry(
+                package(1, "synthetic complete payload", false),
+                final_block,
+            );
+            let handle = imports
+                .start(selected(&directory.path().join("selected.zip"), &bytes))
+                .await
+                .unwrap();
+            let outcome = handle.wait().await;
+            let phase = handle.latest_progress().phase;
+            imports.shutdown().await;
+            archives.shutdown().await;
+            if final_block {
+                assert_eq!(outcome.unwrap().checkpoint.progress.committed_items, 1);
+                assert_eq!(phase, DiscordImportPhase::Ready);
+            } else {
+                assert_eq!(outcome.err(), Some(DiscordImportError::InvalidArchive));
+                assert_eq!(phase, DiscordImportPhase::Failed);
+            }
+        }
+    });
+}
+
+#[test]
 fn discord_import_enforces_combined_inspection_and_typed_read_budget() {
     runtime().block_on(async {
         let dir = tempfile::tempdir().unwrap();
