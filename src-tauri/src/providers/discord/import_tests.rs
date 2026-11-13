@@ -37,7 +37,7 @@ impl ImportTestLaunch for DiscordImportOwner {
 }
 
 #[path = "../../../../crates/discord-archive/tests/common/mod.rs"]
-mod zip_fixture;
+pub(crate) mod zip_fixture;
 
 const FROZEN: &[u8] = include_bytes!("../../../test-fixtures/discord-import/current-json.zip");
 fn runtime() -> tokio::runtime::Runtime {
@@ -125,6 +125,8 @@ async fn query(service: &ArchiveService, outcome: &DiscordImportOutcome) -> Vec<
         scope: outcome.checkpoint.scope.clone(),
         text: String::new(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,
@@ -509,6 +511,8 @@ fn discord_import_cancellation_inventory_both_hashes_json_and_finalization() {
                             scope: checkpoint.scope,
                             text: String::new(),
                             kinds: vec![],
+                            conversations: vec![],
+                            privacy_only: false,
                             author: None,
                             before: None,
                             after: None,

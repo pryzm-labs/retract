@@ -14,6 +14,8 @@ fn request(scope: &Scope) -> ArchiveSearch {
         scope: scope.clone(),
         text: String::new(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,

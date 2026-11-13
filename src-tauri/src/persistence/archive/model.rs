@@ -33,6 +33,9 @@ pub(crate) struct ArchiveSearch {
     pub scope: Scope,
     pub text: String,
     pub kinds: Vec<retract_domain::ContentKind>,
+    /// Empty means all conversations in the exact scope; bounded before queueing.
+    pub conversations: Vec<retract_domain::ConversationId>,
+    pub privacy_only: bool,
     pub author: Option<retract_domain::ActorId>,
     pub before: Option<chrono::DateTime<chrono::Utc>>,
     pub after: Option<chrono::DateTime<chrono::Utc>>,

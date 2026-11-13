@@ -61,10 +61,15 @@ impl ArchiveStore {
             .collect::<Result<Vec<_>, _>>()?;
         kinds.sort();
         kinds.dedup();
+        let mut conversations = request.conversations.clone();
+        conversations.sort();
+        conversations.dedup();
         let filter = digest(&(
             "content",
             text,
             &kinds,
+            &conversations,
+            request.privacy_only,
             request.author,
             request.before,
             request.after,
@@ -72,8 +77,24 @@ impl ArchiveStore {
         let cursor = decode_cursor(request.cursor.as_deref(), &request.scope, &filter, true)?;
         self.transaction(|tx| {
             let (run, revision) = generation(tx, &request.scope, cursor.as_ref())?;
-            let mut sql = String::from("SELECT c.record_json FROM content_observations c WHERE c.provider=? AND c.account_id=? AND c.source_id=?");
-            let mut values = scope_values(&request.scope);
+            let mut values = Vec::new();
+            // Choose an indexed candidate set before ordering/limiting. CROSS
+            // JOIN preserves this outer loop: rare selected/privacy matches
+            // never require walking unrelated content in recent-item order.
+            let mut sql = if !conversations.is_empty() {
+                values.extend(scope_values(&request.scope));
+                values.extend(conversations.iter().map(|id| Value::Text(id.as_uuid().to_string())));
+                format!("WITH candidates AS MATERIALIZED (SELECT observation_key FROM content_observations INDEXED BY content_conversation_reference WHERE provider=? AND account_id=? AND source_id=? AND conversation_id IN ({})) SELECT c.record_json FROM candidates k CROSS JOIN content_observations c ON c.observation_key=k.observation_key WHERE c.provider=? AND c.account_id=? AND c.source_id=?", vec!["?"; conversations.len()].join(","))
+            } else if request.privacy_only {
+                values.extend(scope_values(&request.scope));
+                String::from("SELECT c.record_json FROM (SELECT DISTINCT provider, account_id, source_id, resource_id FROM privacy_findings WHERE provider=? AND account_id=? AND source_id=?) p CROSS JOIN content_observations c ON c.provider=p.provider AND c.account_id=p.account_id AND c.source_id=p.source_id AND c.resource_id=p.resource_id WHERE c.provider=? AND c.account_id=? AND c.source_id=?")
+            } else {
+                String::from("SELECT c.record_json FROM content_observations c WHERE c.provider=? AND c.account_id=? AND c.source_id=?")
+            };
+            values.extend(scope_values(&request.scope));
+            if request.privacy_only && !conversations.is_empty() {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM privacy_findings p WHERE p.provider=c.provider AND p.account_id=c.account_id AND p.source_id=c.source_id AND p.resource_id=c.resource_id)");
+            }
             if !text.is_empty() {
                 sql.push_str(" AND c.observation_key IN (SELECT rowid FROM content_fts WHERE content_fts MATCH ?)");
                 values.push(Value::Text(format!("\"{}\"", text.replace('"', "\"\""))));
@@ -177,10 +198,47 @@ impl ArchiveStore {
             Ok(items)
         })
     }
+
+    pub(crate) fn resolve_conversations(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<Vec<ConversationRecord>, ArchiveError> {
+        resolve_bounds(&request)?;
+        self.transaction(|tx| {
+            generation(tx, &request.scope, None)?;
+            let validator = self.validators.get(&request.scope.provider).ok_or(ArchiveError::InvalidRecord)?;
+            for target in &request.refs {
+                if target.scope != request.scope || target.resource.provider != request.scope.provider || target.resource.account_id != request.scope.account_id {
+                    return Err(ArchiveError::ScopeMismatch);
+                }
+                model::validate_resource(&target.resource, validator.as_ref())?;
+                if target.resource.resource_kind != ResourceKind::Conversation {
+                    return Err(ArchiveError::InvalidRecord);
+                }
+                target.validate(&request.scope).map_err(|_| ArchiveError::InvalidRecord)?;
+            }
+            let mut query = tx.prepare("SELECT record_json FROM conversation_observations WHERE provider=? AND account_id=? AND source_id=? AND resource_id=?").map_err(storage)?;
+            let mut items = Vec::with_capacity(request.refs.len());
+            for target in &request.refs {
+                let mut values = scope_values(&request.scope);
+                values.push(Value::Text(target.id.to_string()));
+                let encoded: Option<String> = query.query_row(params_from_iter(values), |row| row.get(0)).optional().map_err(storage)?;
+                if let Some(encoded) = encoded {
+                    let record: ConversationRecord = model::decode(&encoded)?;
+                    if record.resource != target.resource { return Err(ArchiveError::InvalidRecord); }
+                    items.push(record);
+                }
+            }
+            Ok(items)
+        })
+    }
 }
 
 pub(super) fn search_bounds(request: &ArchiveSearch) -> Result<(), ArchiveError> {
-    if request.text.len() > MAX_QUERY || request.kinds.len() > 13 {
+    if request.text.len() > MAX_QUERY
+        || request.kinds.len() > 13
+        || request.conversations.len() > 1000
+    {
         return Err(ArchiveError::LimitExceeded);
     }
     validate_limit(request.limit)?;

@@ -39,6 +39,8 @@ mod lifecycle_tests;
 mod worker_tests;
 
 #[cfg(test)]
+mod application_query_tests;
+#[cfg(test)]
 mod codec_tests;
 #[cfg(test)]
 mod ingest_state_tests;

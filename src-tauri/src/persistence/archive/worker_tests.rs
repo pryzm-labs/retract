@@ -70,6 +70,69 @@ fn oversized_envelope() -> retract_domain::VersionedPayload {
     value
 }
 
+#[test]
+fn focused_archive_abandoned_reads_skip_work_but_mutations_remain_durable() {
+    use std::sync::atomic::AtomicUsize;
+    let fixture = Fixture::new();
+    let path = fixture.path.clone();
+    runtime().block_on(async {
+        let gate = Arc::new(Gate::default());
+        let _release = Release(gate.clone());
+        let blocking = gate.clone();
+        let transactions = Arc::new(AtomicUsize::new(0));
+        let count = transactions.clone();
+        let service = ArchiveService::open(move || {
+            let mut store = ArchiveStore::open(path, key(), validators())?;
+            store.before_commit = Some(Box::new(move || {
+                count.fetch_add(1, Ordering::AcqRel);
+                blocking.wait();
+            }));
+            Ok(store)
+        })
+        .await
+        .unwrap();
+        service
+            .register_source(&account(), &source())
+            .await
+            .unwrap();
+        let session = service.begin_import(&source().scope()).await.unwrap();
+        service
+            .append_batch(&session, 0, &batch("one", "alpha"))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        service.finish_import(&session).await.unwrap();
+        let before = transactions.load(Ordering::Acquire);
+        gate.armed.store(true, Ordering::Release);
+        let scope = source().scope();
+        let blocker = search(scope.clone(), "alpha");
+        let mut active = Box::pin(service.search(&blocker));
+        assert!(futures_util::poll!(active.as_mut()).is_pending());
+        gate.entered().await;
+        let request = search(scope.clone(), "alpha");
+        let mut abandoned = Box::pin(service.search(&request));
+        assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
+        drop(abandoned);
+        let mut removal = Box::pin(service.remove_source(&scope));
+        assert!(futures_util::poll!(removal.as_mut()).is_pending());
+        drop(removal);
+        gate.release();
+        active.await.unwrap();
+        assert!(service.ready_sources().await.unwrap().is_empty()); // FIFO barrier.
+        assert_eq!(
+            transactions.load(Ordering::Acquire) - before,
+            2,
+            "only active read and durable removal may execute"
+        );
+        service.shutdown().await;
+        assert_eq!(
+            fixture.open().source(&scope),
+            Err(ArchiveError::ScopeMismatch)
+        );
+    });
+}
+
 fn make_resource_oversized(resource: &mut retract_domain::ProviderResourceRef) {
     resource.locator_payload = serde_json::json!({"padding": ""});
     let overhead = serde_json::to_vec(resource).unwrap().len();
@@ -450,6 +513,8 @@ pub(super) fn search(scope: retract_domain::Scope, text: &str) -> ArchiveSearch 
         scope,
         text: text.into(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,

@@ -4,7 +4,8 @@ use retract_domain::{
     ScopedResourceRef, VersionedPayload,
 };
 use serde::Deserialize;
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 use super::{
     DiscordPayloadValidator,
@@ -55,6 +56,7 @@ pub(crate) struct DiscordApplicationQuery {
     context: ActiveContext,
     owner_actor: retract_domain::ActorId,
     archives: Arc<ArchiveService>,
+    search_generation: watch::Sender<u64>,
 }
 
 impl DiscordApplicationQuery {
@@ -75,6 +77,7 @@ impl DiscordApplicationQuery {
             context,
             owner_actor,
             archives,
+            search_generation: watch::channel(0).0,
         })
     }
 
@@ -85,6 +88,29 @@ impl DiscordApplicationQuery {
             Ok(())
         }
     }
+
+    fn validate_conversations(&self, refs: &[ScopedResourceRef]) -> Result<(), SafeError> {
+        if refs.len() > 1000 {
+            return Err(safe(ErrorCode::UnsupportedSchema));
+        }
+        for target in refs {
+            target
+                .validate(&self.context.scope)
+                .map_err(|_| safe(ErrorCode::ScopeMismatch))?;
+            if target.resource.resource_kind != retract_domain::ResourceKind::Conversation {
+                return Err(safe(ErrorCode::UnsupportedSchema));
+            }
+            DiscordPayloadValidator
+                .validate_resource(&target.resource)
+                .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
+        }
+        Ok(())
+    }
+}
+
+// Never represent a superseded request as successful empty/complete results.
+fn search_superseded() -> SafeError {
+    safe(ErrorCode::Transient)
 }
 
 #[async_trait]
@@ -126,6 +152,16 @@ impl ApplicationQuery for DiscordApplicationQuery {
         request: wire::SearchRequest,
     ) -> Result<Page<ContentRecord>, SafeError> {
         self.check(context)?;
+        let mut changes = self.search_generation.subscribe();
+        let mut generation = 0;
+        self.search_generation.send_modify(|current| {
+            *current = current.wrapping_add(1);
+            generation = *current;
+        });
+        self.validate_conversations(&request.conversations)?;
+        if request.limit == 0 || request.limit > 10_000 {
+            return Err(safe(ErrorCode::UnsupportedSchema));
+        }
         let filters = match request.filters {
             Some(value) if value.schema == "discord.search_filters" && value.version == 1 => {
                 serde_json::from_value(value.payload)
@@ -140,39 +176,60 @@ impl ApplicationQuery for DiscordApplicationQuery {
                 next_cursor: None,
             });
         }
-        let selected: HashSet<_> = request.conversations.iter().map(|value| value.id).collect();
+        let selected = request
+            .conversations
+            .iter()
+            .map(|value| {
+                value
+                    .id
+                    .try_into()
+                    .map_err(|_| safe(ErrorCode::ScopeMismatch))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut cursor = None;
         let mut items = Vec::new();
         loop {
-            let page = self
-                .archives
-                .search(&ArchiveSearch {
-                    scope: context.scope.clone(),
-                    text: request.query.clone(),
-                    kinds: filters.content_kinds.clone(),
-                    author: Some(self.owner_actor),
-                    before: filters.max_date,
-                    after: filters.min_date,
-                    cursor,
-                    limit: 200,
-                })
-                .await
-                .map_err(archive_error)?;
-            items.extend(page.items.into_iter().filter(|item| {
-                (selected.is_empty() || selected.contains(item.conversation_id.as_uuid()))
-                    && (!filters.privacy_scan || !item.privacy_findings.is_empty())
-            }));
+            if *changes.borrow_and_update() != generation {
+                return Err(search_superseded());
+            }
+            let archive_request = ArchiveSearch {
+                scope: context.scope.clone(),
+                text: request.query.clone(),
+                kinds: filters.content_kinds.clone(),
+                conversations: selected.clone(),
+                privacy_only: filters.privacy_scan,
+                author: Some(self.owner_actor),
+                before: filters.max_date,
+                after: filters.min_date,
+                cursor,
+                limit: (request.limit - items.len() as u32).min(200),
+            };
+            // Dropping this read future closes its receiver. The worker can
+            // skip a queued read; already executing SQLite work finishes safely.
+            let page = {
+                let changed = changes.changed();
+                let search = self.archives.search(&archive_request);
+                futures_util::pin_mut!(changed, search);
+                match futures_util::future::select(changed, search).await {
+                    futures_util::future::Either::Left(_) => return Err(search_superseded()),
+                    futures_util::future::Either::Right((result, _)) => {
+                        result.map_err(archive_error)?
+                    }
+                }
+            };
+            if *changes.borrow() != generation {
+                return Err(search_superseded());
+            }
+            items.extend(page.items);
             if items.len() >= request.limit as usize || page.next_cursor.is_none() {
-                break;
+                self.check(context)?;
+                return Ok(Page {
+                    items,
+                    next_cursor: page.next_cursor,
+                });
             }
             cursor = page.next_cursor;
         }
-        items.truncate(request.limit as usize);
-        self.check(context)?;
-        Ok(Page {
-            items,
-            next_cursor: None,
-        })
     }
 
     async fn refresh(
@@ -181,12 +238,28 @@ impl ApplicationQuery for DiscordApplicationQuery {
         refs: Vec<ScopedResourceRef>,
     ) -> Result<Vec<ConversationRecord>, SafeError> {
         self.check(context)?;
-        let wanted: HashSet<_> = refs.iter().map(|value| value.id).collect();
-        let all = self.conversations(context).await?;
-        Ok(all
+        self.validate_conversations(&refs)?;
+        let refs: Vec<_> = refs
             .into_iter()
-            .filter(|item| wanted.contains(item.id.as_uuid()))
-            .collect())
+            .map(|target| (target.id, target))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .collect();
+        let mut records = Vec::new();
+        for chunk in refs.chunks(200) {
+            records.extend(
+                self.archives
+                    .resolve_conversations(&crate::providers::ports::ResolveRequest {
+                        scope: context.scope.clone(),
+                        refs: chunk.to_vec(),
+                    })
+                    .await
+                    .map_err(archive_error)?,
+            );
+        }
+        self.check(context)?;
+        records.sort_by_key(|record| record.title.to_lowercase());
+        Ok(records)
     }
 }
 

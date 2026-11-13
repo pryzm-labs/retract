@@ -276,6 +276,8 @@ async fn verify(service: &ArchiveService, scope: &Scope, records: u64) -> Result
         scope: scope.clone(),
         text: String::new(),
         kinds: vec![],
+        conversations: vec![],
+        privacy_only: false,
         author: None,
         before: None,
         after: None,

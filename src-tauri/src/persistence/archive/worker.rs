@@ -56,6 +56,7 @@ enum Command {
     Search(ArchiveSearch, Reply<Page<ContentRecord>>),
     Conversations(ConversationQuery, Reply<Page<ConversationRecord>>),
     Resolve(ResolveRequest, Reply<Vec<ContentRecord>>),
+    ResolveConversations(ResolveRequest, Reply<Vec<ConversationRecord>>),
     Remove(Scope, Reply<RemovalOutcome>),
     Cleanup(Scope, Reply<RemovalOutcome>),
 }
@@ -118,7 +119,9 @@ impl ArchiveService {
                 }
                 match command {
                     Command::ReadySources(reply) => {
-                        let _ = reply.send(store.ready_sources());
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.ready_sources());
+                        }
                     }
                     Command::ResolveImport(input, reply) => {
                         let _ = reply.send(store.resolve_or_register_import(*input));
@@ -128,13 +131,17 @@ impl ArchiveService {
                         let _ = reply.send(store.register_source(account, source));
                     }
                     Command::Source(scope, reply) => {
-                        let _ = reply.send(store.source(&scope));
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.source(&scope));
+                        }
                     }
                     Command::Begin(scope, reply) => {
                         let _ = reply.send(store.begin_import(&scope).map(Arc::new));
                     }
                     Command::Status(scope, fingerprint, schema, reply) => {
-                        let _ = reply.send(store.import_status(&scope, &fingerprint, &schema));
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.import_status(&scope, &fingerprint, &schema));
+                        }
                     }
                     Command::Retry(expected, reply) => {
                         let _ = reply.send(store.retry_import(&expected).map(Arc::new));
@@ -155,13 +162,24 @@ impl ArchiveService {
                         let _ = reply.send(store.cancel_import(&session));
                     }
                     Command::Search(request, reply) => {
-                        let _ = reply.send(store.search(request));
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.search(request));
+                        }
                     }
                     Command::Conversations(request, reply) => {
-                        let _ = reply.send(store.list_conversations(request));
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.list_conversations(request));
+                        }
                     }
                     Command::Resolve(request, reply) => {
-                        let _ = reply.send(store.resolve(request));
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.resolve(request));
+                        }
+                    }
+                    Command::ResolveConversations(request, reply) => {
+                        if !reply.is_closed() {
+                            let _ = reply.send(store.resolve_conversations(request));
+                        }
                     }
                     Command::Remove(scope, reply) => {
                         let _ = reply.send(store.remove_source(&scope));
@@ -388,6 +406,14 @@ impl ArchiveService {
         self.request(|reply| Command::Remove(scope.clone(), reply))
             .await
     }
+    pub(crate) async fn resolve_conversations(
+        &self,
+        request: &ResolveRequest,
+    ) -> Result<Vec<ConversationRecord>, ArchiveError> {
+        query::resolve_bounds(request)?;
+        self.request(|reply| Command::ResolveConversations(request.clone(), reply))
+            .await
+    }
     pub(crate) async fn retry_cleanup(
         &self,
         scope: &Scope,
@@ -454,6 +480,8 @@ impl QuerySource for ArchiveQuerySource {
                 scope: request.scope,
                 text: request.query,
                 kinds: vec![],
+                conversations: vec![],
+                privacy_only: false,
                 author: None,
                 before: None,
                 after: None,
