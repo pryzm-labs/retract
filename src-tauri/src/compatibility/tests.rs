@@ -35,6 +35,95 @@ fn setup() -> tauri::WebviewWindow<MockRuntime> {
 }
 
 #[test]
+fn focused_cancelled_search_retains_retiring_worker_until_replacement_can_recover() {
+    use super::fixtures::*;
+    use futures_util::FutureExt;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let connection = RolloverConnection::new(directory.path(), io.clone());
+        let harness = Harness::new(connection.clone());
+        let barrier = Arc::new(PreflightBarrier::default());
+        *io.mutation_barrier.lock().unwrap() = Some(barrier.clone());
+        let plan = harness.prepare(&active, vec![fixture()["messages"][2]["ref"].clone()]);
+        harness.authorize(&active, &plan);
+        harness.start(&active, &plan).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), barrier.entered.notified())
+            .await
+            .unwrap();
+        assert!(harness.service.has_workers().await);
+
+        let mut next = active.clone();
+        next.session_generation = uuid::Uuid::new_v4();
+        *io.active.write().unwrap() = Some(next.clone());
+        let token = json!({"clientId":uuid::Uuid::new_v4(),"sequence":1});
+        let flight = harness.service.prepare_search(json!({"contractVersion":2,"context":next,"payload":{"query":"","conversations":[],"filters":null,"limit":500,"searchToken":token}})).unwrap();
+        let mut search = Box::pin(harness.service.run_search(flight));
+        // All registration locks are free. This single poll enters the real
+        // lifecycle stop, whose first suspension waits for the blocked worker.
+        assert!(search.as_mut().now_or_never().is_none());
+        assert_eq!(connection.constructions.load(Ordering::SeqCst), 1);
+        harness
+            .service
+            .cancel_search(json!({"contractVersion":2,"context":next,"payload":token}))
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), search)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code,
+            retract_domain::ErrorCode::SearchCancelled
+        );
+        let retained = harness.service.has_workers().await;
+        // Release on RED too, so a failed ownership assertion leaves no worker
+        // holding the fixture store after this test returns.
+        if !retained {
+            barrier.release.notify_one();
+        }
+        assert!(
+            retained,
+            "cancelled retirement must retain the old live worker"
+        );
+
+        let bootstrap = json!({"contractVersion":2,"context":next,"payload":{}});
+        let mut replacement = Box::pin(harness.service.bootstrap(bootstrap.clone()));
+        assert!(replacement.as_mut().now_or_never().is_none());
+        assert_eq!(connection.constructions.load(Ordering::SeqCst), 1);
+        // A second dropped stop waiter must not consume the drain condition.
+        drop(replacement);
+        assert!(harness.service.has_workers().await);
+        let mut replacement = Box::pin(harness.service.bootstrap(bootstrap));
+        assert!(replacement.as_mut().now_or_never().is_none());
+        assert_eq!(connection.constructions.load(Ordering::SeqCst), 1);
+        barrier.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), replacement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(connection.constructions.load(Ordering::SeqCst), 2);
+        assert!(!harness.service.has_workers().await);
+        harness
+            .call(
+                "search_messages_v2",
+                &next,
+                json!({"query":"","conversations":[],"filters":null,"limit":500}),
+            )
+            .unwrap();
+        let fresh = harness.prepare(&next, vec![fixture()["messages"][2]["ref"].clone()]);
+        harness.authorize(&next, &fresh);
+        let job = harness.start(&next, &fresh).unwrap();
+        assert_eq!(harness.settled(&next, job.id).await.counters.deleted, 1);
+        assert_eq!(io.calls.lock().unwrap().len(), 2);
+        harness.service.shutdown().await;
+    });
+}
+
+#[test]
 fn focused_search_early_cancel_and_late_start_are_fenced() {
     use super::fixtures::*;
     let directory = tempfile::tempdir().unwrap();

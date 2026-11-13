@@ -243,7 +243,10 @@ impl ProviderService {
         let mut registered = self.registered.lock().await;
         self.check(context)?;
         if registered.as_ref().is_none_or(|(old, _)| old != context) {
-            if let Some((old, registry)) = registered.take()
+            // Search cancellation can drop this waiter while stop drains a
+            // worker. Retain ownership so the next caller must await that same
+            // drain before constructing or recovering a replacement lifecycle.
+            if let Some((old, registry)) = registered.as_ref()
                 && let Ok(provider) = registry.get(&old.scope.provider)
                 && let Ok(lifecycle) = provider.reviewed_lifecycle()
             {
