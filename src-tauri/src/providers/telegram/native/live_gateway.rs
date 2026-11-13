@@ -1116,21 +1116,38 @@ impl LiveGateway {
         }
     }
 
-    async fn raw_search(&self, request: &SearchRequest) -> Result<Vec<Value>, AppError> {
+    fn search_is_current(&self, generation: u64) -> bool {
+        self.search_generation.load(Ordering::Acquire) == generation
+    }
+
+    fn ensure_current_search(&self, generation: u64) -> Result<(), AppError> {
+        if self.search_is_current(generation) {
+            Ok(())
+        } else {
+            Err(AppError::Gateway("TDLIB_SEARCH_SUPERSEDED".into()))
+        }
+    }
+
+    async fn raw_search(
+        &self,
+        request: &SearchRequest,
+        generation: u64,
+    ) -> Result<Vec<Value>, AppError> {
         let server_filter = search_filter(&request.content_kinds);
         if !request.chat_ids.is_empty() {
             let kinds = self.chat_kinds.read().await.clone();
             let mut all = Vec::new();
             for chat_id in &request.chat_ids {
+                self.ensure_current_search(generation)?;
                 let secret = kinds.get(chat_id) == Some(&ChatKind::Secret);
                 if secret && !request.query.is_empty() {
                     all.extend(
-                        self.search_secret(*chat_id, request, server_filter.clone())
+                        self.search_secret(*chat_id, request, server_filter.clone(), generation)
                             .await?,
                     );
                 } else {
                     all.extend(
-                        self.search_chat(*chat_id, request, server_filter.clone())
+                        self.search_chat(*chat_id, request, server_filter.clone(), generation)
                             .await?,
                     );
                 }
@@ -1143,8 +1160,13 @@ impl LiveGateway {
         if request.query.is_empty() {
             return Ok(Vec::new());
         }
-        let mut all = self.search_global(request, server_filter.clone()).await?;
-        all.extend(self.search_secret(0, request, server_filter).await?);
+        let mut all = self
+            .search_global(request, server_filter.clone(), generation)
+            .await?;
+        all.extend(
+            self.search_secret(0, request, server_filter, generation)
+                .await?,
+        );
         Ok(all)
     }
 
@@ -1152,12 +1174,14 @@ impl LiveGateway {
         &self,
         request: &SearchRequest,
         filter: Value,
+        generation: u64,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
         let mut seen_offsets = HashSet::new();
         let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            self.ensure_current_search(generation)?;
             check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
@@ -1172,7 +1196,9 @@ impl LiveGateway {
                     "min_date": timestamp_i32(request.min_date),
                     "max_date": timestamp_i32(request.max_date)
                 }))
-                .await?;
+                .await;
+            self.ensure_current_search(generation)?;
+            let response = response?;
             append_raw_messages(&mut messages, &response);
             let next = response
                 .get("next_offset")
@@ -1191,12 +1217,14 @@ impl LiveGateway {
         chat_id: i64,
         request: &SearchRequest,
         filter: Value,
+        generation: u64,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
         let mut seen_offsets = HashSet::new();
         let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            self.ensure_current_search(generation)?;
             check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
@@ -1208,7 +1236,9 @@ impl LiveGateway {
                     "limit": 100,
                     "filter": filter
                 }))
-                .await?;
+                .await;
+            self.ensure_current_search(generation)?;
+            let response = response?;
             append_raw_messages(&mut messages, &response);
             let next = response
                 .get("next_offset")
@@ -1227,12 +1257,14 @@ impl LiveGateway {
         chat_id: i64,
         request: &SearchRequest,
         filter: Value,
+        generation: u64,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut from_message_id = 0_i64;
         let mut seen_cursors = HashSet::new();
         let mut page_count = 0;
         while messages.len() < request.limit.saturating_mul(2).max(100) {
+            self.ensure_current_search(generation)?;
             check_search_page_budget(&mut page_count)?;
             let response = self
                 .client
@@ -1247,7 +1279,9 @@ impl LiveGateway {
                     "limit": 100,
                     "filter": filter
                 }))
-                .await?;
+                .await;
+            self.ensure_current_search(generation)?;
+            let response = response?;
             append_raw_messages(&mut messages, &response);
             let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
             if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
@@ -1358,6 +1392,19 @@ impl LiveGateway {
     }
 
     async fn map_message(&self, message: &Value) -> Result<MessageSnapshot, AppError> {
+        self.map_message_for_search(message, None)
+            .await?
+            .ok_or(AppError::StateUnavailable)
+    }
+
+    async fn map_message_for_search(
+        &self,
+        message: &Value,
+        generation: Option<u64>,
+    ) -> Result<Option<MessageSnapshot>, AppError> {
+        if generation.is_some_and(|generation| !self.search_is_current(generation)) {
+            return Ok(None);
+        }
         let chat_id = required_i64(message.get("chat_id"), "message.chat_id")?;
         let message_id = required_i64(message.get("id"), "message.id")?;
         let is_outgoing = message
@@ -1373,6 +1420,9 @@ impl LiveGateway {
         } else {
             self.sender_name(sender_id, sender_is_chat).await
         };
+        if generation.is_some_and(|generation| !self.search_is_current(generation)) {
+            return Ok(None);
+        }
         let content = message.get("content").unwrap_or(&Value::Null);
         let (content_kind, preview) = content_preview(content);
         let properties = self
@@ -1384,6 +1434,9 @@ impl LiveGateway {
             }))
             .await
             .ok();
+        if generation.is_some_and(|generation| !self.search_is_current(generation)) {
+            return Ok(None);
+        }
         let deletion_reach = properties
             .as_ref()
             .map_or(DeletionReach::None, |properties| {
@@ -1405,7 +1458,7 @@ impl LiveGateway {
             });
         let date = value_i64(message.get("date")).unwrap_or_default();
         let sent_at = DateTime::from_timestamp(date, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-        Ok(MessageSnapshot {
+        Ok(Some(MessageSnapshot {
             chat_id,
             message_id,
             sender_id,
@@ -1421,7 +1474,7 @@ impl LiveGateway {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             deletion_reach,
-        })
+        }))
     }
 
     async fn sender_name(&self, id: i64, is_chat: bool) -> String {
@@ -1484,9 +1537,7 @@ impl LiveGateway {
         let mut matched_message_ids = HashSet::new();
 
         for chat_id in chat_ids {
-            if self.search_generation.load(Ordering::Acquire) != generation {
-                return Ok(Vec::new());
-            }
+            self.ensure_current_search(generation)?;
             if !request.chat_kinds.is_empty()
                 && !kinds
                     .get(&chat_id)
@@ -1498,11 +1549,9 @@ impl LiveGateway {
             let mut seen_cursors = HashSet::new();
             let mut page_count = 0_usize;
             loop {
-                if self.search_generation.load(Ordering::Acquire) != generation {
-                    return Ok(Vec::new());
-                }
+                self.ensure_current_search(generation)?;
                 check_search_page_budget(&mut page_count)?;
-                let response = match self
+                let response = self
                     .client
                     .request(json!({
                         "@type": "searchChatMessages",
@@ -1515,8 +1564,9 @@ impl LiveGateway {
                         "limit": 100,
                         "filter": server_filter
                     }))
-                    .await
-                {
+                    .await;
+                self.ensure_current_search(generation)?;
+                let response = match response {
                     Ok(response) => response,
                     Err(AppError::Gateway(message)) if message.starts_with("404 ") => break,
                     Err(error) => return Err(error),
@@ -1526,59 +1576,53 @@ impl LiveGateway {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                let mut candidates = Vec::new();
+                let mut candidate_ids = HashSet::new();
                 for raw in &raw_messages {
+                    self.ensure_current_search(generation)?;
                     let message_id = value_i64(raw.get("id")).unwrap_or_default();
                     if message_id == 0 || (from_message_id != 0 && message_id == from_message_id) {
                         continue;
                     }
-                    if matched_message_ids.contains(&(chat_id, message_id)) {
-                        continue;
-                    }
-                    let is_outgoing = raw
-                        .get("is_outgoing")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if matches!(request.direction, MessageDirection::Mine) && !is_outgoing
-                        || matches!(request.direction, MessageDirection::Others) && is_outgoing
-                    {
-                        continue;
-                    }
-                    if request.exclude_pinned
-                        && raw
-                            .get("is_pinned")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let date = value_i64(raw.get("date")).unwrap_or_default();
-                    let sent_at =
-                        DateTime::from_timestamp(date, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
-                    if request.min_date.is_some_and(|minimum| sent_at < minimum)
-                        || request.max_date.is_some_and(|maximum| sent_at > maximum)
+                    if matched_message_ids.contains(&(chat_id, message_id))
+                        || !candidate_ids.insert(message_id)
+                        || !raw_message_matches(raw, request, &kinds)
                     {
                         continue;
                     }
                     let content = raw.get("content").unwrap_or(&Value::Null);
                     let (content_kind, _) = content_preview(content);
-                    if !request.content_kinds.is_empty()
-                        && !request.content_kinds.contains(&content_kind)
-                    {
-                        continue;
-                    }
-                    let findings =
-                        detect_sensitive_data(&sensitive_content_text(content), content_kind);
+                    let full_text = sensitive_content_text(content);
+                    let findings = detect_sensitive_data(&full_text, content_kind);
                     if findings.is_empty() {
                         continue;
                     }
-                    let mut message = self.map_message(raw).await?;
-                    let searchable =
-                        format!("{} {}", message.preview, message.sender_name).to_lowercase();
-                    if !query_tokens.iter().all(|token| searchable.contains(token)) {
-                        continue;
-                    }
-                    matched_message_ids.insert((chat_id, message_id));
-                    message.privacy_findings = findings;
+                    candidates.push((raw.clone(), findings, full_text));
+                }
+                let hydration = stream::iter(candidates)
+                    .map(|(raw, findings, full_text)| {
+                        let query_tokens = &query_tokens;
+                        async move {
+                            let Some(mut message) =
+                                self.map_message_for_search(&raw, Some(generation)).await?
+                            else {
+                                return Ok::<_, AppError>(None);
+                            };
+                            let searchable =
+                                format!("{full_text} {}", message.sender_name).to_lowercase();
+                            if !query_tokens.iter().all(|token| searchable.contains(token)) {
+                                return Ok(None);
+                            }
+                            message.privacy_findings = findings;
+                            Ok(Some(message))
+                        }
+                    })
+                    .buffered(MESSAGE_MAPPING_CONCURRENCY);
+                tokio::pin!(hydration);
+                while let Some(message) = hydration.next().await {
+                    self.ensure_current_search(generation)?;
+                    let Some(message) = message? else { continue };
+                    matched_message_ids.insert((chat_id, message.message_id));
                     matches.push(message);
                     if matches.len() > request.limit.saturating_mul(2) {
                         matches.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
@@ -1608,6 +1652,7 @@ impl LiveGateway {
                 from_message_id = next;
             }
         }
+        self.ensure_current_search(generation)?;
         matches.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
         matches.truncate(request.limit);
         Ok(matches)
@@ -1702,45 +1747,27 @@ impl TelegramRead for LiveGateway {
         let kinds = self.chat_kinds.read().await.clone();
         let mut mapped = Vec::new();
         let mut seen = HashSet::new();
-        for raw in self.raw_search(request).await? {
-            let chat_id = value_i64(raw.get("chat_id")).unwrap_or_default();
-            let message_id = value_i64(raw.get("id")).unwrap_or_default();
-            if !seen.insert((chat_id, message_id)) {
-                continue;
-            }
-            let message = self.map_message(&raw).await?;
-            if !request.chat_kinds.is_empty()
-                && !kinds
-                    .get(&message.chat_id)
-                    .is_some_and(|kind| request.chat_kinds.contains(kind))
-            {
-                continue;
-            }
-            if !request.content_kinds.is_empty()
-                && !request.content_kinds.contains(&message.content_kind)
-            {
-                continue;
-            }
-            if matches!(request.direction, MessageDirection::Mine) && !message.is_outgoing {
-                continue;
-            }
-            if matches!(request.direction, MessageDirection::Others) && message.is_outgoing {
-                continue;
-            }
-            if request.exclude_pinned && message.is_pinned {
-                continue;
-            }
-            if request.min_date.is_some_and(|date| message.sent_at < date) {
-                continue;
-            }
-            if request.max_date.is_some_and(|date| message.sent_at > date) {
-                continue;
-            }
-            mapped.push(message);
-            if mapped.len() >= request.limit {
-                break;
+        let candidates = self
+            .raw_search(request, generation)
+            .await?
+            .into_iter()
+            .filter(|raw| {
+                let chat_id = value_i64(raw.get("chat_id")).unwrap_or_default();
+                let message_id = value_i64(raw.get("id")).unwrap_or_default();
+                seen.insert((chat_id, message_id)) && raw_message_matches(raw, request, &kinds)
+            })
+            .take(request.limit);
+        let hydration = stream::iter(candidates)
+            .map(|raw| async move { self.map_message_for_search(&raw, Some(generation)).await })
+            .buffered(MESSAGE_MAPPING_CONCURRENCY);
+        tokio::pin!(hydration);
+        while let Some(message) = hydration.next().await {
+            self.ensure_current_search(generation)?;
+            if let Some(message) = message? {
+                mapped.push(message);
             }
         }
+        self.ensure_current_search(generation)?;
         mapped.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
         Ok(mapped)
     }
@@ -2061,6 +2088,46 @@ fn check_search_page_budget(page_count: &mut usize) -> Result<(), AppError> {
         return Err(AppError::Gateway("TDLIB_SEARCH_PAGE_LIMIT".into()));
     }
     Ok(())
+}
+
+fn raw_message_matches(
+    message: &Value,
+    request: &SearchRequest,
+    kinds: &HashMap<i64, ChatKind>,
+) -> bool {
+    let chat_id = value_i64(message.get("chat_id")).unwrap_or_default();
+    if !request.chat_kinds.is_empty()
+        && !kinds
+            .get(&chat_id)
+            .is_some_and(|kind| request.chat_kinds.contains(kind))
+    {
+        return false;
+    }
+    let is_outgoing = message
+        .get("is_outgoing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if matches!(request.direction, MessageDirection::Mine) && !is_outgoing
+        || matches!(request.direction, MessageDirection::Others) && is_outgoing
+        || request.exclude_pinned
+            && message
+                .get("is_pinned")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+    {
+        return false;
+    }
+    let date = value_i64(message.get("date")).unwrap_or_default();
+    let sent_at = DateTime::from_timestamp(date, 0).unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    if request.min_date.is_some_and(|minimum| sent_at < minimum)
+        || request.max_date.is_some_and(|maximum| sent_at > maximum)
+    {
+        return false;
+    }
+    request.content_kinds.is_empty()
+        || request
+            .content_kinds
+            .contains(&content_preview(message.get("content").unwrap_or(&Value::Null)).0)
 }
 
 fn append_raw_messages(destination: &mut Vec<Value>, response: &Value) {
@@ -4335,9 +4402,7 @@ mod tests {
                     "next_from_message_id": 0
                 }),
             );
-            for message_id in 7021..=7023 {
-                respond_with_reach(&script, 1101, message_id, DeletionReach::Everyone);
-            }
+            respond_with_reach(&script, 1101, 7021, DeletionReach::Everyone);
             let mut filtered = search_request("filter");
             filtered.chat_ids = vec![1101];
             filtered.chat_kinds = vec![ChatKind::Direct];
@@ -4442,6 +4507,415 @@ mod tests {
                 2
             );
             script.assert_drained();
+        });
+    }
+
+    fn focused_search_page(query: &str) -> Value {
+        json!({
+            "@type": "searchChatMessages", "chat_id": 1101, "topic_id": null,
+            "query": query, "sender_id": null, "from_message_id": 0,
+            "offset": 0, "limit": 100, "filter": null
+        })
+    }
+
+    fn focused_properties(message_id: i64) -> Value {
+        json!({ "@type": "getMessageProperties", "chat_id": 1101, "message_id": message_id })
+    }
+
+    fn focused_reach() -> Value {
+        json!({ "@type": "messageProperties", "can_be_deleted_for_all_users": true,
+            "can_be_deleted_only_for_self": false })
+    }
+
+    fn assert_search_is_read_only(script: &ScriptedTdJson) {
+        assert!(script.traces().iter().all(|trace| matches!(
+            trace.kind.as_str(),
+            "searchChatMessages"
+                | "searchMessages"
+                | "searchSecretMessages"
+                | "getMessageProperties"
+                | "getUser"
+        )));
+    }
+
+    fn assert_search_superseded(result: Result<Vec<MessageSnapshot>, AppError>) {
+        assert!(
+            matches!(result, Err(AppError::Gateway(ref code)) if code == "TDLIB_SEARCH_SUPERSEDED"),
+            "expected cancellation, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn focused_privacy_refinement_matches_complete_extracted_content() {
+        tauri::async_runtime::block_on(async {
+            let cases = [
+                (
+                    "hiddenlong",
+                    json!({ "@type": "messageText", "text": {
+                    "text": format!("{} hiddenlong person@example.invalid", "x".repeat(350)) } }),
+                ),
+                (
+                    "hiddenfile",
+                    json!({ "@type": "messageDocument",
+                    "caption": { "text": "person@example.invalid" },
+                    "document": { "file_name": "hiddenfile.txt" } }),
+                ),
+                (
+                    "+442079460958",
+                    json!({ "@type": "messageContact", "contact": {
+                    "first_name": "Synthetic", "last_name": "Contact", "phone_number": "+442079460958" } }),
+                ),
+                (
+                    "hiddenvenue",
+                    json!({ "@type": "messageVenue", "venue": {
+                    "title": "hiddenvenue", "address": "person@example.invalid",
+                    "location": { "latitude": 40.4168, "longitude": -3.7038 } } }),
+                ),
+            ];
+            let mut observed = Vec::new();
+            for (query, content) in cases {
+                let (gateway, script, _directory) = scripted_gateway();
+                let mut raw = raw_text_message(1101, 8101, 1_700_000_001, true, false, 42, "");
+                raw["content"] = content;
+                script.respond(
+                    focused_search_page(""),
+                    json!({ "messages": [raw], "next_from_message_id": 0 }),
+                );
+                respond_with_reach(&script, 1101, 8101, DeletionReach::Everyone);
+                let mut request = search_request(query);
+                request.chat_ids = vec![1101];
+                request.privacy_scan = true;
+                let matches = gateway.search(&request).await.unwrap();
+                observed.push((
+                    query,
+                    matches
+                        .iter()
+                        .map(|message| message.message_id)
+                        .collect::<Vec<_>>(),
+                ));
+                for message in &matches {
+                    assert!(!message.privacy_findings.is_empty());
+                    assert!(message.preview.chars().count() <= 300);
+                }
+                assert_search_is_read_only(&script);
+                script.assert_drained();
+            }
+            assert_eq!(
+                observed,
+                [
+                    ("hiddenlong", vec![8101]),
+                    ("hiddenfile", vec![8101]),
+                    ("+442079460958", vec![8101]),
+                    ("hiddenvenue", vec![8101])
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn focused_ordinary_filters_reject_raw_messages_before_hydration() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            gateway
+                .chat_kinds
+                .write()
+                .await
+                .extend([(1101, ChatKind::Direct), (1102, ChatKind::BasicGroup)]);
+            let mut wrong_content =
+                raw_text_message(1101, 8205, 1_700_000_020, true, false, 42, "wrong content");
+            wrong_content["content"] = json!({ "@type": "messagePhoto" });
+            script.respond(
+                focused_search_page("query"),
+                json!({ "messages": [
+                raw_text_message(1101, 8201, 1_700_000_020, false, false, 42, "incoming"),
+                raw_text_message(1101, 8202, 1_700_000_020, true, true, 42, "pinned"),
+                raw_text_message(1101, 8203, 1_700_000_001, true, false, 42, "too old"),
+                raw_text_message(1101, 8204, 1_700_000_040, true, false, 42, "too new"),
+                wrong_content,
+                raw_text_message(1102, 8206, 1_700_000_020, true, false, 42, "wrong chat kind"),
+                raw_text_message(1101, 8207, 1_700_000_020, true, false, 42, "accepted")
+            ], "next_from_message_id": 0 }),
+            );
+            respond_with_reach(&script, 1101, 8207, DeletionReach::Everyone);
+            let mut request = search_request("query");
+            request.chat_ids = vec![1101];
+            request.chat_kinds = vec![ChatKind::Direct];
+            request.content_kinds = vec![ContentKind::Text];
+            request.direction = MessageDirection::Mine;
+            request.exclude_pinned = true;
+            request.min_date = DateTime::from_timestamp(1_700_000_010, 0);
+            request.max_date = DateTime::from_timestamp(1_700_000_030, 0);
+            let matches = gateway.search(&request).await.unwrap();
+            assert_eq!(
+                matches
+                    .iter()
+                    .map(|message| message.message_id)
+                    .collect::<Vec<_>>(),
+                [8207]
+            );
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "getMessageProperties")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                script
+                    .traces()
+                    .iter()
+                    .filter(|trace| trace.kind == "getUser")
+                    .count(),
+                0
+            );
+            assert_search_is_read_only(&script);
+            script.assert_drained();
+        });
+    }
+
+    async fn focused_hydration_bounded_case(privacy_scan: bool) {
+        let (gateway, script, _directory) = scripted_gateway();
+        let messages = (8301..=8325)
+            .map(|id| {
+                raw_text_message(
+                    1101,
+                    id,
+                    1_700_000_000 + id,
+                    true,
+                    false,
+                    42,
+                    "person@example.invalid",
+                )
+            })
+            .collect::<Vec<_>>();
+        script.respond(
+            focused_search_page(""),
+            json!({ "messages": messages, "next_from_message_id": 0 }),
+        );
+        let mut pending = (8301..=8325)
+            .map(|id| script.delay_response(focused_properties(id)))
+            .collect::<Vec<_>>();
+        let mut request = search_request("");
+        request.chat_ids = vec![1101];
+        request.privacy_scan = privacy_scan;
+        request.limit = 25;
+        let search = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.search(&request).await })
+        };
+        wait_for_request_count(&script, "getMessageProperties", 12).await;
+        assert_eq!(
+            script
+                .traces()
+                .iter()
+                .filter(|trace| trace.kind == "getMessageProperties")
+                .count(),
+            12
+        );
+        for response in pending.drain(..12) {
+            response.respond(focused_reach());
+        }
+        wait_for_request_count(&script, "getMessageProperties", 24).await;
+        assert_eq!(
+            script
+                .traces()
+                .iter()
+                .filter(|trace| trace.kind == "getMessageProperties")
+                .count(),
+            24
+        );
+        for response in pending.drain(..12) {
+            response.respond(focused_reach());
+        }
+        wait_for_request_count(&script, "getMessageProperties", 25).await;
+        pending.pop().unwrap().respond(focused_reach());
+        let matches = search.await.unwrap().unwrap();
+        assert_eq!(matches.len(), 25);
+        assert_eq!(matches.first().unwrap().message_id, 8325);
+        assert_eq!(matches.last().unwrap().message_id, 8301);
+        assert_search_is_read_only(&script);
+        script.assert_drained();
+    }
+
+    #[test]
+    fn focused_ordinary_hydration_is_concurrent_and_bounded() {
+        tauri::async_runtime::block_on(focused_hydration_bounded_case(false));
+    }
+
+    #[test]
+    fn focused_privacy_hydration_is_concurrent_and_bounded() {
+        tauri::async_runtime::block_on(focused_hydration_bounded_case(true));
+    }
+
+    async fn focused_superseding_pagination_case(route: &str) {
+        let (gateway, script, _directory) = scripted_gateway();
+        let mut request = search_request("query");
+        let first = match route {
+            "searchMessages" => json!({ "@type": route, "chat_list": null, "query": "query",
+                        "offset": "", "limit": 100, "filter": null, "chat_type_filter": null, "min_date": 0, "max_date": 0 }),
+            "searchSecretMessages" => {
+                request.chat_ids = vec![1101];
+                gateway
+                    .chat_kinds
+                    .write()
+                    .await
+                    .insert(1101, ChatKind::Secret);
+                json!({ "@type": route, "chat_id": 1101, "query": "query", "offset": "", "limit": 100, "filter": null })
+            }
+            _ => {
+                request.chat_ids = vec![1101];
+                focused_search_page("query")
+            }
+        };
+        let pending = script.delay_response(first);
+        let search = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.search(&request).await })
+        };
+        wait_for_request_count(&script, route, 1).await;
+        assert!(
+            gateway
+                .search(&search_request(""))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        pending
+            .respond(json!({ "messages": [], "next_offset": "more", "next_from_message_id": 99 }));
+        let stale = search.await.unwrap();
+        assert_search_superseded(stale);
+        assert_eq!(
+            script.traces().len(),
+            1,
+            "superseded {route} issued more work"
+        );
+        assert_search_is_read_only(&script);
+        script.assert_drained();
+    }
+
+    #[test]
+    fn focused_superseding_search_stops_global_pagination() {
+        tauri::async_runtime::block_on(focused_superseding_pagination_case("searchMessages"));
+    }
+
+    #[test]
+    fn focused_superseding_search_stops_chat_pagination() {
+        tauri::async_runtime::block_on(focused_superseding_pagination_case("searchChatMessages"));
+    }
+
+    #[test]
+    fn focused_superseding_search_stops_secret_pagination() {
+        tauri::async_runtime::block_on(focused_superseding_pagination_case("searchSecretMessages"));
+    }
+
+    async fn focused_superseding_hydration_case(privacy_scan: bool) {
+        let (gateway, script, _directory) = scripted_gateway();
+        let messages = (8401..=8425)
+            .map(|id| {
+                raw_text_message(
+                    1101,
+                    id,
+                    1_700_000_000 + id,
+                    true,
+                    false,
+                    42,
+                    "person@example.invalid",
+                )
+            })
+            .collect::<Vec<_>>();
+        script.respond(
+            focused_search_page(""),
+            json!({ "messages": messages, "next_from_message_id": 0 }),
+        );
+        let mut pending = (8401..=8412)
+            .map(|id| script.delay_response(focused_properties(id)))
+            .collect::<Vec<_>>();
+        let mut request = search_request("");
+        request.chat_ids = vec![1101];
+        request.privacy_scan = privacy_scan;
+        request.limit = 25;
+        let search = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.search(&request).await })
+        };
+        wait_for_request_count(&script, "getMessageProperties", 1).await;
+        assert!(
+            gateway
+                .search(&search_request(""))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The implementation may already have started a bounded batch.
+        let started = script
+            .traces()
+            .iter()
+            .filter(|trace| trace.kind == "getMessageProperties")
+            .count();
+        assert!(started <= 12);
+        for response in pending.drain(..) {
+            response.respond(focused_reach());
+        }
+        assert_search_superseded(search.await.unwrap());
+        assert_eq!(
+            script
+                .traces()
+                .iter()
+                .filter(|trace| trace.kind == "getMessageProperties")
+                .count(),
+            started
+        );
+        assert_search_is_read_only(&script);
+    }
+
+    #[test]
+    fn focused_superseding_search_stops_ordinary_hydration() {
+        tauri::async_runtime::block_on(focused_superseding_hydration_case(false));
+    }
+
+    #[test]
+    fn focused_superseding_search_stops_privacy_hydration() {
+        tauri::async_runtime::block_on(focused_superseding_hydration_case(true));
+    }
+
+    #[test]
+    fn focused_superseding_sender_lookup_prevents_property_hydration() {
+        tauri::async_runtime::block_on(async {
+            for privacy_scan in [false, true] {
+                let (gateway, script, _directory) = scripted_gateway();
+                script.respond(focused_search_page(""), json!({ "messages": [
+                    raw_text_message(1101, 8501, 1_700_000_001, false, false, 45, "person@example.invalid")
+                ], "next_from_message_id": 0 }));
+                let pending = script.delay_response(json!({ "@type": "getUser", "user_id": 45 }));
+                let mut request = search_request("");
+                request.chat_ids = vec![1101];
+                request.privacy_scan = privacy_scan;
+                let search = {
+                    let gateway = Arc::clone(&gateway);
+                    tokio::spawn(async move { gateway.search(&request).await })
+                };
+                wait_for_request_count(&script, "getUser", 1).await;
+                assert!(
+                    gateway
+                        .search(&search_request(""))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                pending.respond(json!({ "@type": "user", "id": 45, "first_name": "Synthetic", "last_name": "Sender" }));
+                assert_search_superseded(search.await.unwrap());
+                assert_eq!(
+                    script
+                        .traces()
+                        .iter()
+                        .filter(|trace| trace.kind == "getMessageProperties")
+                        .count(),
+                    0
+                );
+                assert_search_is_read_only(&script);
+                script.assert_drained();
+            }
         });
     }
 
