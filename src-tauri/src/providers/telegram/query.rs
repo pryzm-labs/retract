@@ -7,7 +7,7 @@ use retract_domain::{ActiveContext, ErrorCode, ResourceKind, SafeError, Scope, S
 use serde::{Deserialize, Serialize};
 
 use super::{
-    diagnostics::{boundary_error, invalid_recipe},
+    diagnostics::{boundary_error, invalid_recipe, search_error},
     engine_context::{EngineContext, stale_context},
     locators::{TelegramConversationLocator, TelegramMessageLocator, TelegramPayloadValidator},
     model,
@@ -21,6 +21,7 @@ use crate::{
     provider_service::{safe, validate_refs},
     providers::ports::{
         ApplicationQuery, ContentQuery, ConversationQuery, Page, QuerySource, ResolveRequest,
+        SearchCompletion, SearchPage,
     },
 };
 
@@ -61,15 +62,16 @@ impl TelegramQuery {
     ) -> Result<model::SearchResponse, AppError> {
         self.check_scope(scope)?;
         request.validate()?;
-        let requested_limit = request.limit;
-        let messages = self.read.search(&request).await;
+        let response = self.read.search_result(&request).await;
         self.check_scope(scope)?;
-        let messages = messages?;
+        let response = response?;
+        let messages = response.items;
         let returned = messages.len();
         Ok(model::SearchResponse {
             messages,
             returned,
-            truncated: returned == requested_limit,
+            truncated: response.completion != SearchCompletion::Complete,
+            completion: response.completion,
         })
     }
 
@@ -165,7 +167,7 @@ impl ApplicationQuery for TelegramQuery {
         &self,
         context: &ActiveContext,
         request: wire::SearchRequest,
-    ) -> Result<Page<retract_domain::ContentRecord>, SafeError> {
+    ) -> Result<SearchPage<retract_domain::ContentRecord>, SafeError> {
         self.check_active(context)?;
         validate_refs(
             context,
@@ -203,15 +205,16 @@ impl ApplicationQuery for TelegramQuery {
                 },
             )
             .await
-            .map_err(boundary_error)?;
+            .map_err(search_error)?;
         self.check_active(context)?;
-        Ok(Page {
+        Ok(SearchPage {
             items: response
                 .messages
                 .iter()
                 .map(|message| normalize_content(&context.scope, message).map_err(boundary_error))
                 .collect::<Result<_, _>>()?,
             next_cursor: None,
+            completion: response.completion,
         })
     }
 

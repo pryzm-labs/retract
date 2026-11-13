@@ -310,7 +310,8 @@ export async function demoSearch(request: SearchRequest): Promise<SearchResponse
   return {
     messages: structuredClone(filtered.slice(0, request.limit)),
     returned: Math.min(filtered.length, request.limit),
-    truncated: filtered.length > request.limit
+    truncated: filtered.length > request.limit,
+    completion: filtered.length > request.limit ? "result_limit" : "complete"
   };
 }
 

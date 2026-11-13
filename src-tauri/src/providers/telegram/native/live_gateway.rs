@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex as SyncMutex, RwLock as SyncRwLock,
-        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
@@ -33,6 +33,8 @@ use crate::{
         model::{AuthSnapshot, AuthStage, CatalogProgress, MessageDirection, SearchRequest},
     },
 };
+
+use crate::providers::ports::{SearchCompletion, SearchPage};
 
 use super::{
     ports::{GatewayInfo, TelegramConnectionIo, TelegramMutation, TelegramRead, TelegramSession},
@@ -89,7 +91,7 @@ pub struct LiveGateway {
     sender_names: RwLock<HashMap<(bool, i64), String>>,
     chat_kinds: RwLock<HashMap<i64, ChatKind>>,
     catalog_loaded: AtomicBool,
-    search_generation: AtomicU64,
+    search_generation: tokio::sync::watch::Sender<u64>,
     version_compatible: AtomicBool,
     catalog_load_lock: Mutex<()>,
     chat_summary_cache: RwLock<Option<Vec<ChatSummary>>>,
@@ -147,7 +149,7 @@ impl LiveGateway {
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
-            search_generation: AtomicU64::new(0),
+            search_generation: tokio::sync::watch::channel(0).0,
             version_compatible: AtomicBool::new(false),
             catalog_load_lock: Mutex::new(()),
             chat_summary_cache: RwLock::new(None),
@@ -253,7 +255,7 @@ impl LiveGateway {
             sender_names: RwLock::new(HashMap::new()),
             chat_kinds: RwLock::new(HashMap::new()),
             catalog_loaded: AtomicBool::new(false),
-            search_generation: AtomicU64::new(0),
+            search_generation: tokio::sync::watch::channel(0).0,
             version_compatible: AtomicBool::new(true),
             catalog_load_lock: Mutex::new(()),
             chat_summary_cache: RwLock::new(None),
@@ -1116,8 +1118,62 @@ impl LiveGateway {
         }
     }
 
+    async fn search_current(
+        &self,
+        request: &SearchRequest,
+        generation: u64,
+    ) -> Result<SearchPage<MessageSnapshot>, AppError> {
+        let mut completion = SearchCompletion::Complete;
+        if request.privacy_scan {
+            let items = self
+                .privacy_search(request, generation, &mut completion)
+                .await?;
+            if completion == SearchCompletion::Complete && items.len() >= request.limit {
+                completion = SearchCompletion::ResultLimit;
+            }
+            return Ok(SearchPage {
+                items,
+                next_cursor: None,
+                completion,
+            });
+        }
+        let kinds = self.chat_kinds.read().await.clone();
+        let mut mapped = Vec::new();
+        let mut seen = HashSet::new();
+        let candidates = self
+            .raw_search(request, generation, &mut completion)
+            .await?
+            .into_iter()
+            .filter(|raw| {
+                let chat_id = value_i64(raw.get("chat_id")).unwrap_or_default();
+                let message_id = value_i64(raw.get("id")).unwrap_or_default();
+                seen.insert((chat_id, message_id)) && raw_message_matches(raw, request, &kinds)
+            })
+            .take(request.limit);
+        let hydration = stream::iter(candidates)
+            .map(|raw| async move { self.map_message_for_search(&raw, Some(generation)).await })
+            .buffered(MESSAGE_MAPPING_CONCURRENCY);
+        tokio::pin!(hydration);
+        while let Some(message) = hydration.next().await {
+            self.ensure_current_search(generation)?;
+            if let Some(message) = message? {
+                mapped.push(message);
+            }
+        }
+        self.ensure_current_search(generation)?;
+        mapped.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
+        if completion == SearchCompletion::Complete && mapped.len() >= request.limit {
+            completion = SearchCompletion::ResultLimit;
+        }
+        Ok(SearchPage {
+            items: mapped,
+            next_cursor: None,
+            completion,
+        })
+    }
+
     fn search_is_current(&self, generation: u64) -> bool {
-        self.search_generation.load(Ordering::Acquire) == generation
+        *self.search_generation.borrow() == generation
     }
 
     fn ensure_current_search(&self, generation: u64) -> Result<(), AppError> {
@@ -1132,26 +1188,44 @@ impl LiveGateway {
         &self,
         request: &SearchRequest,
         generation: u64,
+        completion: &mut SearchCompletion,
     ) -> Result<Vec<Value>, AppError> {
         let server_filter = search_filter(&request.content_kinds);
         if !request.chat_ids.is_empty() {
             let kinds = self.chat_kinds.read().await.clone();
             let mut all = Vec::new();
-            for chat_id in &request.chat_ids {
+            for (index, chat_id) in request.chat_ids.iter().enumerate() {
                 self.ensure_current_search(generation)?;
                 let secret = kinds.get(chat_id) == Some(&ChatKind::Secret);
                 if secret && !request.query.is_empty() {
                     all.extend(
-                        self.search_secret(*chat_id, request, server_filter.clone(), generation)
-                            .await?,
+                        self.search_secret(
+                            *chat_id,
+                            request,
+                            server_filter.clone(),
+                            generation,
+                            completion,
+                        )
+                        .await?,
                     );
                 } else {
                     all.extend(
-                        self.search_chat(*chat_id, request, server_filter.clone(), generation)
-                            .await?,
+                        self.search_chat(
+                            *chat_id,
+                            request,
+                            server_filter.clone(),
+                            generation,
+                            completion,
+                        )
+                        .await?,
                     );
                 }
                 if all.len() >= request.limit.saturating_mul(2) {
+                    if index + 1 < request.chat_ids.len()
+                        && *completion == SearchCompletion::Complete
+                    {
+                        *completion = SearchCompletion::CandidateLimit;
+                    }
                     break;
                 }
             }
@@ -1161,10 +1235,10 @@ impl LiveGateway {
             return Ok(Vec::new());
         }
         let mut all = self
-            .search_global(request, server_filter.clone(), generation)
+            .search_global(request, server_filter.clone(), generation, completion)
             .await?;
         all.extend(
-            self.search_secret(0, request, server_filter, generation)
+            self.search_secret(0, request, server_filter, generation, completion)
                 .await?,
         );
         Ok(all)
@@ -1175,6 +1249,7 @@ impl LiveGateway {
         request: &SearchRequest,
         filter: Value,
         generation: u64,
+        completion: &mut SearchCompletion,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
@@ -1204,10 +1279,19 @@ impl LiveGateway {
                 .get("next_offset")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if next.is_empty() || next == offset || !seen_offsets.insert(next.to_owned()) {
+            if next.is_empty() {
+                break;
+            }
+            if next == offset || !seen_offsets.insert(next.to_owned()) {
+                *completion = SearchCompletion::Incomplete;
                 break;
             }
             offset = next.to_owned();
+        }
+        if messages.len() >= request.limit.saturating_mul(2).max(100)
+            && *completion == SearchCompletion::Complete
+        {
+            *completion = SearchCompletion::CandidateLimit;
         }
         Ok(messages)
     }
@@ -1218,6 +1302,7 @@ impl LiveGateway {
         request: &SearchRequest,
         filter: Value,
         generation: u64,
+        completion: &mut SearchCompletion,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut offset = String::new();
@@ -1244,10 +1329,19 @@ impl LiveGateway {
                 .get("next_offset")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if next.is_empty() || next == offset || !seen_offsets.insert(next.to_owned()) {
+            if next.is_empty() {
+                break;
+            }
+            if next == offset || !seen_offsets.insert(next.to_owned()) {
+                *completion = SearchCompletion::Incomplete;
                 break;
             }
             offset = next.to_owned();
+        }
+        if messages.len() >= request.limit.saturating_mul(2).max(100)
+            && *completion == SearchCompletion::Complete
+        {
+            *completion = SearchCompletion::CandidateLimit;
         }
         Ok(messages)
     }
@@ -1258,6 +1352,7 @@ impl LiveGateway {
         request: &SearchRequest,
         filter: Value,
         generation: u64,
+        completion: &mut SearchCompletion,
     ) -> Result<Vec<Value>, AppError> {
         let mut messages = Vec::new();
         let mut from_message_id = 0_i64;
@@ -1284,10 +1379,19 @@ impl LiveGateway {
             let response = response?;
             append_raw_messages(&mut messages, &response);
             let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-            if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
+            if next == 0 {
+                break;
+            }
+            if next == from_message_id || !seen_cursors.insert(next) {
+                *completion = SearchCompletion::Incomplete;
                 break;
             }
             from_message_id = next;
+        }
+        if messages.len() >= request.limit.saturating_mul(2).max(100)
+            && *completion == SearchCompletion::Complete
+        {
+            *completion = SearchCompletion::CandidateLimit;
         }
         Ok(messages)
     }
@@ -1518,6 +1622,7 @@ impl LiveGateway {
         &self,
         request: &SearchRequest,
         generation: u64,
+        completion: &mut SearchCompletion,
     ) -> Result<Vec<MessageSnapshot>, AppError> {
         let kinds = self.chat_kinds.read().await.clone();
         let mut chat_ids = if request.chat_ids.is_empty() {
@@ -1568,7 +1673,10 @@ impl LiveGateway {
                 self.ensure_current_search(generation)?;
                 let response = match response {
                     Ok(response) => response,
-                    Err(AppError::Gateway(message)) if message.starts_with("404 ") => break,
+                    Err(AppError::Gateway(message)) if message.starts_with("404 ") => {
+                        *completion = SearchCompletion::Incomplete;
+                        break;
+                    }
                     Err(error) => return Err(error),
                 };
                 let raw_messages = response
@@ -1635,7 +1743,11 @@ impl LiveGateway {
                     }
                 }
                 let next = value_i64(response.get("next_from_message_id")).unwrap_or(0);
-                if next == 0 || next == from_message_id || !seen_cursors.insert(next) {
+                if next == 0 {
+                    break;
+                }
+                if next == from_message_id || !seen_cursors.insert(next) {
+                    *completion = SearchCompletion::Incomplete;
                     break;
                 }
                 if !raw_messages.is_empty()
@@ -1736,40 +1848,35 @@ impl TelegramRead for LiveGateway {
     }
 
     async fn search(&self, request: &SearchRequest) -> Result<Vec<MessageSnapshot>, AppError> {
+        Ok(self.search_result(request).await?.items)
+    }
+
+    async fn search_result(
+        &self,
+        request: &SearchRequest,
+    ) -> Result<SearchPage<MessageSnapshot>, AppError> {
         self.ensure_ready()?;
-        let generation = self
-            .search_generation
-            .fetch_add(1, Ordering::AcqRel)
-            .wrapping_add(1);
-        if request.privacy_scan {
-            return self.privacy_search(request, generation).await;
+        let mut changes = self.search_generation.subscribe();
+        let mut generation = 0;
+        self.search_generation.send_modify(|current| {
+            *current = current.wrapping_add(1);
+            generation = *current;
+        });
+        if *changes.borrow_and_update() != generation {
+            return Err(AppError::Gateway("TDLIB_SEARCH_SUPERSEDED".into()));
         }
-        let kinds = self.chat_kinds.read().await.clone();
-        let mut mapped = Vec::new();
-        let mut seen = HashSet::new();
-        let candidates = self
-            .raw_search(request, generation)
-            .await?
-            .into_iter()
-            .filter(|raw| {
-                let chat_id = value_i64(raw.get("chat_id")).unwrap_or_default();
-                let message_id = value_i64(raw.get("id")).unwrap_or_default();
-                seen.insert((chat_id, message_id)) && raw_message_matches(raw, request, &kinds)
-            })
-            .take(request.limit);
-        let hydration = stream::iter(candidates)
-            .map(|raw| async move { self.map_message_for_search(&raw, Some(generation)).await })
-            .buffered(MESSAGE_MAPPING_CONCURRENCY);
-        tokio::pin!(hydration);
-        while let Some(message) = hydration.next().await {
-            self.ensure_current_search(generation)?;
-            if let Some(message) = message? {
-                mapped.push(message);
+        let changed = changes.changed();
+        let search = self.search_current(request, generation);
+        futures_util::pin_mut!(changed, search);
+        match futures_util::future::select(changed, search).await {
+            futures_util::future::Either::Left(_) => {
+                Err(AppError::Gateway("TDLIB_SEARCH_SUPERSEDED".into()))
+            }
+            futures_util::future::Either::Right((result, _)) => {
+                self.ensure_current_search(generation)?;
+                result
             }
         }
-        self.ensure_current_search(generation)?;
-        mapped.sort_by_key(|message| std::cmp::Reverse(message.sent_at));
-        Ok(mapped)
     }
 
     async fn own_messages(&self, chat_id: i64) -> Result<Vec<MessageSnapshot>, AppError> {
@@ -4744,6 +4851,111 @@ mod tests {
     }
 
     #[test]
+    fn focused_candidate_cap_retains_matches_below_limit() {
+        tauri::async_runtime::block_on(async {
+            let (gateway, script, _directory) = scripted_gateway();
+            for page in 0..10 {
+                let messages = (page * 100 + 1..=page * 100 + 100)
+                    .map(|id| {
+                        raw_text_message(1101, id, 1_700_000_000 + id, true, id > 499, 42, "match")
+                    })
+                    .collect::<Vec<_>>();
+                let mut native = focused_search_page("");
+                native["from_message_id"] = json!(page * 100);
+                script.respond(
+                    native,
+                    json!({"messages": messages, "next_from_message_id": (page + 1) * 100}),
+                );
+            }
+            for id in 1..=499 {
+                script.respond(focused_properties(id), focused_reach());
+            }
+            let mut request = search_request("");
+            request.chat_ids = vec![1101];
+            request.limit = 500;
+            request.exclude_pinned = true;
+            let result = gateway.search_result(&request).await.unwrap();
+            assert_eq!(result.items.len(), 499);
+            assert_eq!(
+                serde_json::to_value(result.completion).unwrap(),
+                "candidate_limit"
+            );
+            assert!(result.next_cursor.is_none());
+            assert_search_is_read_only(&script);
+            script.assert_drained();
+        });
+    }
+
+    #[test]
+    fn focused_stalled_or_unavailable_privacy_search_never_claims_complete() {
+        tauri::async_runtime::block_on(async {
+            let mut unexpected = Vec::new();
+            for (privacy, missing, with_match) in [
+                (false, false, true),
+                (true, false, true),
+                (true, true, true),
+                (true, true, false),
+            ] {
+                let (gateway, script, _directory) = scripted_gateway();
+                let messages = if with_match {
+                    vec![raw_text_message(
+                        1101,
+                        9101,
+                        1_700_000_001,
+                        true,
+                        false,
+                        42,
+                        "person@example.invalid",
+                    )]
+                } else {
+                    vec![]
+                };
+                script.respond(
+                    focused_search_page(""),
+                    json!({"messages": messages,"next_from_message_id":if missing {0} else {99}}),
+                );
+                let mut next = focused_search_page("");
+                if missing {
+                    next["chat_id"] = json!(1102);
+                    script.respond(
+                        next,
+                        json!({"@type":"error","code":404,"message":"SYNTHETIC_UNAVAILABLE"}),
+                    );
+                } else {
+                    next["from_message_id"] = json!(99);
+                    script.respond(next, json!({"messages":[],"next_from_message_id":99}));
+                }
+                if with_match {
+                    script.respond(focused_properties(9101), focused_reach());
+                }
+                let mut request = search_request("");
+                request.chat_ids = if missing {
+                    vec![1101, 1102]
+                } else {
+                    vec![1101]
+                };
+                request.privacy_scan = privacy;
+                let result = gateway.search_result(&request).await.unwrap();
+                assert_eq!(
+                    result.items.len(),
+                    usize::from(with_match),
+                    "retain other valid matches"
+                );
+                if serde_json::to_value(result.completion).unwrap() != "incomplete" {
+                    unexpected.push((privacy, missing, with_match));
+                }
+                assert!(result.next_cursor.is_none());
+                assert_search_is_read_only(&script);
+                script.assert_drained();
+            }
+            assert!(
+                unexpected.is_empty(),
+                "incomplete searches presented as complete or wrong limit: {unexpected:?}"
+            );
+        });
+    }
+
+    #[test]
     fn focused_privacy_hydration_is_concurrent_and_bounded() {
         tauri::async_runtime::block_on(focused_hydration_bounded_case(true));
     }
@@ -4765,7 +4977,11 @@ mod tests {
             }
             _ => {
                 request.chat_ids = vec![1101];
-                focused_search_page("query")
+                if route == "privacy" {
+                    request.privacy_scan = true;
+                    request.query.clear();
+                }
+                focused_search_page(&request.query)
             }
         };
         let pending = script.delay_response(first);
@@ -4773,7 +4989,16 @@ mod tests {
             let gateway = Arc::clone(&gateway);
             tokio::spawn(async move { gateway.search(&request).await })
         };
-        wait_for_request_count(&script, route, 1).await;
+        wait_for_request_count(
+            &script,
+            if route == "privacy" {
+                "searchChatMessages"
+            } else {
+                route
+            },
+            1,
+        )
+        .await;
         assert!(
             gateway
                 .search(&search_request(""))
@@ -4781,10 +5006,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        pending
-            .respond(json!({ "messages": [], "next_offset": "more", "next_from_message_id": 99 }));
-        let stale = search.await.unwrap();
+        let stale = tokio::time::timeout(std::time::Duration::from_secs(1), search)
+            .await
+            .expect("superseded read must wake before native response")
+            .unwrap();
         assert_search_superseded(stale);
+        pending.assert_cancelled();
         assert_eq!(
             script.traces().len(),
             1,
@@ -4807,6 +5034,11 @@ mod tests {
     #[test]
     fn focused_superseding_search_stops_secret_pagination() {
         tauri::async_runtime::block_on(focused_superseding_pagination_case("searchSecretMessages"));
+    }
+
+    #[test]
+    fn focused_superseding_search_wakes_blocked_privacy_page() {
+        tauri::async_runtime::block_on(focused_superseding_pagination_case("privacy"));
     }
 
     async fn focused_superseding_hydration_case(privacy_scan: bool) {
@@ -4855,10 +5087,15 @@ mod tests {
             .filter(|trace| trace.kind == "getMessageProperties")
             .count();
         assert_eq!(started, 12);
+        assert_search_superseded(
+            tokio::time::timeout(std::time::Duration::from_secs(1), search)
+                .await
+                .expect("cancel hydration before replies")
+                .unwrap(),
+        );
         for response in pending.drain(..) {
-            response.respond(focused_reach());
+            response.assert_cancelled();
         }
-        assert_search_superseded(search.await.unwrap());
         assert_eq!(
             script
                 .traces()
@@ -4904,8 +5141,13 @@ mod tests {
                         .unwrap()
                         .is_empty()
                 );
-                pending.respond(json!({ "@type": "user", "id": 45, "first_name": "Synthetic", "last_name": "Sender" }));
-                assert_search_superseded(search.await.unwrap());
+                assert_search_superseded(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), search)
+                        .await
+                        .expect("cancel sender read before reply")
+                        .unwrap(),
+                );
+                pending.assert_cancelled();
                 assert_eq!(
                     script
                         .traces()

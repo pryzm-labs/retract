@@ -195,6 +195,7 @@ export interface SearchResponse {
   messages: MessageSnapshot[];
   returned: number;
   truncated: boolean;
+  completion: "complete" | "result_limit" | "candidate_limit" | "incomplete";
 }
 
 export interface CommandError {

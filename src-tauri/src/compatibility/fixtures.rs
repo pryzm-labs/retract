@@ -443,6 +443,7 @@ pub struct SyntheticIo {
     pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
     pub preflight_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
     pub mutation_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
+    pub search_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
 }
 impl SyntheticIo {
     pub fn new(active: ActiveContext) -> Self {
@@ -459,6 +460,7 @@ impl SyntheticIo {
             preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             preflight_barrier: Arc::new(Mutex::new(None)),
             mutation_barrier: Arc::new(Mutex::new(None)),
+            search_barrier: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -615,10 +617,16 @@ impl ApplicationQuery for SyntheticIo {
         &self,
         _: &ActiveContext,
         _: SearchRequest,
-    ) -> Result<Page<ContentRecord>, SafeError> {
-        Ok(Page {
+    ) -> Result<crate::providers::ports::SearchPage<ContentRecord>, SafeError> {
+        let barrier = self.search_barrier.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            barrier.entered.notify_one();
+            barrier.release.notified().await;
+        }
+        Ok(crate::providers::ports::SearchPage {
             items: vec![],
             next_cursor: None,
+            completion: crate::providers::ports::SearchCompletion::Complete,
         })
     }
     async fn refresh(

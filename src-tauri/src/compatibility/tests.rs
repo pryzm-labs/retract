@@ -35,6 +35,166 @@ fn setup() -> tauri::WebviewWindow<MockRuntime> {
 }
 
 #[test]
+fn focused_search_early_cancel_and_late_start_are_fenced() {
+    use super::fixtures::*;
+    let directory = tempfile::tempdir().unwrap();
+    let active = context("syntheticContext");
+    let harness = synthetic(directory.path(), Arc::new(SyntheticIo::new(active.clone())));
+    let client = uuid::Uuid::new_v4();
+    let token = |sequence| json!({"clientId":client,"sequence":sequence});
+    harness.call("cancel_search_v2", &active, token(2)).unwrap();
+    let request = |sequence| json!({"query":"","conversations":[],"filters":null,"limit":500,"searchToken":token(sequence)});
+    for sequence in [1, 2] {
+        assert_eq!(
+            harness
+                .call("search_messages_v2", &active, request(sequence))
+                .unwrap_err()["code"],
+            "search_cancelled"
+        );
+    }
+    assert!(
+        harness
+            .call("search_messages_v2", &active, request(3))
+            .is_ok()
+    );
+    assert!(harness.call("cancel_search_v2", &active, token(1)).is_ok());
+    assert!(
+        harness
+            .call("search_messages_v2", &active, request(4))
+            .is_ok()
+    );
+    let foreign = context("context");
+    assert_eq!(
+        harness
+            .call("cancel_search_v2", &foreign, token(100))
+            .unwrap_err()["code"],
+        "scope_mismatch"
+    );
+    assert!(
+        harness
+            .call("search_messages_v2", &active, request(5))
+            .is_ok()
+    );
+    let mut stale_context = active.clone();
+    stale_context.session_generation = uuid::Uuid::new_v4();
+    assert_eq!(
+        harness
+            .call("cancel_search_v2", &stale_context, token(100))
+            .unwrap_err()["code"],
+        "stale_context"
+    );
+    for invalid in [
+        json!({"clientId":client,"sequence":0}),
+        json!({"clientId":client,"sequence":9_007_199_254_740_992u64}),
+        json!({"clientId":"invalid","sequence":99}),
+    ] {
+        assert!(harness.call("cancel_search_v2", &active, invalid).is_err());
+    }
+    assert!(
+        harness
+            .call("search_messages_v2", &active, request(6))
+            .is_ok()
+    );
+}
+
+#[test]
+fn focused_blocked_search_releases_runtime_and_late_cancel_preserves_newer_read() {
+    use super::fixtures::*;
+    use tauri::Manager;
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let harness = synthetic(directory.path(), io.clone());
+        let barrier = Arc::new(PreflightBarrier::default());
+        *io.search_barrier.lock().unwrap() = Some(barrier.clone());
+        let token = json!({"clientId":uuid::Uuid::new_v4(),"sequence":2});
+        let payload =
+            json!({"query":"","conversations":[],"filters":null,"limit":500,"searchToken":token});
+        let webview = harness.webview.clone();
+        let request = json!({"contractVersion":2,"context":active,"payload":payload});
+        let search =
+            tokio::task::spawn_blocking(move || invoke(&webview, "search_messages_v2", request));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            barrier.entered.notified(),
+        )
+        .await
+        .unwrap();
+        let runtime = harness
+            .webview
+            .app_handle()
+            .state::<Arc<crate::RuntimeState>>()
+            .inner()
+            .clone();
+        let current =
+            tokio::time::timeout(std::time::Duration::from_secs(1), runtime.service.write()).await;
+        if current.is_err() {
+            barrier.release.notify_one();
+            search.await.unwrap().unwrap();
+            panic!("search must not retain runtime read lock");
+        }
+        drop(current.unwrap());
+        let mut old_token = token.clone();
+        old_token["sequence"] = json!(1);
+        harness
+            .call("cancel_search_v2", &active, old_token)
+            .unwrap();
+        assert!(
+            !search.is_finished(),
+            "old cleanup must not cancel the newer request"
+        );
+        harness.call("cancel_search_v2", &active, token).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), search)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(result["code"], "search_cancelled");
+        assert!(io.calls.lock().unwrap().is_empty());
+        harness.service.check(&active).unwrap();
+    });
+}
+
+#[test]
+fn focused_admitted_unpolled_search_is_cancelled_and_client_state_is_bounded() {
+    use super::fixtures::*;
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let active = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        let harness = synthetic(directory.path(), io.clone());
+        let request = json!({"contractVersion":2,"context":active,"payload":{"query":"","conversations":[],"filters":null,"limit":500}});
+        let flight = harness.service.prepare_search(request.clone()).unwrap();
+        harness.service.cancel_searches();
+        assert_eq!(
+            harness.service.run_search(flight).await.unwrap_err().code,
+            retract_domain::ErrorCode::SearchCancelled
+        );
+        harness.service.check(&active).unwrap();
+        let known_client = uuid::Uuid::new_v4();
+        for index in 0..1024 {
+            let client = if index == 0 {
+                known_client
+            } else {
+                uuid::Uuid::new_v4()
+            };
+            harness.service.cancel_search(json!({"contractVersion":2,"context":active,"payload":{"clientId":client,"sequence":1}})).unwrap();
+        }
+        let exhausted = harness.service.cancel_search(json!({"contractVersion":2,"context":active,"payload":{"clientId":uuid::Uuid::new_v4(),"sequence":1}})).unwrap_err();
+        assert_eq!(
+            exhausted.code,
+            retract_domain::ErrorCode::SearchSessionLimit
+        );
+        let mut known = request;
+        known["payload"]["searchToken"] = json!({"clientId":known_client,"sequence":2});
+        let flight = harness.service.prepare_search(known).unwrap();
+        assert!(harness.service.run_search(flight).await.is_ok());
+        assert!(io.calls.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
 fn final_review_bootstrap_serialization_matches_the_frontend_fixture() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../src/test/fixtures/connection-bootstrap.json"
@@ -256,6 +416,11 @@ mod discord_source_switch_tests {
     use std::{fs, sync::Arc};
 
     struct DrainArchive<'a>(&'a tokio::runtime::Runtime, Arc<ArchiveOwner>);
+    type BlockedSearch = (
+        Arc<crate::compatibility::fixtures::PreflightBarrier>,
+        std::sync::mpsc::Receiver<Result<serde_json::Value, serde_json::Value>>,
+        std::thread::JoinHandle<()>,
+    );
     impl Drop for DrainArchive<'_> {
         fn drop(&mut self) {
             self.0.block_on(self.1.shutdown());
@@ -264,15 +429,20 @@ mod discord_source_switch_tests {
 
     #[test]
     fn failed_discord_source_open_preserves_workspace_and_allows_retry() {
-        failed_switch(false);
+        failed_switch(false, false);
     }
 
     #[test]
     fn failed_discord_source_open_preserves_telegram_context_and_saved_state() {
-        failed_switch(true);
+        failed_switch(true, false);
     }
 
-    fn failed_switch(with_telegram: bool) {
+    #[test]
+    fn focused_source_switch_cancels_blocked_search_and_failed_candidate_recovers() {
+        failed_switch(false, true);
+    }
+
+    fn failed_switch(with_telegram: bool, with_blocked_search: bool) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -302,6 +472,14 @@ mod discord_source_switch_tests {
         } else {
             None
         };
+        let synthetic_io = with_blocked_search.then(|| {
+            Arc::new(crate::compatibility::fixtures::SyntheticIo::new(
+                crate::compatibility::fixtures::context("syntheticContext"),
+            ))
+        });
+        let synthetic_harness = synthetic_io.as_ref().map(|io| {
+            crate::compatibility::fixtures::synthetic(&root.join("synthetic-profile"), io.clone())
+        });
         let (initial, telegram_history) = if let Some(harness) = &telegram_harness {
             let plan = harness.prepare(
                 &crate::compatibility::fixtures::context("context"),
@@ -313,6 +491,8 @@ mod discord_source_switch_tests {
                 harness.service.clone(),
                 Some((harness.store.clone(), before)),
             )
+        } else if let Some(harness) = &synthetic_harness {
+            (harness.service.clone(), None)
         } else {
             (ProviderService::setup(), None)
         };
@@ -359,7 +539,39 @@ mod discord_source_switch_tests {
             .unwrap();
         let request =
             json!({"contractVersion":2,"context":previous_context,"payload":{"scope":scope}});
+        let start_blocked = || {
+            synthetic_io.as_ref().map(|io| {
+            let barrier = Arc::new(crate::compatibility::fixtures::PreflightBarrier::default());
+            *io.search_barrier.lock().unwrap() = Some(barrier.clone());
+            let webview = webview.clone();
+            let search = json!({"contractVersion":2,"context":previous_context,"payload":{"query":"","conversations":[],"filters":null,"limit":500}});
+            let (tx, rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || { tx.send(invoke(&webview, "search_messages_v2", search)).unwrap(); });
+            rt.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(2), barrier.entered.notified()).await.unwrap(); });
+            (barrier, rx, thread)
+        })
+        };
+        let finish_blocked = |pending: Option<BlockedSearch>| {
+            if let Some((barrier, rx, thread)) = pending {
+                let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+                if result.is_err() {
+                    barrier.release.notify_one();
+                }
+                thread.join().unwrap();
+                assert_eq!(
+                    result
+                        .expect("source transition must wake pending search")
+                        .unwrap_err()["code"],
+                    "search_cancelled"
+                );
+            }
+        };
+        let pending = start_blocked();
         assert!(invoke(&webview, "select_archive_v2", request.clone()).is_err());
+        finish_blocked(pending);
+        if synthetic_io.is_some() {
+            assert!(invoke(&webview, "search_messages_v2", json!({"contractVersion":2,"context":previous_context,"payload":{"query":"","conversations":[],"filters":null,"limit":500}})).is_ok());
+        }
         assert_eq!(
             fs::read(&blocked).unwrap(),
             b"synthetic path obstruction; preserve me"
@@ -400,7 +612,9 @@ mod discord_source_switch_tests {
             Arc::new(crate::providers::discord::DiscordPayloadValidator),
         )
         .unwrap();
+        let pending = start_blocked();
         let opened = invoke(&webview, "select_archive_v2", request).unwrap();
+        finish_blocked(pending);
         assert_eq!(
             opened["context"]["scope"],
             serde_json::to_value(scope).unwrap()
@@ -500,6 +714,7 @@ fn compatibility_v2_every_active_handler_requires_captured_context() {
     for command in [
         "get_snapshot_v2",
         "search_messages_v2",
+        "cancel_search_v2",
         "refresh_chats_v2",
         "prepare_selection_v2",
         "prepare_intent_v2",

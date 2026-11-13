@@ -15,6 +15,27 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SearchToken {
+    client_id: uuid::Uuid,
+    sequence: u64,
+}
+
+#[derive(Default)]
+struct SearchAdmissions {
+    context: Option<ActiveContext>,
+    clients: BTreeMap<uuid::Uuid, u64>,
+    active: Option<SearchToken>,
+}
+
+pub(crate) struct SearchFlight {
+    raw: Value,
+    context: ActiveContext,
+    changes: tokio::sync::watch::Receiver<u64>,
+    generation: u64,
+}
+
 pub fn safe(code: ErrorCode) -> SafeError {
     SafeError {
         code,
@@ -27,6 +48,8 @@ pub struct ProviderService {
     registered: Mutex<Option<(ActiveContext, Arc<ProviderRegistry>)>>,
     stopped: AtomicBool,
     recreation_required: bool,
+    search_admissions: std::sync::Mutex<SearchAdmissions>,
+    search_generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl ProviderService {
@@ -42,6 +65,8 @@ impl ProviderService {
             registered: Mutex::new(None),
             stopped: AtomicBool::new(false),
             recreation_required,
+            search_admissions: std::sync::Mutex::new(SearchAdmissions::default()),
+            search_generation: tokio::sync::watch::channel(0).0,
         })
     }
     pub fn setup() -> Arc<Self> {
@@ -58,6 +83,132 @@ impl ProviderService {
             None
         } else {
             self.connection.context()
+        }
+    }
+
+    /// Serialize admission and generation publication. Watermarks also fence
+    /// cancel-before-start and late IPC arrival within each frontend lifetime.
+    fn admit_search(
+        &self,
+        context: &ActiveContext,
+        token: Option<SearchToken>,
+        cancel: bool,
+    ) -> Result<u64, SafeError> {
+        self.check(context)?;
+        if token.is_some_and(|token| {
+            token.client_id.is_nil()
+                || token.sequence == 0
+                || token.sequence > 9_007_199_254_740_991
+        }) {
+            return Err(safe(ErrorCode::UnsupportedSchema));
+        }
+        let mut state = self
+            .search_admissions
+            .lock()
+            .map_err(|_| safe(ErrorCode::SearchIncomplete))?;
+        self.check(context)?;
+        if state.context.as_ref() != Some(context) {
+            *state = SearchAdmissions {
+                context: Some(context.clone()),
+                ..Default::default()
+            };
+        }
+        if let Some(token) = token {
+            if !state.clients.contains_key(&token.client_id) && state.clients.len() >= 1024 {
+                return Err(safe(ErrorCode::SearchSessionLimit));
+            }
+            let previous = state.clients.entry(token.client_id).or_default();
+            if !cancel && token.sequence <= *previous {
+                return Err(safe(ErrorCode::SearchCancelled));
+            }
+            *previous = (*previous).max(token.sequence);
+            if cancel
+                && !state.active.is_some_and(|active| {
+                    active.client_id == token.client_id && active.sequence <= token.sequence
+                })
+            {
+                return Ok(*self.search_generation.borrow());
+            }
+        }
+        state.active = if cancel { None } else { token };
+        let mut generation = 0;
+        self.search_generation.send_modify(|current| {
+            *current = current.wrapping_add(1);
+            generation = *current;
+        });
+        Ok(generation)
+    }
+
+    pub(crate) fn cancel_searches(&self) {
+        if let Ok(mut state) = self.search_admissions.lock() {
+            state.active = None;
+            self.search_generation
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+    }
+
+    pub(crate) fn cancel_search(&self, raw: Value) -> Result<Value, SafeError> {
+        validate_version(&raw)?;
+        if raw.get("context").is_none_or(Value::is_null) {
+            return Err(safe(ErrorCode::IdentityUnavailable));
+        }
+        let request: CommandRequest<SearchToken> = decode(raw)?;
+        self.admit_search(&request.context, Some(request.payload), true)?;
+        encode(CommandResponse {
+            contract_version: 2,
+            context: request.context,
+            payload: Value::Null,
+        })
+    }
+
+    pub(crate) fn prepare_search(&self, mut raw: Value) -> Result<SearchFlight, SafeError> {
+        validate_version(&raw)?;
+        if raw.get("context").is_none_or(Value::is_null) {
+            return Err(safe(ErrorCode::IdentityUnavailable));
+        }
+        let token = raw
+            .get_mut("payload")
+            .and_then(Value::as_object_mut)
+            .and_then(|payload| payload.remove("searchToken"))
+            .map(decode::<SearchToken>)
+            .transpose()?;
+        let request: CommandRequest<SearchRequest> = decode(raw.clone())?;
+        self.check(&request.context)?;
+        if request.payload.limit == 0 || request.payload.limit > 10_000 {
+            return Err(safe(ErrorCode::UnsupportedSchema));
+        }
+        let changes = self.search_generation.subscribe();
+        let generation = self.admit_search(&request.context, token, false)?;
+        Ok(SearchFlight {
+            raw,
+            context: request.context,
+            changes,
+            generation,
+        })
+    }
+
+    pub(crate) async fn run_search(&self, flight: SearchFlight) -> Result<Value, SafeError> {
+        let SearchFlight {
+            raw,
+            context,
+            mut changes,
+            generation,
+        } = flight;
+        if *changes.borrow_and_update() != generation {
+            return Err(safe(ErrorCode::SearchCancelled));
+        }
+        let changed = changes.changed();
+        let search = self.active("search", raw);
+        futures_util::pin_mut!(changed, search);
+        match futures_util::future::select(changed, search).await {
+            futures_util::future::Either::Left(_) => Err(safe(ErrorCode::SearchCancelled)),
+            futures_util::future::Either::Right((result, _)) => {
+                if *self.search_generation.borrow() != generation {
+                    return Err(safe(ErrorCode::SearchCancelled));
+                }
+                self.check(&context)?;
+                result
+            }
         }
     }
     pub fn check(&self, expected: &ActiveContext) -> Result<(), SafeError> {
@@ -448,6 +599,7 @@ impl ProviderService {
         false
     }
     pub async fn shutdown(&self) {
+        self.cancel_searches();
         self.stopped.store(true, Ordering::Release);
         let mut registered = self.registered.lock().await;
         if let Some((context, registry)) = registered.take()

@@ -5,6 +5,8 @@ export interface CommandRequest<T> { contractVersion: 2; context: ActiveContext;
 export interface CommandResponse<T> { contractVersion: 2; context: ActiveContext; payload: T }
 export interface BootstrapResponse<T> { contractVersion: 2; context: ActiveContext | null; payload: T }
 export interface Page<T> { items: T[]; nextCursor: string | null }
+export type SearchCompletion = "complete" | "result_limit" | "candidate_limit" | "incomplete";
+export interface SearchPage<T> { items: T[]; nextCursor: string | null; completion: SearchCompletion }
 export type Evidence = "live" | "archive" | "live_and_archive";
 export type NormalContentKind = "text" | "image" | "video" | "document" | "voice" | "audio" | "animation" | "sticker" | "poll" | "location" | "contact" | "service" | "other";
 export interface ActorRecord { id: ActorId; scope: Scope; resource: ProviderResourceRef; displayName: string; username: string | null; avatar: VersionedPayload | null; evidence: Evidence; observedAt: string }
@@ -42,6 +44,9 @@ export interface LegacyHistoryRecord { id: Uuid; planId: Uuid; operation: import
 export type IdentityStatus = { state: "unavailable" | "pending" | "ready" } | { state: "failed"; diagnostic: SafeError };
 export interface BootstrapSnapshot { identity: IdentityStatus; auth: VersionedPayload | null; catalog: { phase: string; total: number; processed: number }; chats: ConversationRecord[]; recentJobs: ScopedJobRecord[]; legacyHistory: LegacyHistoryRecord[] }
 export const safeMessages = {
+  search_cancelled: "Search cancelled. Try the search again.",
+  search_session_limit: "Search session limit reached. Restart the application and try again.",
+  search_incomplete: "Search incomplete. Narrow the chat, date, or filters and try again.",
   authentication_required: "Sign in to continue.", permission_changed: "Permission to perform this action has changed.", not_found: "The requested resource could not be found.", already_removed: "The resource has already been removed.", rate_limited: "The provider requires a wait before continuing.", cost_limit_reached: "The configured cost limit has been reached.", transient: "The provider is temporarily unavailable.", permanent: "The provider could not complete this action.", ambiguous_outcome: "The action outcome is uncertain. Review before retrying.", unsupported_schema: "This data version is not supported.", invalid_archive: "The archive could not be validated.", unsupported_contract_version: "Reload the application to use the current interface.", scope_mismatch: "This action belongs to a different account or source.", stale_context: "The connection has changed. Review this action again.", identity_unavailable: "The account identity could not be verified.", profile_in_use: "This profile is already in use by another application process.", state_persistence_failed: "Progress could not be saved. No further actions were scheduled.", migration_requires_new_review: "Legacy history is preserved. A new review is required.", restart_requires_new_review: "This interrupted action requires a new review."
 } as const;
 export interface SafeError { code: keyof typeof safeMessages; message: string; retryAt: string | null }

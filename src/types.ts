@@ -199,6 +199,7 @@ export interface SearchResponse {
   messages: MessageSnapshot[];
   returned: number;
   truncated: boolean;
+  completion: import("./providers/contract").SearchCompletion;
 }
 
 export interface CommandError {

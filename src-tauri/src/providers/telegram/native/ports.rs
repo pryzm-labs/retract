@@ -26,6 +26,22 @@ pub trait TelegramRead: TelegramSession {
     async fn chats(&self) -> Result<Vec<ChatSummary>, AppError>;
     async fn chat_by_id(&self, chat_id: i64) -> Result<Option<ChatSummary>, AppError>;
     async fn search(&self, request: &SearchRequest) -> Result<Vec<MessageSnapshot>, AppError>;
+    async fn search_result(
+        &self,
+        request: &SearchRequest,
+    ) -> Result<crate::providers::ports::SearchPage<MessageSnapshot>, AppError> {
+        let items = self.search(request).await?;
+        let completion = if items.len() >= request.limit {
+            crate::providers::ports::SearchCompletion::ResultLimit
+        } else {
+            crate::providers::ports::SearchCompletion::Complete
+        };
+        Ok(crate::providers::ports::SearchPage {
+            items,
+            next_cursor: None,
+            completion,
+        })
+    }
     async fn own_messages(&self, chat_id: i64) -> Result<Vec<MessageSnapshot>, AppError>;
     async fn chat_messages(&self, chat_id: i64) -> Result<Vec<MessageSnapshot>, AppError>;
     async fn messages_by_ids(&self, ids: &[(i64, i64)]) -> Result<Vec<MessageSnapshot>, AppError>;

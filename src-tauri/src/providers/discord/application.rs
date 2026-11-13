@@ -23,8 +23,8 @@ use crate::{
     providers::{
         frozen_lifecycle::FrozenLifecycle,
         ports::{
-            ApplicationConnection, ApplicationQuery, Page, ProviderCapability, ProviderDescriptor,
-            ProviderRegistration, QuerySource, ReviewedLifecycle,
+            ApplicationConnection, ApplicationQuery, ProviderCapability, ProviderDescriptor,
+            ProviderRegistration, QuerySource, ReviewedLifecycle, SearchCompletion, SearchPage,
         },
         registry::ProviderRegistryError,
     },
@@ -110,7 +110,7 @@ impl DiscordApplicationQuery {
 
 // Never represent a superseded request as successful empty/complete results.
 fn search_superseded() -> SafeError {
-    safe(ErrorCode::Transient)
+    safe(ErrorCode::SearchCancelled)
 }
 
 #[async_trait]
@@ -150,7 +150,7 @@ impl ApplicationQuery for DiscordApplicationQuery {
         &self,
         context: &ActiveContext,
         request: wire::SearchRequest,
-    ) -> Result<Page<ContentRecord>, SafeError> {
+    ) -> Result<SearchPage<ContentRecord>, SafeError> {
         self.check(context)?;
         let mut changes = self.search_generation.subscribe();
         let mut generation = 0;
@@ -171,9 +171,10 @@ impl ApplicationQuery for DiscordApplicationQuery {
             None => DiscordSearchFilters::default(),
         };
         if filters.direction == Direction::Others {
-            return Ok(Page {
+            return Ok(SearchPage {
                 items: vec![],
                 next_cursor: None,
+                completion: SearchCompletion::Complete,
             });
         }
         let selected = request
@@ -223,8 +224,13 @@ impl ApplicationQuery for DiscordApplicationQuery {
             items.extend(page.items);
             if items.len() >= request.limit as usize || page.next_cursor.is_none() {
                 self.check(context)?;
-                return Ok(Page {
+                return Ok(SearchPage {
                     items,
+                    completion: if page.next_cursor.is_some() {
+                        SearchCompletion::ResultLimit
+                    } else {
+                        SearchCompletion::Complete
+                    },
                     next_cursor: page.next_cursor,
                 });
             }

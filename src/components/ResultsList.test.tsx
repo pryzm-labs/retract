@@ -4,6 +4,14 @@ import { demoSearch, demoSnapshot } from "../demo";
 import { ResultsList, messageKey } from "./ResultsList";
 
 describe("Discord result completion", () => {
+  it.each(["candidate_limit", "incomplete"] as const)("focused never presents an empty %s privacy scan as clean", completion => {
+    render(<ResultsList provider="telegram" messages={[]} chats={[]} selectedKeys={new Set()} completedKeys={new Set()} loading={false} refreshing={false} query="" privacyScan truncated completion={completion} onToggle={vi.fn()} onToggleAll={vi.fn()} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Search incomplete");
+    expect(screen.queryByText("No sensitive information found")).not.toBeInTheDocument();
+    expect(screen.getByText(/Showing up to the first 500 matches/)).toBeVisible();
+    expect(screen.getByRole("checkbox")).toBeDisabled();
+  });
+
   it("keeps archive evidence visible but prevents repeating a confirmed deletion", async () => {
     const snapshot = await demoSnapshot();
     const result = await demoSearch({

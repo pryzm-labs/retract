@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api.desktop";
+import { createApi } from "./api";
 import fixture from "../test/fixtures/provider-lifecycle.json";
 import { lifecycleContext, wireMessage, wireJob, wireChat, wirePlan } from "../test/lifecycle-wire";
 import { decodeRef, decodeContent, decodeConversation, decodeBootstrap, decodePlan, decodeJob, type ContentRecord, type CommandRequest, type BootstrapResponse, type Page, type ScopedJobRecord } from "./contract";
@@ -43,7 +44,56 @@ describe("real desktop v2 response boundary", () => {
 
 describe("record validation through the actual search and job adapters", () => {
   const search = () => api.search({ query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 500 }, lifecycleContext);
-  const response = () => structuredClone({ contractVersion: 2, context: fixture.context, payload: { items: [wireMessage(fixture.messages[0])], nextCursor: null } });
+  const response = () => structuredClone({ contractVersion: 2, context: fixture.context, payload: { items: [wireMessage(fixture.messages[0])], nextCursor: null, completion: "complete" } });
+  it("focused creates secure ordered search clients without crypto.randomUUID", async () => {
+    const nativeCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", { getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto) });
+    try {
+      const transport = vi.fn(async (_command: string, _request: unknown) => response());
+      const first = createApi(transport, () => true);
+      const second = createApi(transport, () => true);
+      const request = { query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any" as const, excludePinned: false, limit: 500 };
+      await first.search(request, lifecycleContext);
+      await first.search(request, lifecycleContext);
+      await second.search(request, lifecycleContext);
+      const tokens = transport.mock.calls.map(([, raw]) => (raw as { payload: { searchToken: { clientId: string; sequence: number } } }).payload.searchToken);
+      expect(tokens[0].clientId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(tokens[1]).toEqual({ clientId: tokens[0].clientId, sequence: 2 });
+      expect(tokens[0].sequence).toBe(1);
+      expect(tokens[2].clientId).not.toBe(tokens[0].clientId);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it.each(["candidate_limit", "incomplete"])("focused preserves %s coverage below the result limit", async completion => {
+    vi.mocked(invoke).mockResolvedValue({ ...response(), payload: { ...response().payload, completion } });
+    expect(await search()).toMatchObject({ returned: 1, truncated: true, completion });
+  });
+  it.each([undefined, "unknown", false, null])("focused rejects missing or invalid completion %s", async completion => {
+    vi.mocked(invoke).mockResolvedValue({ ...response(), payload: { ...response().payload, completion } });
+    await expect(search()).rejects.toThrow("Invalid provider response");
+  });
+
+  it("focused sends request-specific cancellation and rejects a late successful response", async () => {
+    const controller = new AbortController();
+    let finish: (value: unknown) => void = () => {};
+    vi.mocked(invoke).mockImplementation(async (command: string) => command === "search_messages_v2" ? new Promise(resolve => { finish = resolve; }) : { contractVersion: 2, context: fixture.context, payload: null });
+    const request = { query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any" as const, excludePinned: false, limit: 500 };
+    const first = api.search(request, lifecycleContext, controller.signal);
+    const rejection = expect(first).rejects.toMatchObject({ code: "search_cancelled" });
+    const captured = (vi.mocked(invoke).mock.calls[0][1] as any).request;
+    controller.abort();
+    expect(invoke).toHaveBeenCalledWith("cancel_search_v2", { request: { contractVersion: 2, context: lifecycleContext, payload: captured.payload.searchToken } });
+    finish(response());
+    await rejection;
+    vi.mocked(invoke).mockResolvedValue(response());
+    await api.search(request, lifecycleContext);
+    const latest = (vi.mocked(invoke).mock.calls.at(-1)![1] as any).request.payload.searchToken;
+    expect(latest.clientId).toBe(captured.payload.searchToken.clientId);
+    expect(latest.sequence).toBeGreaterThan(captured.payload.searchToken.sequence);
+  });
+  it.each(["search_cancelled", "search_incomplete", "search_session_limit"])("focused decodes safe %s diagnostics", async code => {
+    vi.mocked(invoke).mockRejectedValue({ code, retryAt: null });
+    await expect(search()).rejects.toMatchObject({ code });
+  });
   it("retains the independently reviewed UUID and both exact native decimal strings", async () => {
     const value = response(); value.payload.items.push(wireMessage(fixture.messages[1]));
     vi.mocked(invoke).mockResolvedValue(value);
@@ -112,7 +162,7 @@ describe("auth mutations retain the v2 response boundary", () => {
     const record = wireMessage(fixture.messages[0]);
     const metadata = record.providerMetadata.payload;
     delete (metadata as Partial<typeof metadata>).actor;
-    vi.mocked(invoke).mockResolvedValue({ contractVersion: 2, context: fixture.context, payload: { items: [record], nextCursor: null } });
+    vi.mocked(invoke).mockResolvedValue({ contractVersion: 2, context: fixture.context, payload: { items: [record], nextCursor: null, completion: "complete" } });
     const response = await api.search({ query: "", conversations: [], chatKinds: [], contentKinds: [], direction: "any", excludePinned: false, limit: 500 }, lifecycleContext);
     expect(response.messages[0].actorRef).toBeNull();
   });
@@ -147,7 +197,8 @@ describe("exact Rust/TypeScript v2 shapes", () => {
       ["crates/retract-domain/src/plans.rs", "ActionStep", plan.steps[0]],
       ["crates/retract-domain/src/plans.rs", "ConfirmationRequirements", plan.confirmation],
       ["crates/retract-domain/src/plans.rs", "ScopedJobRecord", job],
-      ["crates/retract-domain/src/plans.rs", "JobCounters", job.counters]
+      ["crates/retract-domain/src/plans.rs", "JobCounters", job.counters],
+      ["src-tauri/src/providers/ports.rs", "SearchPage", { items: [], nextCursor: null, completion: "complete" }]
     ];
     for (const [path, name, value] of shapes) expect(Object.keys(value).sort(), name).toEqual(fields(path, name));
   });
@@ -157,6 +208,7 @@ describe("exact Rust/TypeScript v2 shapes", () => {
     expectTypeOf<ContentRecord["editedAt"]>().toEqualTypeOf<string | null>();
     expectTypeOf<ContentRecord["replyTo"]>().toEqualTypeOf<ContentId | null>();
     expectTypeOf<Page<ContentRecord>>().toEqualTypeOf<{ items: ContentRecord[]; nextCursor: string | null }>();
+    expectTypeOf<import("./contract").SearchPage<ContentRecord>>().toEqualTypeOf<{ items: ContentRecord[]; nextCursor: string | null; completion: "complete" | "result_limit" | "candidate_limit" | "incomplete" }>();
     expectTypeOf<CommandRequest<{ jobId: ScopedJobRecord["id"] }>>().toEqualTypeOf<{ contractVersion: 2; context: ActiveContext; payload: { jobId: ScopedJobRecord["id"] } }>();
     expectTypeOf<BootstrapResponse<unknown>["context"]>().toEqualTypeOf<ActiveContext | null>();
   });

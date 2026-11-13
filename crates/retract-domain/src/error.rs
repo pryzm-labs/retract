@@ -27,6 +27,9 @@ pub enum DomainError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    SearchCancelled,
+    SearchIncomplete,
+    SearchSessionLimit,
     AuthenticationRequired,
     PermissionChanged,
     NotFound,
@@ -255,6 +258,13 @@ impl TryFrom<SafeErrorWire> for SafeError {
 impl SafeError {
     pub fn message(&self) -> &'static str {
         match self.code {
+            ErrorCode::SearchCancelled => "Search cancelled. Try the search again.",
+            ErrorCode::SearchSessionLimit => {
+                "Search session limit reached. Restart the application and try again."
+            }
+            ErrorCode::SearchIncomplete => {
+                "Search incomplete. Narrow the chat, date, or filters and try again."
+            }
             ErrorCode::AuthenticationRequired => "Sign in to continue.",
             ErrorCode::PermissionChanged => "Permission to perform this action has changed.",
             ErrorCode::NotFound => "The requested resource could not be found.",
