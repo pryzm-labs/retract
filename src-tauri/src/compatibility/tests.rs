@@ -598,7 +598,7 @@ mod discord_source_switch_tests {
             .unwrap();
             let outcome = runtime
                 .discord_imports
-                .start_or_retry(fs::File::open(path).unwrap())
+                .start_or_retry(fs::File::open(path).unwrap(), || true)
                 .await
                 .unwrap()
                 .wait()

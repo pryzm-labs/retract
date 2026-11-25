@@ -9,6 +9,7 @@ use std::time::Duration;
 
 const TOKEN: &str = "synthetic.discord.token-value_123456789";
 const CONTENT: &str = "synthetic message";
+const UNKNOWN_MESSAGE: &str = r#"{"message":"Unknown Message","code":10008}"#;
 const TIMESTAMP_MILLIS: i64 = 1_893_553_445_123;
 
 fn binding() -> DiscordLiveMessageBinding {
@@ -152,13 +153,17 @@ fn run_verify_with_timeout(
 
 #[test]
 fn delete_uses_exact_route_and_authority_and_accepts_deleted_or_absent() {
-    for (status, expected) in [
-        ("204 No Content", DeleteOutcome::Deleted),
-        ("404 Not Found", DeleteOutcome::AlreadyAbsent),
+    for (status, body, expected) in [
+        ("204 No Content", "", DeleteOutcome::Deleted),
+        (
+            "404 Not Found",
+            UNKNOWN_MESSAGE,
+            DeleteOutcome::AlreadyAbsent,
+        ),
     ] {
         let (base, server) = scripted_server(vec![
             ("200 OK".into(), live_message()),
-            (status.into(), String::new()),
+            (status.into(), body.into()),
         ]);
         let client = DiscordDeleteClient::for_test(&base).unwrap();
         let result = runtime().block_on(client.delete_owned(
@@ -425,7 +430,7 @@ fn delete_rechecks_reviewed_content_and_timestamp_before_mutation() {
 
 #[test]
 fn missing_live_message_is_not_counted_as_an_already_successful_delete() {
-    let (base, server) = scripted_server(vec![("404 Not Found".into(), String::new())]);
+    let (base, server) = scripted_server(vec![("404 Not Found".into(), UNKNOWN_MESSAGE.into())]);
     let runtime = runtime();
     let client = DiscordDeleteClient::for_test(&base).unwrap();
 
@@ -443,6 +448,43 @@ fn missing_live_message_is_not_counted_as_an_already_successful_delete() {
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].starts_with("GET "));
+}
+
+#[test]
+fn non_message_404_never_proves_exact_absence_on_get_or_delete() {
+    let oversized = format!(r#"{{"code":10008,"message":"{}"}}"#, "x".repeat(4096));
+    for body in [
+        r#"{"code":10003,"message":"Unknown Channel"}"#,
+        "",
+        "invalid",
+        "{}",
+        "[10008]",
+        r#"{"code":"10008"}"#,
+        r#"{"code":10003,"code":10008}"#,
+        oversized.as_str(),
+    ] {
+        let (result, request) = run_verify("404 Not Found", &[], body);
+        assert_eq!(result, Err(DiscordDeleteError::Permanent));
+        assert!(request.starts_with("GET "));
+
+        let (base, server) = scripted_server(vec![
+            ("200 OK".into(), live_message()),
+            ("404 Not Found".into(), body.into()),
+        ]);
+        let client = DiscordDeleteClient::for_test(&base).unwrap();
+        assert_eq!(
+            runtime().block_on(client.delete_owned(
+                "9007199254741101",
+                "1985931830091579393",
+                "9007199254741001",
+                &binding(),
+                TOKEN,
+                &AtomicBool::new(false),
+            )),
+            Err(DiscordDeleteError::Permanent)
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
 }
 
 #[test]
@@ -590,8 +632,10 @@ fn server_failures_retry_a_bounded_number_of_times_and_end_uncertain() {
 #[test]
 fn lost_delete_response_stays_uncertain_on_absence_or_a_later_rate_limit() {
     for (extra_check, status, body) in [
+        (false, "404 Not Found", UNKNOWN_MESSAGE),
         (false, "404 Not Found", ""),
         (false, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
+        (true, "404 Not Found", UNKNOWN_MESSAGE),
         (true, "404 Not Found", ""),
         (true, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
     ] {

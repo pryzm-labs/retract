@@ -686,7 +686,7 @@ fn failed_foundation_transaction_leaves_session_context_absent() {
     let directory = tempfile::tempdir().unwrap();
     let profile_path = directory.path().join("profile");
     let store = open_telegram_store(&profile_path, "failing-profile");
-    std::fs::create_dir(profile_path.join("jobs.enc.tmp")).unwrap();
+    std::fs::rename(&profile_path, directory.path().join("unavailable-profile")).unwrap();
     let binding = SessionBinding::default();
     let identity = verified_identity(TelegramEnvironment::Production, 42, 0x601);
     binding

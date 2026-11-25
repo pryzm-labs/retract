@@ -231,6 +231,9 @@ impl ScopedRepository {
         for job in &jobs {
             if let Some(old) = expected.1.iter().find(|j| j.id == job.id)
                 && (job.next_batch < old.next_batch
+                    || !job
+                        .acknowledged_effects
+                        .starts_with(&old.acknowledged_effects)
                     || job.counters.deleted < old.counters.deleted
                     || job.counters.already_absent.is_some()
                         != old.counters.already_absent.is_some()
@@ -295,7 +298,8 @@ pub fn block_foreign_jobs(store: &FoundationStore, scope: &Scope) -> Result<(), 
         for job in &mut state.jobs {
             if scope != &job.scope && !job.status.is_terminal() {
                 if job.status == retract_domain::JobStatus::Running {
-                    job.status = if job.counters.deleted > 0 {
+                    job.status = if job.counters.deleted > 0 || !job.acknowledged_effects.is_empty()
+                    {
                         retract_domain::JobStatus::Partial
                     } else {
                         retract_domain::JobStatus::Failed

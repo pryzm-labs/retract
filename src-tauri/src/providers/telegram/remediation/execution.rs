@@ -1,4 +1,6 @@
 use super::*;
+use retract_domain::ExpectedEffect;
+
 impl TelegramCleanup {
     #[cfg(test)]
     pub(super) async fn pause_next_mutation(&self) -> Arc<TestMutationPause> {
@@ -130,11 +132,7 @@ impl TelegramCleanup {
                         if let Some(job) = jobs.get_mut(&job_id)
                             && !job.status.is_terminal()
                         {
-                            job.status = if job.deleted > 0 {
-                                JobStatus::Partial
-                            } else {
-                                JobStatus::Failed
-                            };
+                            job.status = job.failure_status();
                             job.clear_retry();
                             job.updated_at = Utc::now();
                             push_error_once(job, error_code(&error));
@@ -165,7 +163,12 @@ impl TelegramCleanup {
             .and_then(|job| job.retry_at);
         if let Some(deadline) = retry_at
             && self
-                .wait_until_retry(job_id, cancellation, deadline)
+                .wait_until_retry(
+                    job_id,
+                    cancellation,
+                    tokio::time::Instant::now()
+                        + (deadline - Utc::now()).to_std().unwrap_or_default(),
+                )
                 .await?
         {
             return Ok(());
@@ -303,8 +306,8 @@ impl TelegramCleanup {
                 match result {
                     Ok(()) => break,
                     Err(error) => {
-                        if let Some(seconds) = telegram_retry_after(&error) {
-                            if self.wait_for_retry(job_id, cancellation, seconds).await? {
+                        if let Some(retry) = telegram_retry_after(&error) {
+                            if self.wait_for_retry(job_id, cancellation, retry).await? {
                                 return Ok(());
                             }
                             continue;
@@ -394,6 +397,8 @@ impl TelegramCleanup {
                         self.transition(|_, jobs| {
                             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
                             job.next_batch = 1;
+                            job.acknowledged_effects
+                                .push(ExpectedEffect::RemovedForAllParticipants);
                             job.updated_at = Utc::now();
                             Ok(())
                         })
@@ -401,8 +406,8 @@ impl TelegramCleanup {
                         break;
                     }
                     Err(error) => {
-                        if let Some(seconds) = telegram_retry_after(&error) {
-                            if self.wait_for_retry(job_id, cancellation, seconds).await? {
+                        if let Some(retry) = telegram_retry_after(&error) {
+                            if self.wait_for_retry(job_id, cancellation, retry).await? {
                                 return Ok(true);
                             }
                             continue;
@@ -427,8 +432,8 @@ impl TelegramCleanup {
             {
                 Ok(cancelled) => return Ok(cancelled),
                 Err(error) => {
-                    if let Some(seconds) = telegram_retry_after(&error) {
-                        if self.wait_for_retry(job_id, cancellation, seconds).await? {
+                    if let Some(retry) = telegram_retry_after(&error) {
+                        if self.wait_for_retry(job_id, cancellation, retry).await? {
                             return Ok(true);
                         }
                         continue;
@@ -456,7 +461,15 @@ impl TelegramCleanup {
             return Ok(false);
         };
 
-        let refreshed = if current.capabilities.can_leave_chat {
+        let already_left = self
+            .jobs
+            .read()
+            .await
+            .get(&job_id)
+            .ok_or(AppError::NotFound)?
+            .acknowledged_effects
+            .contains(&ExpectedEffect::MembershipRemoved);
+        let refreshed = if current.capabilities.can_leave_chat && !already_left {
             let Some(result) = self
                 .guarded_mutation(job_id, cancellation, || self.mutation.leave_chat(chat_id))
                 .await?
@@ -466,11 +479,8 @@ impl TelegramCleanup {
             result?;
             // Membership removal is an acknowledged compound step. A failed
             // required save here must prevent the following self-removal call.
-            self.transition(|_, jobs| {
-                jobs.get_mut(&job_id).ok_or(AppError::NotFound)?.updated_at = Utc::now();
-                Ok(())
-            })
-            .await?;
+            self.acknowledge_chat_effect(job_id, ExpectedEffect::MembershipRemoved)
+                .await?;
             if self.stop_if_cancelled(job_id, cancellation).await? {
                 return Ok(true);
             }
@@ -499,10 +509,26 @@ impl TelegramCleanup {
                     return Ok(true);
                 };
                 result?;
+                self.acknowledge_chat_effect(job_id, ExpectedEffect::RemovedForCurrentAccountOnly)
+                    .await?;
                 Ok(false)
             }
             Some(_) => Err(AppError::Gateway("CHAT_DELETE_FOR_SELF_FORBIDDEN".into())),
         }
+    }
+
+    async fn acknowledge_chat_effect(
+        &self,
+        job_id: Uuid,
+        effect: ExpectedEffect,
+    ) -> Result<(), AppError> {
+        self.transition(|_, jobs| {
+            let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
+            job.acknowledged_effects.push(effect);
+            job.updated_at = Utc::now();
+            Ok(())
+        })
+        .await
     }
 
     pub(super) async fn finish_cancelled(&self, job_id: Uuid) -> Result<(), AppError> {
@@ -534,27 +560,55 @@ impl TelegramCleanup {
         &self,
         job_id: Uuid,
         cancellation: &TelegramJobControl,
-        seconds: u64,
+        retry: TelegramRetry,
     ) -> Result<bool, AppError> {
-        let deadline = Utc::now() + chrono::Duration::seconds(seconds.min(86400) as i64);
+        const MAX_AUTOMATIC_WAIT_SECONDS: u64 = 86_400;
+        let now = Utc::now();
+        let seconds = match retry {
+            TelegramRetry::After(seconds) => Some(seconds),
+            TelegramRetry::UnknownDuration => None,
+        };
+        let deadline = seconds.and_then(|seconds| retry_deadline(now, seconds));
+        let supported = seconds.filter(|s| *s <= MAX_AUTOMATIC_WAIT_SECONDS && deadline.is_some());
+        // Elapsed time drives the live wait so system clock changes cannot shorten it.
+        let wake_at = supported.map(|s| tokio::time::Instant::now() + Duration::from_secs(s));
         self.transition(|_, jobs| {
             let job = jobs.get_mut(&job_id).ok_or(AppError::NotFound)?;
-            job.status = JobStatus::Queued;
-            job.retry_after_seconds = Some(seconds);
-            job.retry_at = Some(deadline);
-            job.updated_at = Utc::now();
+            if job.status.is_terminal() {
+                return Ok(());
+            }
+            job.status = if wake_at.is_some() {
+                JobStatus::Queued
+            } else {
+                job.failure_status()
+            };
+            job.retry_after_seconds = supported;
+            job.retry_at = if supported.is_some() { deadline } else { None };
+            job.updated_at = now;
             push_error_once(job, "telegram_rate_limited");
+            // A stopped job retains the provider deadline as a diagnostic without scheduling a retry.
+            job.scoped_diagnostics = super::super::normalize::job_diagnostics(job);
+            if let Some(diagnostic) = job
+                .scoped_diagnostics
+                .iter_mut()
+                .find(|d| d.code == ErrorCode::RateLimited)
+            {
+                diagnostic.retry_at = deadline;
+            }
             Ok(())
         })
         .await?;
-        self.wait_until_retry(job_id, cancellation, deadline).await
+        match wake_at {
+            Some(wake_at) => self.wait_until_retry(job_id, cancellation, wake_at).await,
+            None => Ok(true),
+        }
     }
 
-    pub(super) async fn wait_until_retry(
+    async fn wait_until_retry(
         &self,
         job_id: Uuid,
         cancellation: &TelegramJobControl,
-        deadline: chrono::DateTime<Utc>,
+        wake_at: tokio::time::Instant,
     ) -> Result<bool, AppError> {
         loop {
             if cancellation.cancelled.load(Ordering::Acquire) {
@@ -562,9 +616,7 @@ impl TelegramCleanup {
                 return Ok(true);
             }
             self.check_context()?;
-            let Ok(remaining) = (deadline - Utc::now()).to_std() else {
-                break;
-            };
+            let remaining = wake_at.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
@@ -600,7 +652,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
     type Target = i64;
     type Batch = cleaner_domain::DeletionBatch;
     type Error = AppError;
-    type Retry = u64;
+    type Retry = TelegramRetry;
     fn targets<'a>(&self, batch: &'a Self::Batch) -> &'a [i64] {
         &batch.message_ids
     }
@@ -634,7 +686,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
         };
         result
     }
-    fn retry(&self, error: &AppError) -> Option<u64> {
+    fn retry(&self, error: &AppError) -> Option<TelegramRetry> {
         telegram_retry_after(error)
     }
     fn fatal(&self, error: &AppError) -> bool {
@@ -643,9 +695,9 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
     fn uncertain(&self, error: &AppError) -> bool {
         error_code(error) == "ambiguous_outcome"
     }
-    async fn wait(&self, seconds: u64) -> Result<bool, AppError> {
+    async fn wait(&self, retry: TelegramRetry) -> Result<bool, AppError> {
         self.service
-            .wait_for_retry(self.job_id, self.cancellation, seconds)
+            .wait_for_retry(self.job_id, self.cancellation, retry)
             .await
     }
     async fn progress(
@@ -678,11 +730,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
                     push_error_once(job, error_code(error));
                 }
                 if fatal {
-                    job.status = if job.deleted > 0 {
-                        JobStatus::Partial
-                    } else {
-                        JobStatus::Failed
-                    };
+                    job.status = job.failure_status();
                 }
                 job.updated_at = Utc::now();
                 Ok(())

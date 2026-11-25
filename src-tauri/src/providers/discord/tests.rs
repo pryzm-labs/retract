@@ -794,6 +794,7 @@ fn discord_rejects_all_executable_recipes_and_job_validation() {
         scope: scope(2),
         dirty_refs: vec![],
         status: JobStatus::Queued,
+        acknowledged_effects: Vec::new(),
         counters: JobCounters::default(),
         next_batch: 0,
         retry_at: None,

@@ -344,6 +344,7 @@ impl ReviewedLifecycle for FrozenLifecycle {
             scope: context.scope.clone(),
             dirty_refs: self.0.io.dirty_refs(&plan)?,
             status: JobStatus::Queued,
+            acknowledged_effects: Vec::new(),
             counters: JobCounters {
                 selected: plan.targets.len() as u64,
                 eligible: plan.targets.len() as u64,

@@ -187,6 +187,20 @@ impl TelegramStateRepository for FoundationTelegramRepository {
             legacy.uncertain =
                 usize::try_from(job.counters.uncertain).map_err(|_| invalid_recipe())?;
             legacy.next_batch = job.next_batch as usize;
+            legacy.acknowledged_effects = job.acknowledged_effects.clone();
+            // Historical jobs already checkpointed a successful broad clear at phase one.
+            if legacy.operation == cleaner_domain::PlanOperation::ClearHistoryAndLeave
+                && legacy.next_batch == 1
+                && legacy.acknowledged_effects.is_empty()
+                && job.started_authorized
+            {
+                legacy
+                    .acknowledged_effects
+                    .push(retract_domain::ExpectedEffect::RemovedForAllParticipants);
+                if legacy.status == JobStatus::Failed {
+                    legacy.status = JobStatus::Partial;
+                }
+            }
             legacy.retry_at = job.retry_at;
             legacy.retry_after_seconds = job
                 .retry_at
@@ -203,7 +217,7 @@ impl TelegramStateRepository for FoundationTelegramRepository {
             if !legacy.status.is_terminal() && !can_resume {
                 legacy.retry_at = None;
                 legacy.retry_after_seconds = None;
-                legacy.status = if legacy.deleted > 0 && job.started_authorized {
+                legacy.status = if legacy.has_acknowledged_progress() && job.started_authorized {
                     JobStatus::Partial
                 } else {
                     JobStatus::Failed

@@ -38,6 +38,8 @@ struct DemoData {
 pub(crate) enum TestFailurePoint {
     DeleteMessagesForEveryone,
     ClearHistoryForEveryone,
+    LeaveChat,
+    RemoveChatForSelf,
 }
 
 pub struct DemoGateway {
@@ -63,7 +65,7 @@ pub struct DemoGateway {
     #[cfg(test)]
     chat_by_id_calls: Mutex<Vec<i64>>,
     #[cfg(test)]
-    rate_limit_injections: Mutex<Vec<TestFailurePoint>>,
+    failure_injections: Mutex<Vec<(TestFailurePoint, &'static str)>>,
     #[cfg(test)]
     injected_failures_seen: AtomicUsize,
     #[cfg(test)]
@@ -97,7 +99,7 @@ impl DemoGateway {
             #[cfg(test)]
             chat_by_id_calls: Mutex::new(Vec::new()),
             #[cfg(test)]
-            rate_limit_injections: Mutex::new(Vec::new()),
+            failure_injections: Mutex::new(Vec::new()),
             #[cfg(test)]
             injected_failures_seen: AtomicUsize::new(0),
             #[cfg(test)]
@@ -156,7 +158,7 @@ impl DemoGateway {
         self.delete_calls.lock().await.clear();
         self.current_reach_calls.lock().await.clear();
         self.chat_by_id_calls.lock().await.clear();
-        self.rate_limit_injections.lock().await.clear();
+        self.failure_injections.lock().await.clear();
         self.injected_failures_seen.store(0, Ordering::Release);
     }
 
@@ -182,20 +184,28 @@ impl DemoGateway {
 
     #[cfg(test)]
     pub(crate) async fn inject_rate_limit_once(&self, point: TestFailurePoint) {
-        self.rate_limit_injections.lock().await.push(point);
+        self.inject_failure_once(point, "FLOOD_WAIT_1").await;
     }
 
     #[cfg(test)]
-    async fn take_rate_limit(&self, point: TestFailurePoint) -> bool {
-        let mut injections = self.rate_limit_injections.lock().await;
-        let Some(index) = injections.iter().position(|candidate| *candidate == point) else {
-            return false;
+    pub(crate) async fn inject_failure_once(&self, point: TestFailurePoint, error: &'static str) {
+        self.failure_injections.lock().await.push((point, error));
+    }
+
+    #[cfg(test)]
+    async fn check_injected_failure(&self, point: TestFailurePoint) -> Result<(), AppError> {
+        let mut injections = self.failure_injections.lock().await;
+        let Some(index) = injections
+            .iter()
+            .position(|(candidate, _)| *candidate == point)
+        else {
+            return Ok(());
         };
-        injections.remove(index);
+        let (_, error) = injections.remove(index);
         drop(injections);
         self.injected_failures_seen.fetch_add(1, Ordering::AcqRel);
         self.injected_failure_notify.notify_one();
-        true
+        Err(AppError::Gateway(error.into()))
     }
 
     #[cfg(test)]
@@ -523,12 +533,8 @@ impl TelegramMutation for DemoGateway {
                 .lock()
                 .await
                 .push((chat_id, message_ids.to_vec()));
-            if self
-                .take_rate_limit(TestFailurePoint::DeleteMessagesForEveryone)
-                .await
-            {
-                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
-            }
+            self.check_injected_failure(TestFailurePoint::DeleteMessagesForEveryone)
+                .await?;
         }
         if message_ids.is_empty() || message_ids.len() > 100 {
             return Err(AppError::Gateway("invalid deletion batch".into()));
@@ -560,12 +566,8 @@ impl TelegramMutation for DemoGateway {
         {
             self.record(format!("clear_history_for_everyone:{chat_id}"))
                 .await;
-            if self
-                .take_rate_limit(TestFailurePoint::ClearHistoryForEveryone)
-                .await
-            {
-                return Err(AppError::Gateway("FLOOD_WAIT_1".into()));
-            }
+            self.check_injected_failure(TestFailurePoint::ClearHistoryForEveryone)
+                .await?;
         }
         let mut data = self.data.write().await;
         let chat = data
@@ -614,7 +616,11 @@ impl TelegramMutation for DemoGateway {
 
     async fn remove_chat_for_self(&self, chat_id: i64) -> Result<(), AppError> {
         #[cfg(test)]
-        self.record(format!("remove_chat_for_self:{chat_id}")).await;
+        {
+            self.record(format!("remove_chat_for_self:{chat_id}")).await;
+            self.check_injected_failure(TestFailurePoint::RemoveChatForSelf)
+                .await?;
+        }
         let mut data = self.data.write().await;
         let index = data
             .chats
@@ -648,7 +654,11 @@ impl TelegramMutation for DemoGateway {
 
     async fn leave_chat(&self, chat_id: i64) -> Result<(), AppError> {
         #[cfg(test)]
-        self.record(format!("leave_chat:{chat_id}")).await;
+        {
+            self.record(format!("leave_chat:{chat_id}")).await;
+            self.check_injected_failure(TestFailurePoint::LeaveChat)
+                .await?;
+        }
         let mut data = self.data.write().await;
         let chat = data
             .chats

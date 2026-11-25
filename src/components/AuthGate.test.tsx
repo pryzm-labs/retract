@@ -46,7 +46,7 @@ const nonPhoneStages: AuthSnapshot["stage"][] = [
 
 function renderGate(auth: AuthSnapshot, onRefresh = vi.fn().mockResolvedValue(undefined)) {
   const view = render(
-    <AuthGate auth={auth} onRefresh={onRefresh} onOpenSettings={vi.fn()} />
+    <AuthGate auth={auth} onRefresh={onRefresh} onOpenSettings={vi.fn()} onOpenSources={vi.fn()} />
   );
   return { ...view, onRefresh };
 }

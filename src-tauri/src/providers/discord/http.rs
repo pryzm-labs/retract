@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use super::session::valid_user_token;
 
 const DISCORD_API: &str = "https://discord.com/api/v10/";
-const MAX_RATE_LIMIT_BODY: usize = 4096;
+const MAX_ERROR_BODY: usize = 4096;
 const MAX_LIVE_MESSAGE_BODY: usize = 64 * 1024;
 pub(super) const MAX_JOB_WAIT_MILLIS: u64 = 300_000;
 const MAX_TRANSIENT_ATTEMPTS: usize = 3;
@@ -345,7 +345,9 @@ impl DiscordDeleteClient {
             .map_err(|_| DiscordDeleteError::Ambiguous)?;
         match response.status().as_u16() {
             204 => Ok(DeleteOutcome::Deleted),
-            404 => Ok(DeleteOutcome::AlreadyAbsent),
+            404 => confirm_unknown_message(response, cancelled)
+                .await
+                .map(|()| DeleteOutcome::AlreadyAbsent),
             401 => Err(DiscordDeleteError::Authentication),
             403 => Err(DiscordDeleteError::Permission),
             429 => Err(self
@@ -434,7 +436,10 @@ impl DiscordDeleteClient {
             }
             401 => Err(DiscordDeleteError::Authentication),
             403 => Err(DiscordDeleteError::Permission),
-            404 => Err(DiscordDeleteError::NotFound),
+            404 => {
+                confirm_unknown_message(response, cancelled).await?;
+                Err(DiscordDeleteError::NotFound)
+            }
             500..=599 => Err(DiscordDeleteError::Transient),
             _ => Err(DiscordDeleteError::Permanent),
         }
@@ -505,7 +510,7 @@ impl DiscordDeleteClient {
             #[serde(default)]
             global: bool,
         }
-        let parsed = match bounded_body(response, MAX_RATE_LIMIT_BODY, cancelled).await {
+        let parsed = match bounded_body(response, MAX_ERROR_BODY, cancelled).await {
             Ok(bytes) => serde_json::from_slice::<RateLimit>(&bytes).ok(),
             Err(_) => None,
         };
@@ -529,6 +534,34 @@ impl DiscordDeleteClient {
         limits
             .check(channel, now)
             .expect_err("a new rate limit blocks requests")
+    }
+}
+
+async fn confirm_unknown_message(
+    response: reqwest::Response,
+    cancelled: &AtomicBool,
+) -> Result<(), DiscordDeleteError> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: u32,
+    }
+    let bytes = bounded_body(response, MAX_ERROR_BODY, cancelled)
+        .await
+        .map_err(|error| {
+            if error == DiscordDeleteError::Cancelled {
+                error
+            } else {
+                DiscordDeleteError::Permanent
+            }
+        })?;
+    // The provider's numeric code belongs to a JSON object. Serde also
+    // accepts positional arrays for a struct unless the shape is checked.
+    if bytes.trim_ascii_start().starts_with(b"{")
+        && serde_json::from_slice::<ErrorBody>(&bytes).is_ok_and(|body| body.code == 10008)
+    {
+        Ok(())
+    } else {
+        Err(DiscordDeleteError::Permanent)
     }
 }
 

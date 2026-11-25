@@ -128,10 +128,7 @@ impl<'de> Deserialize<'de> for Posts {
                     {
                         return Err(A::Error::custom("invalid post identity"));
                     }
-                    if post.retweeted
-                        || post.retweeted_status.is_some()
-                        || post.full_text.starts_with("RT @")
-                    {
+                    if post.retweeted || post.retweeted_status.is_some() {
                         continue;
                     }
                     if post.full_text.len() > 64 * 1024 {

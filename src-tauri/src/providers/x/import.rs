@@ -65,7 +65,7 @@ pub(crate) fn import_file(
         avatar: None,
         fingerprint: fingerprint.clone(),
         schema_profile: profile(),
-        parser_policy: "x.coordinator.v1".into(),
+        parser_policy: "x.coordinator.v2".into(),
         observed_at: Utc::now(),
     }))?;
     let scope = resolution.checkpoint.scope.clone();
@@ -108,7 +108,7 @@ pub(crate) fn import_file(
             scope: scope.clone(),
             resource: feed,
             kind: ConversationKind::AccountFeed,
-            title: "Authored posts".into(),
+            title: "Archived posts".into(),
             parent_id: None,
             participant_count: None,
             participants: vec![],

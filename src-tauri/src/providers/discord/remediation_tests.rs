@@ -373,6 +373,7 @@ fn historical_discord_plans_reopen_without_resealing_or_replaying() {
             scope: context.scope.clone(),
             dirty_refs: historical.targets.clone(),
             status: JobStatus::Queued,
+            acknowledged_effects: Vec::new(),
             counters: JobCounters {
                 selected: 1,
                 eligible: 1,

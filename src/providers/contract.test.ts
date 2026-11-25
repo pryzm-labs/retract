@@ -188,7 +188,7 @@ describe("exact Rust/TypeScript v2 shapes", () => {
     const conversation = decodeConversation(wireChat(fixture.chats[0]), lifecycleContext.scope);
     const plan = decodePlan(wirePlan(fixture.context, [fixture.messages[0].ref]), lifecycleContext.scope);
     const wire = wireJob(fixture.job);
-    const job = decodeJob({ ...wire, counters: { ...wire.counters, alreadyAbsent: 0 } });
+    const job = decodeJob({ ...wire, acknowledgedEffects: ["membership_removed"], counters: { ...wire.counters, alreadyAbsent: 0 } });
     const ref = decodeRef(fixture.messages[0].ref);
     const shapes: Array<[string, string, object]> = [
       ["src-tauri/src/compatibility/model_v2.rs", "BootstrapResponse", bootstrap],

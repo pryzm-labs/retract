@@ -983,7 +983,11 @@ fn stale_binding_rejects_grant_and_execution_without_gateway_mutation() {
 fn failed_plan_save_does_not_publish_review_or_executable_state() {
     tauri::async_runtime::block_on(async {
         let f = fixture();
-        std::fs::create_dir(f._directory.path().join("profile/jobs.enc.tmp")).unwrap();
+        std::fs::rename(
+            f._directory.path().join("profile"),
+            f._directory.path().join("unavailable-profile"),
+        )
+        .unwrap();
         assert!(
             f.service
                 .prepare_selection(PrepareSelectionRequest {
@@ -1744,6 +1748,130 @@ fn post_send_transport_failures_stop_batches_and_compound_cleanup_as_uncertain()
                 recovered.resume_incomplete().await;
                 assert_eq!(f.gateway.delete_calls().await, calls);
             }
+        }
+    });
+}
+
+#[test]
+fn acknowledged_compound_effects_survive_a_downstream_failure() {
+    use crate::demo_gateway::TestFailurePoint;
+
+    tauri::async_runtime::block_on(async {
+        for (chat_id, failure, expected) in [
+            (
+                -1002,
+                TestFailurePoint::LeaveChat,
+                "removed_for_all_participants",
+            ),
+            (
+                -1003,
+                TestFailurePoint::RemoveChatForSelf,
+                "membership_removed",
+            ),
+        ] {
+            let f = fixture();
+            if chat_id == -1003 {
+                // No confirmed message deletions may mask the successful leave.
+                f.gateway
+                    .delete_messages_for_everyone(chat_id, &[31])
+                    .await
+                    .unwrap();
+            }
+            let plan = f
+                .service
+                .prepare_chat_action(super::model::PrepareChatActionRequest {
+                    chat_id,
+                    operation: PlanOperation::LeaveChat,
+                })
+                .await
+                .unwrap();
+            f.gateway
+                .inject_failure_once(failure, "403 FORBIDDEN")
+                .await;
+            let job = start(&f.service, &plan).await;
+            let stopped = terminal(&f.service, job.id).await;
+            assert_eq!(stopped.deleted, 0);
+            assert_eq!(stopped.status, super::model::JobStatus::Partial);
+            let persisted = f.store.snapshot().unwrap().jobs.remove(0);
+            assert_eq!(
+                serde_json::to_value(persisted).unwrap()["acknowledgedEffects"],
+                serde_json::json!([expected])
+            );
+        }
+    });
+}
+
+#[test]
+fn restart_preserves_a_compound_acknowledgment_without_replaying_it() {
+    tauri::async_runtime::block_on(async {
+        for (chat_id, expected, previous_status) in [
+            (
+                -1002,
+                ExpectedEffect::RemovedForAllParticipants,
+                super::model::JobStatus::Running,
+            ),
+            (
+                -1002,
+                ExpectedEffect::RemovedForAllParticipants,
+                super::model::JobStatus::Failed,
+            ),
+            (
+                -1003,
+                ExpectedEffect::MembershipRemoved,
+                super::model::JobStatus::Running,
+            ),
+        ] {
+            let f = fixture();
+            f.service
+                .prepare_chat_action(super::model::PrepareChatActionRequest {
+                    chat_id,
+                    operation: PlanOperation::LeaveChat,
+                })
+                .await
+                .unwrap();
+            let plan = f.repository.load().unwrap().plans.remove(0);
+            let mut job = super::model::JobRecord::new(&plan);
+            job.status = previous_status;
+            if expected == ExpectedEffect::RemovedForAllParticipants {
+                // The older format recorded only the acknowledged clear phase.
+                job.next_batch = 1;
+            } else {
+                job.next_batch = plan.everyone_batches(100).unwrap().len();
+                job.skipped += job.total;
+                job.acknowledged_effects.push(expected);
+            }
+            let snapshot = normalize_job(&f.context.active().scope, &plan, &job, true).unwrap();
+            f.store
+                .transaction(|state| {
+                    state.jobs.push(snapshot);
+                    Ok(())
+                })
+                .unwrap();
+            let repository = Arc::new(
+                FoundationTelegramRepository::new(
+                    f.store.clone(),
+                    f.context.active().scope.clone(),
+                )
+                .unwrap(),
+            );
+            let recovered = TelegramCleanup::new_scoped(
+                f.gateway.clone(),
+                f.gateway.clone(),
+                f.context.clone(),
+                repository,
+            )
+            .unwrap();
+            recovered.resume_incomplete().await;
+            let stopped = terminal(&recovered, job.id).await;
+            assert_eq!(stopped.status, super::model::JobStatus::Partial);
+            assert_eq!(stopped.deleted, 0);
+            assert_eq!(stopped.acknowledged_effects, [expected]);
+            if previous_status == super::model::JobStatus::Running {
+                assert_eq!(stopped.error_codes, ["restart_requires_new_review"]);
+            } else {
+                assert!(stopped.error_codes.is_empty());
+            }
+            assert!(f.gateway.operation_log().await.is_empty());
         }
     });
 }

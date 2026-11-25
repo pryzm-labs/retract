@@ -244,6 +244,8 @@ pub struct JobRecord {
     pub uncertain: usize,
     #[serde(default)]
     pub next_batch: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged_effects: Vec<retract_domain::ExpectedEffect>,
     #[serde(default)]
     pub retry_after_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +273,7 @@ impl JobRecord {
             failed: 0,
             uncertain: 0,
             next_batch: 0,
+            acknowledged_effects: Vec::new(),
             retry_after_seconds: None,
             retry_at: None,
             scoped_diagnostics: Vec::new(),
@@ -284,6 +287,20 @@ impl JobRecord {
     pub(crate) fn backfill_target_chat_ids(&mut self, plan: &DeletionPlan) {
         if self.target_chat_ids.is_empty() {
             self.target_chat_ids = affected_chat_ids(plan);
+        }
+    }
+
+    pub(crate) fn has_acknowledged_progress(&self) -> bool {
+        self.deleted > 0
+            || !self.acknowledged_effects.is_empty()
+            || (self.operation == PlanOperation::ClearHistoryAndLeave && self.next_batch == 1)
+    }
+
+    pub(crate) fn failure_status(&self) -> JobStatus {
+        if self.has_acknowledged_progress() {
+            JobStatus::Partial
+        } else {
+            JobStatus::Failed
         }
     }
 
@@ -473,6 +490,7 @@ mod wire_contract_tests {
             failed: 0,
             uncertain: 0,
             next_batch: 1,
+            acknowledged_effects: Vec::new(),
             retry_after_seconds: None,
             retry_at: None,
             scoped_diagnostics: Vec::new(),

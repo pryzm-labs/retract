@@ -136,7 +136,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
         <span><strong>Import Discord package</strong><small>Choose the ZIP downloaded from Discord</small></span>
       </button>
       <button type="button" className="source-choice" onClick={() => void importX()} disabled={busy || status?.active}>
-        <Upload size={22} /><span><strong>Import X archive</strong><small>Search authored posts offline</small></span>
+        <Upload size={22} /><span><strong>Import X archive</strong><small>Search archived posts offline</small></span>
       </button>
     </div>
     {importingX && <div role="status">Importing X archive… <button type="button" onClick={() => void api.cancelXImport(context).catch(onError)}>Cancel</button></div>}
@@ -164,7 +164,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     {sources.some(source => source.scope.provider === "x") && <section className="available-sources">
       <p className="eyebrow">IMPORTED X ACCOUNTS</p>
       {sources.filter(source => source.scope.provider === "x").map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
-        <Archive size={17} /><span><strong>{source.accountLabel}</strong><small>Read-only X archive</small></span>
+        <Archive size={17} /><span><strong>{source.accountLabel}</strong><small>Read-only X archive{source.importedAt && ` · Imported ${new Date(source.importedAt).toLocaleString()}`}</small></span>
       </button>)}
     </section>}
     <p className="source-privacy-note">Archive contents stay on this device. Importing does not connect to Discord or delete anything.</p>

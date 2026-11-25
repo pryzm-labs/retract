@@ -142,21 +142,121 @@ async fn wait_for_current_reach_check(gateway: &DemoGateway) {
 }
 
 #[test]
-fn extracts_bounded_telegram_retry_delays() {
+fn extracts_full_telegram_retry_delays() {
+    assert_eq!(
+        telegram_retry_after(&AppError::Gateway(
+            "429 Too Many Requests: retry after 429".into()
+        )),
+        Some(TelegramRetry::After(429))
+    );
     assert_eq!(
         telegram_retry_after(&AppError::Gateway(
             "429 Too Many Requests: retry after 17".into()
         )),
-        Some(17)
+        Some(TelegramRetry::After(17))
     );
     assert_eq!(
         telegram_retry_after(&AppError::Gateway("FLOOD_WAIT_999999".into())),
-        Some(86_400)
+        Some(TelegramRetry::After(999_999))
+    );
+    for unknown in [
+        "429 Too Many Requests",
+        "429 retry after -3",
+        "FLOOD_WAIT_18446744073709551616",
+    ] {
+        assert_eq!(
+            telegram_retry_after(&AppError::Gateway(unknown.into())),
+            Some(TelegramRetry::UnknownDuration)
+        );
+    }
+    assert_eq!(
+        telegram_retry_after(&AppError::Gateway("400 MESSAGE_ID_429_INVALID".into())),
+        None
     );
     assert_eq!(
         telegram_retry_after(&AppError::Gateway("CHAT_ADMIN_REQUIRED".into())),
         None
     );
+}
+
+#[test]
+fn retry_deadline_controls_the_frozen_mutation_worker() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            for (error, delay) in [
+                ("429 Too Many Requests: retry after 429", 429),
+                ("420 FLOOD_WAIT_86401", 86_401),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let gateway = Arc::new(DemoGateway::new());
+                let service = TelegramCleanup::new(
+                    gateway.clone(),
+                    SecureJobStore::with_test_key(directory.path().join("jobs.enc"), [64; 32]),
+                )
+                .unwrap();
+                let prepared = service
+                    .prepare_selection(PrepareSelectionRequest {
+                        message_refs: vec![MessageRef {
+                            chat_id: 101,
+                            message_id: 1,
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                let plan = service.plans.read().await[&prepared.id].clone();
+                let job = JobRecord::new(&plan);
+                service.jobs.write().await.insert(job.id, job.clone());
+                service
+                    .cancellation
+                    .lock()
+                    .await
+                    .insert(job.id, Arc::new(TelegramJobControl::default()));
+                gateway.clear_test_traces().await;
+                gateway
+                    .inject_failure_once(TestFailurePoint::DeleteMessagesForEveryone, error)
+                    .await;
+                let worker = tokio::spawn({
+                    let service = service.clone();
+                    async move { service.run_job(job.id).await }
+                });
+                gateway.wait_for_injected_failure(1).await;
+                tokio::task::yield_now().await;
+                if delay == 429 {
+                    let waiting = service.legacy_jobs().await.remove(0);
+                    assert_eq!(waiting.retry_after_seconds, Some(429));
+                    tokio::time::advance(Duration::from_secs(428)).await;
+                    tokio::task::yield_now().await;
+                    assert_eq!(gateway.delete_calls().await.len(), 1);
+                    tokio::time::advance(Duration::from_secs(1)).await;
+                } else {
+                    assert!(
+                        worker.is_finished(),
+                        "an unsupported wait must stop automatic execution"
+                    );
+                    tokio::time::advance(Duration::from_secs(86_401)).await;
+                }
+                worker.await.unwrap();
+                let finished = service.legacy_jobs().await.remove(0);
+                if delay == 429 {
+                    assert_eq!(finished.status, JobStatus::Completed);
+                    assert_eq!(gateway.delete_calls().await.len(), 2);
+                    assert_eq!(gateway.current_reach_calls().await, [(101, 1), (101, 1)]);
+                } else {
+                    assert_eq!(finished.status, JobStatus::Failed);
+                    assert_eq!(gateway.delete_calls().await.len(), 1);
+                    assert_eq!(finished.error_codes, ["telegram_rate_limited"]);
+                    assert!(finished.retry_at.is_none());
+                    assert_eq!(
+                        finished.scoped_diagnostics[0].retry_at,
+                        Some(finished.updated_at + chrono::Duration::seconds(86_401))
+                    );
+                }
+            }
+        });
 }
 
 #[test]

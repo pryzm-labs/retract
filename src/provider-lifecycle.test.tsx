@@ -19,6 +19,12 @@ vi.mock("@retract/api", async () => import("./api.desktop"));
 type FixtureMessage = typeof fixture.messages[number];
 type FixtureContext = typeof fixture.context;
 
+const xContext = { ...fixture.context, scope: { ...fixture.context.scope, provider: "x" } };
+const archiveInventory = {
+  active: false, progress: null, importScope: null, retryAvailable: false, failureCode: null, warningDetails: [],
+  sources: [{ scope: xContext.scope, accountLabel: "Saved X archive", warningCount: 0 }]
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -54,6 +60,7 @@ function installTransport(options: {
         return next;
       }
       case "get_connection_settings_v2": return envelope(fixture.connectionSettings);
+      case "get_discord_import_v2": return envelope(archiveInventory);
       case "search_messages_v2": {
         if (captured.scope.provider === "x") {
           const scope = decodeScope(captured.scope);
@@ -108,13 +115,71 @@ describe("provider foundation lifecycle migration gate", () => {
   });
 
   it("opens X archives as searchable read-only sources", async () => {
-    const context = { ...fixture.context, scope: { ...fixture.context.scope, provider: "x" } };
-    installTransport({ context });
+    installTransport({ context: xContext });
     render(<App />);
     expect(await screen.findByRole("searchbox", { name: "Search archived posts" })).toBeVisible();
     expect(await screen.findByText("Synthetic authored post")).toBeVisible();
     expect(screen.queryByText(/delete for everyone/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /connection settings/i })).toBeNull();
+  });
+
+  it("keeps an archive query and privacy filter out of every Telegram search after switching through settings", async () => {
+    const transport = installTransport({ context: xContext, switchContext: fixture.context, switchMessages: [fixture.messages[0]] });
+    render(<App />);
+    const archiveQuery = await screen.findByRole("searchbox", { name: "Search archived posts" });
+    const sentinel = "archive-only-synthetic-term";
+    fireEvent.change(archiveQuery, { target: { value: sentinel } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Privacy findings only" }));
+    await waitFor(() => expect(transport).toHaveBeenCalledWith("search_messages_v2", {
+      request: expect.objectContaining({ context: xContext, payload: expect.objectContaining({ query: sentinel }) })
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose data source" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Telegram/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save settings" }));
+    expect(await screen.findByText("First lossless target")).toBeVisible();
+    const searches = transport.mock.calls.filter(([command, args]) =>
+      command === "search_messages_v2" && (args as { request: { context: FixtureContext } }).request.context.scope.provider === "telegram");
+    expect(searches.length).toBeGreaterThan(0);
+    for (const [, args] of searches) {
+      expect(args).toMatchObject({ request: { payload: { query: "", filters: { payload: { privacyScan: false } } } } });
+    }
+  });
+
+  it.each([true, false])("reopens an archive without signing in to Telegram (settings configured: %s)", async configured => {
+    const transport = installTransport({ context: xContext });
+    const archiveTransport = transport.getMockImplementation()!;
+    let archiveSelected = false;
+    transport.mockImplementation(async (command, args) => {
+      if (archiveSelected) return archiveTransport(command, args);
+      const envelope = (payload: unknown) => ({ contractVersion: 2, context: null, payload });
+      if (command === "get_bootstrap_snapshot_v2") return envelope({
+        identity: { state: "unavailable" },
+        auth: configured ? { schema: "telegram.auth", version: 1, payload: { stage: "waiting_for_phone", hint: null, qrLink: null } } : null,
+        catalog: { phase: "idle", total: 0, processed: 0 }, chats: [], recentJobs: [], legacyHistory: []
+      });
+      if (command === "get_connection_settings_v2") return envelope(configured ? fixture.connectionSettings :
+        { ...fixture.connectionSettings, apiId: null, apiHashConfigured: false, setupComplete: false });
+      if (command === "get_discord_import_v2") return envelope(archiveInventory);
+      if (command === "select_archive_v2") {
+        expect(args).toMatchObject({ request: { context: null, payload: { scope: xContext.scope } } });
+        archiveSelected = true;
+        return archiveTransport("get_snapshot_v2", args);
+      }
+      throw new Error(`Unexpected signed-out command: ${command}`);
+    });
+    render(<App />);
+    if (configured) {
+      expect(await screen.findByRole("heading", { name: "Connect your account" })).toBeVisible();
+    } else {
+      fireEvent.click(await screen.findByRole("button", { name: /Telegram/ }));
+      expect(await screen.findByRole("heading", { name: "Connect Telegram" })).toBeVisible();
+    }
+    const controls = configured ? screen : within(screen.getByRole("dialog"));
+    fireEvent.click(controls.getByRole("button", { name: "Choose data source" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Saved X archive/ }));
+    expect(await screen.findByText("Synthetic authored post")).toBeVisible();
+    expect(transport.mock.calls.map(([command]) => command)).not.toContain("submit_auth_v2");
+    expect(transport.mock.calls.map(([command]) => command)).not.toContain("save_connection_settings_v2");
   });
 
   it("keeps identical native targets in different accounts distinct", () => {
@@ -402,7 +467,7 @@ describe("late v2 responses across account and source changes", () => {
     fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
     fireEvent.click(await screen.findByRole("button", { name: "Save settings" }));
     await screen.findByText("Connection settings applied.");
-    fireEvent.change(screen.getByPlaceholderText("Names, phrases, captions, or sensitive details"), { target: { value: "" } });
+    expect(screen.getByPlaceholderText("Names, phrases, captions, or sensitive details")).toHaveValue("");
     fireEvent.click(await screen.findByText(message.preview));
     await act(async () => late.resolve(fixture.messages.slice(0, 2)));
     expect(screen.getByText(message.preview).closest("article")).toHaveClass("is-selected");

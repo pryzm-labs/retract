@@ -11,9 +11,10 @@ interface AuthGateProps {
   auth: AuthSnapshot;
   onRefresh: () => Promise<void>;
   onOpenSettings: () => void;
+  onOpenSources: () => void;
 }
 
-export function AuthGate({ context = null, auth, onRefresh, onOpenSettings }: AuthGateProps) {
+export function AuthGate({ context = null, auth, onRefresh, onOpenSettings, onOpenSources }: AuthGateProps) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +137,7 @@ export function AuthGate({ context = null, auth, onRefresh, onOpenSettings }: Au
         ) : null}
         {error && <div className="auth-error" role="alert">{error}</div>}
 
+        <button type="button" className="cancel-button auth-source-button" onClick={onOpenSources}>Choose data source</button>
         <footer className="auth-privacy"><LockKeyhole size={15} /><span>Codes and passwords go directly from the Rust core to local TDLib and are never persisted by Retract.</span></footer>
       </section>
     </main>

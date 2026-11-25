@@ -161,7 +161,8 @@ it("selects the exact imported X source and exposes saved X accounts", async () 
   vi.spyOn(api, "archiveSources").mockResolvedValue([source, xSource]);
   const select = vi.fn().mockResolvedValue(undefined);
   render(<SourceSetupDialog context={null} telegramConfigured={false} required onClose={() => {}} onTelegram={() => {}} onSelect={select} onError={() => {}} />);
-  expect(await screen.findByRole("button", { name: /X fixture/ })).toBeVisible();
+  const saved = await screen.findByRole("button", { name: /X fixture/ });
+  expect(saved).toHaveTextContent(new Date(xSource.importedAt).toLocaleString());
   fireEvent.click(screen.getByRole("button", { name: /Import X archive/ }));
   await waitFor(() => expect(select).toHaveBeenCalledWith(xSource));
 });

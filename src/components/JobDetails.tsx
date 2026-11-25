@@ -1,8 +1,18 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { JobRecord } from "../types";
-import { combinedDiscordCount, type LegacyHistoryRecord } from "../providers/contract";
+import { combinedDiscordCount, type ExpectedEffect, type LegacyHistoryRecord } from "../providers/contract";
 import { diagnosticMessage } from "./ActionEffects";
+
+const acknowledgedLabels: Record<ExpectedEffect, string> = {
+  removed_for_all_participants: "History cleared for all participants",
+  removed_for_current_account_only: "Conversation removed for your account",
+  membership_removed: "Membership removed",
+  public_content_removed: "Public content removed",
+  container_destroyed: "Conversation permanently destroyed",
+  local_import_removed: "Local import removed",
+  manual_or_unknown: "Effect unverified"
+};
 
 export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRecord; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -39,10 +49,14 @@ export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRec
         return <div key={key} role="group" aria-label={label}><strong>{value === null ? "Not recorded" : value.toLocaleString()}</strong><span>{label}</span></div>;
       })}
     </div>
+    {scoped && !!job.acknowledgedEffects?.length && <section>
+      <h3>Acknowledged effects</h3>
+      <ul aria-label="Acknowledged effects">{job.acknowledgedEffects.map((effect, index) => <li key={index}>{acknowledgedLabels[effect]}</li>)}</ul>
+    </section>}
     {retryAt && <p role="status" aria-label="Retry state">{seconds > 0 ? `Retry in ${seconds} ${seconds === 1 ? "second" : "seconds"}` : "Waiting for provider update"}</p>}
     {job.status === "blocked" && <p className="dialog-lead">Reconnect the original account and source in Connection settings. Review this cleanup again before starting a new action; switching accounts does not move this job.</p>}
     {!scoped && <p className="dialog-lead">Legacy history is preserved. A new review is required. Original account binding and unrecorded counters cannot be recovered from this history.</p>}
-    {job.diagnostics.length > 0 && <ul className="job-diagnostics" aria-label="Job diagnostics">{job.diagnostics.map((diagnostic, index) => <li key={index}>{diagnosticMessage(diagnostic.code)}</li>)}</ul>}
+    {job.diagnostics.length > 0 && <ul className="job-diagnostics" aria-label="Job diagnostics">{job.diagnostics.map((diagnostic, index) => <li key={index}>{diagnosticMessage(diagnostic.code)}{diagnostic.code === "rate_limited" && diagnostic.retryAt && (job.status === "partial" || job.status === "failed") && ` Provider deadline: ${new Date(diagnostic.retryAt).toLocaleString()}.`}</li>)}</ul>}
     <p className="dialog-lead">{combined ? "This job recorded confirmed removals and already-absent messages together." : "Deleted counts confirmed removals."} Skipped items were not executed. Failed and uncertain outcomes are separate. In-flight work may still have taken effect after cancellation or a connection change. Completed effects cannot be undone.</p>
   </dialog>;
 }

@@ -33,6 +33,13 @@ describe("accessible cleanup details", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("shows acknowledged chat effects on a partial job with zero deleted messages", () => {
+    const job = testJob("partial-leave", "partial");
+    renderJobs([{ ...job, acknowledgedEffects: ["membership_removed"] }]);
+    fireEvent.click(screen.getByRole("button", { name: `View details for cleanup job ${job.id}` }));
+    expect(screen.getByRole("list", { name: "Acknowledged effects" })).toHaveTextContent("Membership removed");
+  });
+
   it("preserves the meaning of historical Discord aggregate counts", () => {
     const job = testJob("discord-history", "completed", { total: 2, deleted: 2 });
     job.scope = { ...job.scope, provider: providerKey("discord") };

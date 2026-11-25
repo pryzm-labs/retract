@@ -106,7 +106,7 @@ impl ProviderPayloadValidator for Validator {
         self.validate_resource(&r.resource)?;
         require(
             r.kind == ConversationKind::AccountFeed
-                && r.title == "Authored posts"
+                && matches!(r.title.as_str(), "Archived posts" | "Authored posts")
                 && r.parent_id.is_none()
                 && r.participants.is_empty()
                 && r.participant_count.is_none()

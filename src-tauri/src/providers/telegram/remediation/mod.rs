@@ -6,7 +6,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use super::diagnostics::{error_code, telegram_retry_after};
+use super::diagnostics::{TelegramRetry, error_code, retry_deadline, telegram_retry_after};
 use super::{
     engine_context::{EngineContext, SessionMutation, SessionRead, TelegramStateRepository},
     model::{

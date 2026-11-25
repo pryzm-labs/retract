@@ -3786,7 +3786,8 @@ mod tests {
                 Arc::new(TelegramPayloadValidator),
             )
             .unwrap();
-            std::fs::create_dir(profile.join("jobs.enc.tmp")).unwrap();
+            let unavailable = directory.path().join("unavailable-foundation");
+            std::fs::rename(&profile, &unavailable).unwrap();
             let (gateway, script, _directory) =
                 unverified_scripted_gateway(Some(Arc::clone(&store)), false);
             let mut completed = gateway.identity_attempt_completed.subscribe();
@@ -3811,11 +3812,7 @@ mod tests {
             assert!(store.snapshot().unwrap().identities.is_empty());
             assert!(gateway.ensure_ready().is_err());
 
-            std::fs::rename(
-                profile.join("jobs.enc.tmp"),
-                profile.join("injected-write-obstruction"),
-            )
-            .unwrap();
+            std::fs::rename(&unavailable, &profile).unwrap();
             script.respond(json!({ "@type": "getMe" }), me);
             gateway.retry_identity_verification().unwrap();
             assert_eq!(wait_for_identity_attempt(&mut completed).await, generation);

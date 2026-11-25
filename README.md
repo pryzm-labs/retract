@@ -46,7 +46,7 @@ Telegram deletion is not global erasure. Forwarded messages, quoted copies, scre
 > [!CAUTION]
 > Discord explicitly says that automating a normal user account (a “self-bot”) is forbidden and can result in account termination. Retract's Discord cleanup is an unofficial, unsupported form of normal-user automation. Use it only if you understand and accept that account risk. See [Discord's self-bot policy](https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots).
 
-Discord deletion is also not guaranteed global erasure. Access may have changed since the archive was created, attachments can remain cached for a period, and legal, safety, backup, quoted, copied, or downloaded records may remain. A successful run means Discord returned success or that the exact message was already absent; an ambiguous response is never reported as confirmed deletion.
+Discord deletion is also not guaranteed global erasure. Access may have changed since the archive was created, attachments can remain cached for a period, and legal, safety, backup, quoted, copied, or downloaded records may remain. Retract counts a deletion when Discord acknowledges it. It records a message as already absent only when Discord returns HTTP 404 with its “Unknown Message” code (10008). If a delete response was lost, a later report of absence leaves the outcome uncertain.
 
 ## Install an unsigned preview
 
@@ -88,6 +88,8 @@ Environment variables in [`.env.example`](.env.example) are optional developer a
 
 On first launch, choose Telegram, a Discord Data Package, or an X archive. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
 
+From Telegram sign-in or first-run Telegram setup, use **Choose data source** to open an imported archive. Switching accounts or sources clears the search term and filters. An archive search stays on this Mac.
+
 ### Connect Telegram
 
 1. Sign in to [my.telegram.org](https://my.telegram.org) and open **API development tools**.
@@ -125,7 +127,7 @@ Connection failures show a safe diagnostic with verification retry and connectio
 
 Choose **Import X archive** and select the ZIP provided by X. Search imported post text or switch on **Privacy findings only**. You can reopen the imported account from **Choose data source**. This workspace runs offline and needs no X credentials. [X archive download instructions](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive)
 
-This first importer supports the single-part `data/account.js` and `data/tweets.js` layout. It reads authored post and reply text, skips recognized reposts, and excludes DMs and media files. The ZIP limit is 256 MiB. The posts member supports up to 2 MiB of JSON and 4,096 rows. Multipart post exports are unsupported. Archive records show historical post text and creation timestamps. They grant no live deletion authority.
+This first importer supports the single-part `data/account.js` and `data/tweets.js` layout. It reads post and reply text and skips rows with structured repost indicators. Text beginning with `RT @` remains searchable. Reimport an older ZIP to include those rows in a new source. DMs and media files are outside the importer’s scope. The ZIP limit is 256 MiB. The posts member supports up to 2 MiB of JSON and 4,096 rows. Multipart post exports are unsupported. Archive records show historical post text and creation timestamps. They grant no live deletion authority.
 
 ## Make the first deletion safely
 

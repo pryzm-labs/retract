@@ -132,22 +132,51 @@ pub(crate) fn error_code(error: &AppError) -> &'static str {
     }
 }
 
-pub(crate) fn telegram_retry_after(error: &AppError) -> Option<u64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramRetry {
+    After(u64),
+    UnknownDuration,
+}
+
+pub(crate) fn retry_deadline(
+    now: chrono::DateTime<chrono::Utc>,
+    seconds: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let delta = chrono::Duration::try_seconds(i64::try_from(seconds).ok()?)?;
+    let deadline = now.checked_add_signed(delta)?;
+    // IPC timestamps use the four-digit RFC 3339 year representation.
+    (chrono::Datelike::year(&deadline) <= 9999).then_some(deadline)
+}
+
+pub(crate) fn telegram_retry_after(error: &AppError) -> Option<TelegramRetry> {
     let AppError::Gateway(message) = error else {
         return None;
     };
-    let normalized = message.to_ascii_lowercase();
-    if !normalized.contains("flood_wait")
-        && !normalized.contains("retry after")
-        && !normalized.contains("too many requests")
-        && !normalized.contains("429")
-    {
-        return None;
+    let normalized = message.trim().to_ascii_lowercase();
+    // TDLib prefixes its error message with a numeric status. A duration
+    // equal to that status still means the full requested wait.
+    let (status, body) = normalized
+        .split_once(' ')
+        .filter(|(status, _)| status.parse::<i32>().is_ok())
+        .unwrap_or(("", &normalized));
+    let body = body.trim();
+    let wait = body.strip_prefix("flood_wait_").or_else(|| {
+        let duration = body
+            .strip_prefix("too many requests:")
+            .unwrap_or(body)
+            .trim();
+        duration.strip_prefix("retry after ")
+    });
+    if let Some(wait) = wait {
+        let seconds = wait.trim().strip_suffix(" seconds").unwrap_or(wait.trim());
+        return Some(match seconds.parse::<u64>() {
+            Ok(seconds) => TelegramRetry::After(seconds.max(1)),
+            Err(_) => TelegramRetry::UnknownDuration,
+        });
     }
-    let seconds = message
-        .split(|character: char| !character.is_ascii_digit())
-        .filter_map(|part| part.parse::<u64>().ok())
-        .rfind(|number| *number != 429)
-        .unwrap_or(5);
-    Some(seconds.clamp(1, 86_400))
+    (status == "429"
+        || body == "429"
+        || body.starts_with("too many requests")
+        || body.starts_with("flood_wait"))
+    .then_some(TelegramRetry::UnknownDuration)
 }

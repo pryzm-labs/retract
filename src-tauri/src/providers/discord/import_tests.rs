@@ -755,8 +755,16 @@ fn discord_import_owner_retries_the_current_failed_checkpoint_with_the_selected_
             .unwrap();
         assert_eq!(resolution.disposition, ImportDisposition::RetryRequired);
 
+        assert_eq!(
+            imports
+                .retry_active(File::open(&file).unwrap(), || false)
+                .await
+                .err(),
+            Some(DiscordImportError::StaleContext)
+        );
+        assert_eq!(imports.active_checkpoint(), Some(resolution.checkpoint));
         let retried = imports
-            .retry_active(File::open(&file).unwrap())
+            .retry_active(File::open(&file).unwrap(), || true)
             .await
             .unwrap()
             .wait()
@@ -789,8 +797,16 @@ fn discord_import_explicit_file_selection_resumes_a_persisted_retry_checkpoint()
             Some(DiscordImportError::Cancelled)
         );
 
+        assert_eq!(
+            imports
+                .start_or_retry(File::open(&file).unwrap(), || false)
+                .await
+                .err(),
+            Some(DiscordImportError::StaleContext)
+        );
+        assert_eq!(imports.active_checkpoint(), first.checkpoint());
         let resumed = imports
-            .start_or_retry(File::open(&file).unwrap())
+            .start_or_retry(File::open(&file).unwrap(), || true)
             .await
             .unwrap()
             .wait()
