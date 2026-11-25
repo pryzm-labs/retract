@@ -203,19 +203,19 @@ fn absent_or_unexpected_codec_metadata_is_rejected() {
         Err(ArchiveError::UnsupportedCodec)
     );
     assert_eq!(
-        validate_codec_metadata(Some("4.14.0 community"), None),
+        validate_codec_metadata(Some("4.20.0 community"), None),
         Err(ArchiveError::UnsupportedCodec)
     );
     assert_eq!(
-        validate_codec_metadata(Some("4.14.0 community"), Some("commoncrypto")),
-        Err(ArchiveError::UnsupportedCodec)
-    );
-    assert_eq!(
-        validate_codec_metadata(Some("4.13.0 community"), Some("openssl")),
+        validate_codec_metadata(Some("4.20.0 community"), Some("commoncrypto")),
         Err(ArchiveError::UnsupportedCodec)
     );
     assert_eq!(
         validate_codec_metadata(Some("4.14.0 community"), Some("openssl")),
+        Err(ArchiveError::UnsupportedCodec)
+    );
+    assert_eq!(
+        validate_codec_metadata(Some("4.20.0 community"), Some("openssl")),
         Ok(())
     );
 }

@@ -125,7 +125,7 @@ pub(super) fn validate_codec_metadata(
     provider: Option<&str>,
 ) -> Result<(), ArchiveError> {
     match (version, provider) {
-        (Some("4.14.0 community"), Some("openssl")) => Ok(()),
+        (Some("4.20.0 community"), Some("openssl")) => Ok(()),
         _ => Err(ArchiveError::UnsupportedCodec),
     }
 }
