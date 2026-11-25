@@ -125,7 +125,7 @@ Connection failures show a safe diagnostic with verification retry and connectio
 
 Choose **Import X archive** and select the ZIP provided by X. Search imported post text or switch on **Privacy findings only**. You can reopen the imported account from **Choose data source**. This workspace runs offline and needs no X credentials. [X archive download instructions](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive)
 
-This first importer supports the single-part `data/account.js` and `data/tweets.js` layout. It reads authored post and reply text, skips recognized reposts, and excludes DMs and media files. The ZIP limit is 256 MiB. The posts member supports up to 2 MiB of JSON and 4,096 rows. Multipart post exports are unsupported. Archive observations describe the export date and grant no live deletion authority.
+This first importer supports the single-part `data/account.js` and `data/tweets.js` layout. It reads authored post and reply text, skips recognized reposts, and excludes DMs and media files. The ZIP limit is 256 MiB. The posts member supports up to 2 MiB of JSON and 4,096 rows. Multipart post exports are unsupported. Archive records show historical post text and creation timestamps. They grant no live deletion authority.
 
 ## Make the first deletion safely
 
