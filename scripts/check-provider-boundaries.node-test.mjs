@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const checker = new URL("./check-provider-boundaries.mjs", import.meta.url);
+const checker = fileURLToPath(new URL("./check-provider-boundaries.mjs", import.meta.url));
 
 function write(root, name, source = "") {
   const path = join(root, name);
@@ -28,7 +29,7 @@ function fixture() {
 }
 
 function check(root, archiveRoot = join(root, "archive-src")) {
-  return spawnSync(process.execPath, [checker.pathname, root, archiveRoot], { encoding: "utf8" });
+  return spawnSync(process.execPath, [checker, root, archiveRoot], { encoding: "utf8" });
 }
 
 test("accepts a provider-owned native tree with neutral shared code", () => {
@@ -248,18 +249,18 @@ test("lexical IPC check does not taint unrelated shadowed aliases", () => {
 test("parser ZIP dependency accepts only the reviewed patched pin and codecs", () => {
   const accepted = fixture();
   write(accepted, "parser/src/lib.rs", "use std::io::Read;");
-  write(accepted, "parser/Cargo.toml", '[dependencies]\nzip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }\n');
+  write(accepted, "parser/Cargo.toml", '[dependencies]\nzip = { version = "=9.5.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }\n');
   assert.equal(check(accepted, join(accepted, "parser/src")).status, 0);
   for (const dependency of [
     'zip = "9"',
     'zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
     'zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
-    'zip = { version = "=9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
-    'zip = { version = "=9.1.2", features = ["deflate-flate2-zlib-rs"] }',
-    'zip = { version = "=9.1.2", default-features = true, features = ["deflate-flate2-zlib-rs"] }',
-    'zip = { version = "=9.1.2", default-features = false, features = ["aes-crypto"] }',
-    'zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }',
-    'zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs", "zstd"] }',
+    'zip = { version = "=9.1.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.5.0", features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.5.0", default-features = true, features = ["deflate-flate2-zlib-rs"] }',
+    'zip = { version = "=9.5.0", default-features = false, features = ["aes-crypto"] }',
+    'zip = { version = "=9.5.0", default-features = false, features = ["deflate-flate2-zlib-rs", "bzip2"] }',
+    'zip = { version = "=9.5.0", default-features = false, features = ["deflate-flate2-zlib-rs", "zstd"] }',
   ]) {
     const root = fixture();
     write(root, "parser/src/lib.rs", "use std::io::Read;");

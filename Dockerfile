@@ -1,5 +1,5 @@
-ARG NODE_IMAGE="node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205"
-ARG RUST_IMAGE="rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97"
+ARG NODE_IMAGE="node:24.22.3-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530"
+ARG RUST_IMAGE="rust:1.100.0-bookworm@sha256:75d26c23c24cc6ea1cdabf0714a6bff8fd7bf3248716043fd7ae86dac7f41b94"
 
 FROM ${NODE_IMAGE} AS node-toolchain
 
@@ -25,7 +25,7 @@ RUN apt-get update \
 # The official image omits optional rustup components. Install the exact
 # project toolchain's checks before source is copied so source edits do not
 # download and snapshot Clippy in a fresh dependency layer each time.
-RUN rustup component add --toolchain 1.97.1 clippy rustfmt
+RUN rustup component add --toolchain 1.100.0 clippy rustfmt
 
 COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/

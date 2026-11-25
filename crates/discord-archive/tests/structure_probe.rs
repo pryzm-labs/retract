@@ -911,13 +911,22 @@ fn unknown_path_segments_are_always_templated() {
 #[test]
 fn private_probe_cli_accepts_one_regular_file_and_refuses_other_inputs() {
     use std::{fs, process::Command};
-    let executable = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples/structure_probe");
+    let probe = || {
+        let mut command = Command::new(env!("CARGO"));
+        command.current_dir(env!("CARGO_MANIFEST_DIR")).args([
+            "run",
+            "--quiet",
+            "--locked",
+            "--offline",
+            "--example",
+            "structure_probe",
+        ]);
+        if !cfg!(debug_assertions) {
+            command.arg("--release");
+        }
+        command.arg("--");
+        command
+    };
     let root = std::env::temp_dir().join(format!("discord-probe-synthetic-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let input = root.join("synthetic.zip");
@@ -932,7 +941,7 @@ fn private_probe_cli_accepts_one_regular_file_and_refuses_other_inputs() {
         ]),
     )
     .unwrap();
-    let result = Command::new(&executable).arg(&input).output().unwrap();
+    let result = probe().arg(&input).output().unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -951,7 +960,7 @@ fn private_probe_cli_accepts_one_regular_file_and_refuses_other_inputs() {
             root.join("output.json").into_os_string(),
         ],
     ] {
-        let result = Command::new(&executable).args(args).output().unwrap();
+        let result = probe().args(args).output().unwrap();
         assert!(!result.status.success());
         assert!(result.stdout.is_empty());
         assert!(!String::from_utf8_lossy(&result.stderr).contains(root.to_str().unwrap()));
@@ -960,7 +969,7 @@ fn private_probe_cli_accepts_one_regular_file_and_refuses_other_inputs() {
     {
         let link = root.join("link.zip");
         std::os::unix::fs::symlink(&input, &link).unwrap();
-        let result = Command::new(&executable).arg(&link).output().unwrap();
+        let result = probe().arg(&link).output().unwrap();
         assert!(!result.status.success());
         assert!(result.stdout.is_empty());
     }
