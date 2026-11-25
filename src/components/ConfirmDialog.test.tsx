@@ -59,7 +59,7 @@ describe("reviewed backend confirmation", () => {
     const dialog = screen.getByRole("dialog");
     // jsdom verifies the applied scrolling contract, not browser geometry.
     expect(getComputedStyle(dialog).overflow).toBe("auto");
-    expect(getComputedStyle(dialog).maxHeight).toMatch(/calc\(100d?vh - 48px\)/);
+    expect(getComputedStyle(dialog).maxHeight).toBe(`${window.innerHeight - 48}px`);
     expect(within(screen.getByRole("list", { name: "Ordered plan effects" })).getAllByRole("listitem")).toHaveLength(250);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "REVIEW" } });
     fireEvent.click(screen.getByRole("checkbox"));

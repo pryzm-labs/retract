@@ -18,7 +18,7 @@ Retract contains an internal encrypted archive repository, a lazy bounded backen
 
 ## Native dependency
 
-The archive connection gate uses `rusqlite` 0.40.2 with default features disabled and only `bundled-sqlcipher-vendored-openssl` enabled. The resolved native binding is `libsqlite3-sys` 0.38.2. Its bundled amalgamation identifies SQLCipher Community 4.14.0 over SQLite 3.51.3, and the crypto provider is the statically built OpenSSL 3.6.3 source supplied by `openssl-src` 300.6.1+3.6.3.
+The archive connection gate uses `rusqlite` 0.42.0 with default features disabled and only `bundled-sqlcipher-vendored-openssl` enabled. The resolved native binding is `libsqlite3-sys` 0.40.0. It compiles the SQLCipher Community 4.20.0 amalgamation over SQLite 3.54.1 supplied by `sqlcipher-src` 420.0.0, and the crypto provider is the statically built OpenSSL 3.6.3 source supplied by `openssl-src` 300.6.1+3.6.3.
 
 Exact Cargo package checksums, crate VCS revisions, amalgamation hashes, compiler defines, OpenSSL Configure arguments, and target mappings are recorded in [`vendor/sqlcipher/provenance.json`](../vendor/sqlcipher/provenance.json). The applicable SQLCipher and OpenSSL notices are shipped in the macOS application under `Contents/Resources/licenses/`.
 

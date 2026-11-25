@@ -149,7 +149,7 @@ fn populate_v2(old: &Connection, new: &mut Connection) -> Result<(), ArchiveErro
             .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
             .map_err(storage)?;
         let width = query.column_count();
-        let columns = query.column_names().join(", ");
+        let columns = query.column_names().collect::<Vec<_>>().join(", ");
         let placeholders = vec!["?"; width].join(", ");
         let extra = if table == "import_runs" {
             ", observed_at, failure_code"

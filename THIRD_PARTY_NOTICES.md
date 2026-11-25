@@ -10,9 +10,9 @@ The bundled Apple-silicon TDLib static archive is built from the official Telegr
 
 Retract vendors a small JavaScript distribution of nanoid. Its MIT license is in [`vendor/nanoid/LICENSE`](vendor/nanoid/LICENSE).
 
-## SQLCipher Community 4.14.0
+## SQLCipher Community 4.20.0
 
-The archive storage gate statically builds the SQLCipher Community amalgamation supplied by `libsqlite3-sys` 0.38.2. Its source identifiers, hashes, compiler flags, and Rust package checksums are recorded in [`vendor/sqlcipher/provenance.json`](vendor/sqlcipher/provenance.json). The SQLCipher license is in [`vendor/sqlcipher/LICENSE.txt`](vendor/sqlcipher/LICENSE.txt).
+The archive storage gate statically builds the SQLCipher Community amalgamation supplied by `sqlcipher-src` 420.0.0 through `libsqlite3-sys` 0.40.0. Its source identifiers, hashes, compiler flags, and Rust package checksums are recorded in [`vendor/sqlcipher/provenance.json`](vendor/sqlcipher/provenance.json). The native build uses OpenSSL. The source package also contains libtomcrypt for other build configurations. The SQLCipher license is in [`vendor/sqlcipher/LICENSE.txt`](vendor/sqlcipher/LICENSE.txt).
 
 ## OpenSSL 3.6.3
 
@@ -34,13 +34,13 @@ Discord identity/deletion HTTPS uses `reqwest` 0.12.28 with rustls rather than n
 
 No browser binary is bundled. Release builds use manual token entry and disable browser-debug capture. The development compatibility harness discovers an installed browser and uses a fresh temporary profile with synthetic credentials.
 
-Frontend icons use `lucide-react` 1.71.0 (ISC). Development tools include `@vitejs/plugin-react` 6.3.0, Vite 8.3.7 and Vitest 5.1.0 (MIT). Their resolved graph includes Rolldown 1.2.18 and its optional platform bindings, `@oxc-project/types` 0.156.0, PostCSS 8.5.32 and aligned Vitest mocker/spy packages. Exact tarball URLs and integrity digests are frozen in `package-lock.json`; dependency lifecycle scripts are disabled during the container installation.
+Frontend icons use `lucide-react` 1.74.0 (ISC). Development tools include `@vitejs/plugin-react` 6.3.0, Vite 8.3.8 and Vitest 5.1.0 (MIT). Their resolved graph includes Rolldown 1.2.18 and its optional platform bindings, `@oxc-project/types` 0.156.0, PostCSS 8.5.32 and aligned Vitest mocker/spy packages. Exact tarball URLs and integrity digests are frozen in `package-lock.json`; dependency lifecycle scripts are disabled during the container installation.
 
 Other dependencies and their resolved versions are recorded in `package-lock.json` and the Cargo lockfiles. Their licenses remain the property of their respective authors.
 
-## ZIP reader 9.1.2
+## ZIP reader 9.5.0
 
-`crates/discord-archive` pins `zip = "=9.1.2"` (MIT), with defaults disabled and only `deflate-flate2-zlib-rs` enabled. The resolved codec chain is `zip` → `flate2` → `zlib-rs` (Rust allocator); stored entries require no codec. The application permits only stored (0) and deflate (8). AES/legacy encryption and bzip2, deflate64, LZMA, PPMd, XZ and Zstandard features are not enabled. Encryption flags/metadata are rejected independently of feature selection. Retract reads entries without calling extraction APIs; the ZIP dependency also includes Unix extraction support through `nix` and Windows filesystem support through `windows-sys`, which Retract does not invoke. `getrandom` 0.4.3 is a mandatory ZIP dependency used for random extraction-staging directory names; indexed archive reads do not call that extraction path. The lockfile also records its target-specific EFI and wasm/JavaScript dependencies.
+`crates/discord-archive` pins `zip = "=9.5.0"` (MIT), with defaults disabled and only `deflate-flate2-zlib-rs` enabled. The resolved codec chain is `zip` → `flate2` → `zlib-rs` (Rust allocator); stored entries require no codec. The application permits only stored (0) and deflate (8). AES encryption and bzip2, deflate64, LZMA, PPMd, XZ and Zstandard features are not enabled. The ZIP library includes legacy ZipCrypto code and its mandatory constant_time_eq and zeroize dependencies. Retract rejects encryption flags and metadata before opening entries. Retract reads entries without calling extraction APIs; the ZIP dependency also includes Unix extraction support through `nix` and Windows filesystem support through `windows-sys`, which Retract does not invoke. `getrandom` 0.4.3 is a mandatory ZIP dependency used for random extraction-staging directory names; indexed archive reads do not call that extraction path. The lockfile also records its target-specific EFI and wasm/JavaScript dependencies.
 
 Resolved Cargo package checksums for the complete ZIP dependency subtree across all lockfile targets (including build-time proc macros and target-specific packages):
 
@@ -50,6 +50,7 @@ Resolved Cargo package checksums for the complete ZIP dependency subtree across 
 | bumpalo | 3.20.3 | `72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649` |
 | cfg-if | 1.0.4 | `9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801` |
 | cfg_aliases | 0.2.2 | `f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527` |
+| constant_time_eq | 0.6.1 | `9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9` |
 | crc32fast | 1.5.1 | `8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550` |
 | equivalent | 1.0.2 | `877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f` |
 | flate2 | 1.1.10 | `6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb` |
@@ -64,6 +65,7 @@ Resolved Cargo package checksums for the complete ZIP dependency subtree across 
 | quote | 1.0.47 | `1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001` |
 | r-efi | 6.0.0 | `f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf` |
 | rustversion | 1.0.23 | `cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f` |
+| syn | 2.0.119 | `872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297` |
 | syn | 3.0.5 | `12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9` |
 | typed-path | 0.13.0 | `9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e` |
 | unicode-ident | 1.0.24 | `e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75` |
@@ -73,7 +75,9 @@ Resolved Cargo package checksums for the complete ZIP dependency subtree across 
 | wasm-bindgen-shared | 0.2.130 | `3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e` |
 | windows-link | 0.2.1 | `f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5` |
 | windows-sys | 0.61.2 | `ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc` |
-| zip | 9.1.2 | `ec2e3161de27091f18a831d9494e9c53378a34833af5c1dda35ad85849da18d6` |
+| zeroize | 1.9.1 | `e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879` |
+| zeroize_derive | 1.5.0 | `3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328` |
+| zip | 9.5.0 | `0700e6c427aff64acdbf02e85fbfd946c2ee12319d1af013092f3a2178914ff8` |
 | zlib-rs | 0.6.7 | `34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12` |
 
 Registry package versions and checksums, including the other parser dependencies, are frozen in [`crates/discord-archive/Cargo.lock`](crates/discord-archive/Cargo.lock). Project checks run offline in Docker with `--locked`.
@@ -84,4 +88,4 @@ The library's local-header lookup checks the signature and computes payload offs
 
 This policy deliberately rejects ZIP64 (including contradictory sentinels/extra fields), data descriptors, prefixes/gaps, multi-disk archives, Unicode path overrides and non-ASCII entry names. ASCII case collisions, dot/space suffixes and file/directory conflicts fail closed. Unicode normalization support and additional ZIP variants require an explicit review after format evidence. ZIP64 rejection means classic ZIP's 65,534-entry representable policy limit can bind before the 100,000-entry ceiling. The supported JSON profile and its limits are recorded in the synthetic Discord fixture manifest.
 
-The backend lockfile uses flate2 1.1.10, crc32fast 1.5.0 and indexmap 2.14.0 while the standalone parser lockfile resolves the versions above. Both use zip 9.1.2 and zlib-rs 0.6.7 without encryption or additional ZIP codecs. The backend also enables flate2's default Rust backend, resolving miniz_oxide 0.9.1 (MIT/Zlib/Apache-2.0), checksum `b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c`; PNG independently retains miniz_oxide 0.8.9. The ZIP subtree licenses are MIT, Apache-2.0/MIT alternatives, BSD-2-Clause for nix, and Zlib for zlib-rs; the full parser graph also includes the Unicode-3.0 component of unicode-ident's license.
+The backend lockfile uses flate2 1.1.11, crc32fast 1.5.0 and indexmap 2.14.0 while the standalone parser lockfile resolves the versions above. Both use zip 9.5.0 and zlib-rs 0.6.7 with only the reviewed deflate feature. The backend also enables flate2's default Rust backend, resolving miniz_oxide 0.9.1 (MIT/Zlib/Apache-2.0), checksum `b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c`; PNG independently retains miniz_oxide 0.8.9. The ZIP subtree licenses are MIT, Apache-2.0/MIT alternatives, BSD-2-Clause for nix, CC0-1.0/MIT-0/Apache-2.0 alternatives for constant_time_eq, and Zlib for zlib-rs; the full parser graph also includes the Unicode-3.0 component of unicode-ident's license.
