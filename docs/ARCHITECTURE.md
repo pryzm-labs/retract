@@ -60,7 +60,7 @@ The import coordinator retains the selected regular-file descriptor, validates i
 
 Release builds accept browser-neutral, one-way manual token submission; memory-only sessions are the default and Keychain persistence is opt-in. The backend never returns a saved token to the webview. Browser-debug capture is development-only synthetic compatibility code, not a supported release sign-in method.
 
-Cleanup freezes exact owner-authored archive channel/message IDs. Before each deletion, live ownership, timestamp, text and attachment identity must match the frozen evidence; live responses cannot discover or add targets. Requests serialize per channel, use bounded cross-channel concurrency/account pacing and honor bounded server delays. Success or exact absence completes a target; permission/authentication failures are explicit, and exhausted network ambiguity remains uncertain. Remote deletion does not remove the local archive or original ZIP.
+Cleanup freezes exact owner-authored archive channel/message IDs. Before each deletion, the live author, channel and message IDs, timestamp, text and ordered attachment filenames must match the reviewed archive evidence. Attachments with identical names cannot be distinguished by this check; live responses cannot discover or add targets. Requests serialize per channel, use bounded cross-channel concurrency/account pacing and honor bounded server delays. Success or exact absence completes a target; permission/authentication failures are explicit, and exhausted network ambiguity remains uncertain. Remote deletion does not remove the local archive or original ZIP.
 
 ## Compatibility and verification
 

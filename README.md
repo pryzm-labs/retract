@@ -20,7 +20,7 @@
 
 *Synthetic fixture data shown; no real Telegram account or conversation is pictured.*
 
-Retract is a local-first macOS desktop app for searching and cleaning Telegram and Discord history. Credentials, sessions, imported archives, message search, sensitive-data detection, and deletion execution stay on your Mac. There is no Retract cloud service or telemetry.
+Retract is a local-first macOS desktop app for searching and cleaning Telegram and Discord history. Archive search and sensitive-data classification run on your Mac. Telegram live search passes your query to TDLib, which can contact Telegram. Reviewed remote deletions contact the selected provider. There is no Retract cloud service or telemetry.
 
 ## What Retract can do
 
@@ -110,9 +110,8 @@ First request a package in Discord under **User Settings → Data & Privacy → 
 4. Open Discord connection settings. Read and acknowledge the unsupported-account-automation warning.
 5. Use **Enter token manually**. Follow the in-app browser-neutral Developer Tools instructions and paste only the `Authorization` header value, never a password, cookie, or bot token.
 6. Retract verifies `/users/@me` against the archive owner before it enables cleanup. Browser-debug capture exists only in development builds for synthetic compatibility tests and is intentionally absent from release builds.
-7. Retract verifies `/users/@me` and refuses to continue unless the account ID exactly matches the selected archive owner.
-8. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
-9. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
+7. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
+8. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
 
 Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. Release builds use explicit one-way manual token entry: generic browser-debug token capture is disabled because another local process could race or observe those endpoints. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
 
@@ -126,7 +125,7 @@ Connection failures show a safe diagnostic with verification retry and connectio
 
 Do not begin with an old or valuable chat. Follow the complete [local live-test guide](docs/LOCAL_LIVE_TEST.md); the short version is:
 
-1. Prefer Telegram's test DC. Otherwise create a new private group with one informed participant.
+1. Complete the applicable disposable test-DC cases in the test plan before any production smoke test. A production test requires separate owner authorization and a new private group with an informed participant.
 2. Send a unique harmless text message, a disposable image, and a disposable file from your own account.
 3. Search the unique token in Retract and filter to **Mine**.
 4. Select only those fixtures and confirm the impact panel says **Delete for everyone** for every item.
