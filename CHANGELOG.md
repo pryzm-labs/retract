@@ -4,6 +4,28 @@ All notable changes to Retract are documented here. The project follows [Semanti
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-25
+
+Ad-hoc-signed, unnotarized preview for Apple-silicon macOS.
+
+### Added
+
+- Import single-part and multipart X post exports. Search posts and replies offline, with privacy findings and encrypted local storage. X support is read-only.
+- Open saved archives from Telegram sign-in and first-run setup.
+
+### Fixed
+
+- Clear search terms and filters when switching accounts or sources so archive queries stay local.
+- Honor Telegram retry deadlines and preserve acknowledged chat effects when a later cleanup step fails.
+- Distinguish confirmed Discord deletions, messages already absent, and uncertain outcomes. Honor Discord channel and global retry deadlines.
+- Reject stale Discord and X archive selections after workspace changes.
+- Return from an X archive to data sources or a configured Telegram workspace without saving connection settings again.
+- Use exclusively created private files for encrypted job-store updates before atomic replacement.
+
+### Changed
+
+- Refresh pinned toolchains, frontend and Rust dependencies, GitHub Actions, and native SQLCipher and OpenSSL dependencies.
+
 ## [0.1.2] - 2026-10-23
 
 Unsigned, unnotarized patch preview for Apple-silicon macOS. Existing data formats and native TDLib, OpenSSL, and SQLCipher pins are unchanged.
@@ -77,7 +99,8 @@ Unsigned, unnotarized preview for Apple-silicon macOS. See the [release guide](d
 - Synthetic-only fixture mode for automated tests and project screenshots.
 - Reproducible, ad-hoc-signed unsigned preview packaging for macOS 12+ on Apple silicon.
 
-[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Pryzm-Labs/retract/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Pryzm-Labs/retract/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Pryzm-Labs/retract/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Pryzm-Labs/retract/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Pryzm-Labs/retract/tree/v0.1.0

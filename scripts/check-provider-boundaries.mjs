@@ -205,7 +205,17 @@ for (const path of rustFiles(sourceRoot)) {
 
 // Source checks catch accidental coupling, not hostile obfuscation or arbitrary
 // code execution. Production parser code has no filesystem or runtime services.
-for (const path of rustFiles(archiveRoot)) {
+const xParser = resolve(sourceRoot, "providers/x/parser.rs");
+for (const path of rustFiles(resolve(sourceRoot, "providers/x"))) {
+  const code = rustCode(readFileSync(path, "utf8"));
+  if (/\b(?:reqwest|hyper|ureq|TcpStream|UdpSocket|Keychain|secure_store|discord\s*::\s*session)\b/.test(code)) {
+    failures.push(`${display(path)}: offline X archives cannot access provider sessions or network clients`);
+  }
+  if (path === xParser && /\b(?:fs|tauri|persistence|rusqlite|Command)\b/.test(code)) {
+    failures.push(`${display(path)}: the X parser only consumes the supplied archive reader`);
+  }
+}
+for (const path of [...rustFiles(archiveRoot), ...(existsSync(xParser) ? [xParser] : [])]) {
   reject(path,
     /\b(?:reqwest|hyper|ureq|curl|surf|isahc|tokio|async_std|TcpStream|TcpListener|UdpSocket|tauri|keyring|security_framework|credentials?|secure_store|Keychain|telegram|Telegram\w*|rusqlite|sqlx|diesel|sqlite|SQL|webbrowser|opener|Command)\b|\b(?:std\s*::\s*)?(?:net|process)\s*::/,
     "archive parser isolation forbids network, UI, credentials, Telegram, SQL and process/browser APIs");

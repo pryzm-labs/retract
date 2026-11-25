@@ -9,6 +9,7 @@ use std::time::Duration;
 
 const TOKEN: &str = "synthetic.discord.token-value_123456789";
 const CONTENT: &str = "synthetic message";
+const UNKNOWN_MESSAGE: &str = r#"{"message":"Unknown Message","code":10008}"#;
 const TIMESTAMP_MILLIS: i64 = 1_893_553_445_123;
 
 fn binding() -> DiscordLiveMessageBinding {
@@ -67,6 +68,9 @@ fn scripted_server(responses: Vec<(String, String)>) -> (String, thread::JoinHan
                 let mut request = vec![0_u8; 16 * 1024];
                 let count = socket.read(&mut request).unwrap();
                 request.truncate(count);
+                if status == "DROP" {
+                    return String::from_utf8(request).unwrap();
+                }
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -149,13 +153,17 @@ fn run_verify_with_timeout(
 
 #[test]
 fn delete_uses_exact_route_and_authority_and_accepts_deleted_or_absent() {
-    for (status, expected) in [
-        ("204 No Content", DeleteOutcome::Deleted),
-        ("404 Not Found", DeleteOutcome::AlreadyAbsent),
+    for (status, body, expected) in [
+        ("204 No Content", "", DeleteOutcome::Deleted),
+        (
+            "404 Not Found",
+            UNKNOWN_MESSAGE,
+            DeleteOutcome::AlreadyAbsent,
+        ),
     ] {
         let (base, server) = scripted_server(vec![
             ("200 OK".into(), live_message()),
-            (status.into(), String::new()),
+            (status.into(), body.into()),
         ]);
         let client = DiscordDeleteClient::for_test(&base).unwrap();
         let result = runtime().block_on(client.delete_owned(
@@ -201,7 +209,7 @@ fn authentication_permission_and_rate_limits_have_closed_outcomes() {
             vec![("Content-Type", "application/json")],
             r#"{"retry_after":0.25,"global":true}"#,
             DiscordDeleteError::RateLimited {
-                retry_after_millis: 250,
+                retry_after_millis: Some(250),
                 global: true,
             },
         ),
@@ -213,11 +221,10 @@ fn authentication_permission_and_rate_limits_have_closed_outcomes() {
 }
 
 #[test]
-fn rate_limit_caps_finite_delays_before_duration_conversion() {
+fn rate_limit_preserves_full_delays_and_rounds_up_fractional_milliseconds() {
     for (seconds, expected_millis) in [
-        ("1e300", 300_000),
-        ("18446744073709551616", 300_000),
-        ("300.5", 300_000),
+        ("300.5", 300_500),
+        ("0.00001", 1),
         ("300", 300_000),
         ("0.125", 125),
     ] {
@@ -231,7 +238,7 @@ fn rate_limit_caps_finite_delays_before_duration_conversion() {
             assert_eq!(
                 result,
                 Err(DiscordDeleteError::RateLimited {
-                    retry_after_millis: expected_millis,
+                    retry_after_millis: Some(expected_millis),
                     global,
                 }),
                 "retry_after={seconds}, global={global}"
@@ -242,15 +249,89 @@ fn rate_limit_caps_finite_delays_before_duration_conversion() {
 }
 
 #[test]
+fn rate_limit_blocks_requests_past_the_wait_ceiling_then_rechecks_the_reviewed_message() {
+    for global in [false, true] {
+        let (base, server) = scripted_server(vec![
+            ("200 OK".into(), live_message()),
+            (
+                "429 Too Many Requests".into(),
+                format!(r#"{{"retry_after":600,"global":{global}}}"#),
+            ),
+            (
+                "200 OK".into(),
+                live_message().replace(CONTENT, "edited message"),
+            ),
+        ]);
+        let client = DiscordDeleteClient::for_test(&base).unwrap();
+        let reviewed = binding();
+        let cancelled = AtomicBool::new(false);
+        let delete = || {
+            client.delete_owned(
+                "9007199254741101",
+                "1985931830091579393",
+                "9007199254741001",
+                &reviewed,
+                TOKEN,
+                &cancelled,
+            )
+        };
+        runtime().block_on(async {
+            assert_eq!(
+                delete().await,
+                Err(DiscordDeleteError::RateLimited {
+                    retry_after_millis: Some(600_000),
+                    global,
+                })
+            );
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(301)).await;
+            assert!(matches!(
+                delete().await,
+                Err(DiscordDeleteError::RateLimited { .. })
+            ));
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+            assert_eq!(delete().await, Err(DiscordDeleteError::Cancelled));
+            cancelled.store(false, std::sync::atomic::Ordering::Release);
+            tokio::time::advance(Duration::from_secs(299)).await;
+            tokio::time::resume();
+            assert_eq!(delete().await, Err(DiscordDeleteError::OwnershipMismatch));
+        });
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r.split_whitespace().next().unwrap())
+                .collect::<Vec<_>>(),
+            ["GET", "DELETE", "GET"]
+        );
+    }
+}
+
+#[test]
 fn rate_limit_rejects_invalid_delays_without_panicking() {
-    for seconds in ["0", "-1", "1e400", "null", r#""not-a-number""#] {
+    for seconds in [
+        "0",
+        "-1",
+        "1e300",
+        "18446744073709551616",
+        "1e400",
+        "null",
+        r#""not-a-number""#,
+    ] {
         let body = format!(r#"{{"retry_after":{seconds},"global":true}}"#);
         let (result, _) = run_verify(
             "429 Too Many Requests",
             &[("Content-Type", "application/json")],
             &body,
         );
-        assert_eq!(result, Err(DiscordDeleteError::Transient), "{seconds}");
+        assert_eq!(
+            result,
+            Err(DiscordDeleteError::RateLimited {
+                retry_after_millis: None,
+                global: true
+            }),
+            "{seconds}"
+        );
     }
 }
 
@@ -349,7 +430,7 @@ fn delete_rechecks_reviewed_content_and_timestamp_before_mutation() {
 
 #[test]
 fn missing_live_message_is_not_counted_as_an_already_successful_delete() {
-    let (base, server) = scripted_server(vec![("404 Not Found".into(), String::new())]);
+    let (base, server) = scripted_server(vec![("404 Not Found".into(), UNKNOWN_MESSAGE.into())]);
     let runtime = runtime();
     let client = DiscordDeleteClient::for_test(&base).unwrap();
 
@@ -370,6 +451,43 @@ fn missing_live_message_is_not_counted_as_an_already_successful_delete() {
 }
 
 #[test]
+fn non_message_404_never_proves_exact_absence_on_get_or_delete() {
+    let oversized = format!(r#"{{"code":10008,"message":"{}"}}"#, "x".repeat(4096));
+    for body in [
+        r#"{"code":10003,"message":"Unknown Channel"}"#,
+        "",
+        "invalid",
+        "{}",
+        "[10008]",
+        r#"{"code":"10008"}"#,
+        r#"{"code":10003,"code":10008}"#,
+        oversized.as_str(),
+    ] {
+        let (result, request) = run_verify("404 Not Found", &[], body);
+        assert_eq!(result, Err(DiscordDeleteError::Permanent));
+        assert!(request.starts_with("GET "));
+
+        let (base, server) = scripted_server(vec![
+            ("200 OK".into(), live_message()),
+            ("404 Not Found".into(), body.into()),
+        ]);
+        let client = DiscordDeleteClient::for_test(&base).unwrap();
+        assert_eq!(
+            runtime().block_on(client.delete_owned(
+                "9007199254741101",
+                "1985931830091579393",
+                "9007199254741001",
+                &binding(),
+                TOKEN,
+                &AtomicBool::new(false),
+            )),
+            Err(DiscordDeleteError::Permanent)
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn rate_limit_rejects_oversized_content_length_without_waiting_for_the_body() {
     let response = concat!(
         "HTTP/1.1 429 Too Many Requests\r\n",
@@ -381,7 +499,10 @@ fn rate_limit_rejects_oversized_content_length_without_waiting_for_the_body() {
 
     assert_eq!(
         run_verify_with_timeout(&base).unwrap(),
-        Err(DiscordDeleteError::Transient)
+        Err(DiscordDeleteError::RateLimited {
+            retry_after_millis: None,
+            global: true
+        })
     );
     server.join().unwrap();
 }
@@ -402,7 +523,10 @@ fn rate_limit_stops_streaming_once_the_bounded_body_limit_is_exceeded() {
 
     assert_eq!(
         run_verify_with_timeout(&base).unwrap(),
-        Err(DiscordDeleteError::Transient)
+        Err(DiscordDeleteError::RateLimited {
+            retry_after_millis: None,
+            global: true
+        })
     );
     server.join().unwrap();
 }
@@ -503,4 +627,44 @@ fn server_failures_retry_a_bounded_number_of_times_and_end_uncertain() {
         Err(DiscordDeleteError::Ambiguous)
     );
     assert_eq!(exhausted.join().unwrap().len(), 6);
+}
+
+#[test]
+fn lost_delete_response_stays_uncertain_on_absence_or_a_later_rate_limit() {
+    for (extra_check, status, body) in [
+        (false, "404 Not Found", UNKNOWN_MESSAGE),
+        (false, "404 Not Found", ""),
+        (false, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
+        (true, "404 Not Found", UNKNOWN_MESSAGE),
+        (true, "404 Not Found", ""),
+        (true, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
+    ] {
+        let mut responses = vec![
+            ("200 OK".into(), live_message()),
+            ("DROP".into(), String::new()),
+        ];
+        if extra_check {
+            responses.push(("200 OK".into(), live_message()));
+        }
+        responses.push((status.into(), body.into()));
+        let (base, server) = scripted_server(responses);
+        let client = DiscordDeleteClient::for_test(&base).unwrap();
+        assert_eq!(
+            runtime().block_on(client.delete_owned(
+                "9007199254741101",
+                "1985931830091579393",
+                "9007199254741001",
+                &binding(),
+                TOKEN,
+                &AtomicBool::new(false)
+            )),
+            Err(DiscordDeleteError::Ambiguous),
+            "extra_check={extra_check} status={status}"
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("DELETE ")).count(),
+            1 + usize::from(extra_check)
+        );
+    }
 }

@@ -408,3 +408,15 @@ test("rejects every removed transitional file and production facade dependency",
     assert.match(result.stderr, /cleanup facade/);
   }
 });
+
+test("the X archive parser and provider stay offline", () => {
+  for (const [file, source] of [
+    ["parser", "use std::fs::OpenOptions;"],
+    ["application", "use reqwest::Client;"],
+    ["import", "use crate::providers::discord::session;"],
+  ]) {
+    const root = fixture();
+    write(root, `providers/x/${file}.rs`, source);
+    assert.equal(check(root).status, 1);
+  }
+});

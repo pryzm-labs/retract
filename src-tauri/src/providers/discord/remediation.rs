@@ -268,12 +268,9 @@ impl DiscordRemediationIo {
                 retry_after_millis, ..
             } => SafeError {
                 code: ErrorCode::RateLimited,
-                retry_at: Some(
-                    Utc::now()
-                        + ChronoDuration::milliseconds(
-                            i64::try_from(retry_after_millis).unwrap_or(i64::MAX),
-                        ),
-                ),
+                retry_at: retry_after_millis
+                    .filter(|millis| *millis <= super::http::MAX_JOB_WAIT_MILLIS)
+                    .map(|millis| Utc::now() + ChronoDuration::milliseconds(millis as i64)),
             },
             DiscordDeleteError::Transient => safe(ErrorCode::Transient),
             DiscordDeleteError::Ambiguous => safe(ErrorCode::AmbiguousOutcome),
@@ -359,7 +356,15 @@ impl FrozenProviderIo for DiscordRemediationIo {
     ) -> Result<bool, SafeError> {
         self.check_context(&self.context)?;
         let records = self.resolve_owned(std::slice::from_ref(target)).await?;
-        self.verify_live_owned(&records, cancelled).await?;
+        self.verify_live_owned(&records, cancelled)
+            .await
+            .map_err(|error| {
+                if error.code == ErrorCode::NotFound {
+                    safe(ErrorCode::AlreadyRemoved)
+                } else {
+                    error
+                }
+            })?;
         self.check_context(&self.context)?;
         Ok(true)
     }
@@ -411,7 +416,10 @@ impl FrozenProviderIo for DiscordRemediationIo {
             )
             .await
         {
-            Ok(DeleteOutcome::Deleted | DeleteOutcome::AlreadyAbsent) => Ok(()),
+            Ok(DeleteOutcome::Deleted) => Ok(()),
+            Ok(DeleteOutcome::AlreadyAbsent) | Err(DiscordDeleteError::NotFound) => {
+                Err(safe(ErrorCode::AlreadyRemoved))
+            }
             Err(error) => Err(self.map_delete_error(error)),
         }
     }

@@ -1,3 +1,4 @@
+#[cfg(any(test, not(target_os = "macos")))]
 use std::fs;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use crate::{error::AppError, providers::telegram::model::PersistedState};
 
 const MAGIC: &[u8; 7] = b"RTRCT02";
 const LEGACY_UNBOUND_MAGIC: &[u8; 7] = b"RTRCT01";
+pub(crate) const JOB_CANDIDATE_PREFIX: &str = "jobs.enc.tmp.";
 pub(crate) const KEY_LENGTH: usize = 32;
 pub(crate) const NONCE_LENGTH: usize = 12;
 type AesNonce = aes_gcm::aead::Nonce<Aes256Gcm>;
@@ -133,9 +135,10 @@ impl SecureJobStore {
             plaintext.as_ref(),
         )?;
 
-        let temporary = self.path.with_extension("enc.tmp");
-        write_private(&temporary, &payload)?;
-        fs::rename(temporary, &self.path)?;
+        let directory = self.path.parent().ok_or(AppError::StatePersistenceFailed)?;
+        let temporary = write_private_candidate(directory, JOB_CANDIDATE_PREFIX, &payload)?;
+        temporary.persist(&self.path).map_err(|error| error.error)?;
+        fs::File::open(directory)?.sync_all()?;
         self.loaded_legacy_unbound.store(false, Ordering::Release);
         Ok(())
     }
@@ -362,7 +365,12 @@ pub fn save_telegram_api_hash(data_dir: &std::path::Path, value: &str) -> Result
     payload.extend_from_slice(&nonce_bytes);
     payload.extend_from_slice(&ciphertext);
     fs::create_dir_all(data_dir)?;
-    write_private(&data_dir.join("telegram-api-hash.enc"), &payload)
+    let temporary = write_private_candidate(data_dir, ".telegram-api-hash.", &payload)?;
+    temporary
+        .persist(data_dir.join("telegram-api-hash.enc"))
+        .map_err(|error| error.error)?;
+    fs::File::open(data_dir)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -413,14 +421,26 @@ fn load_or_create_named_key(
     use std::io::Read;
 
     let path = data_dir.join(file_name);
-    if path.exists() {
+    let read_key = || -> Result<[u8; KEY_LENGTH], std::io::Error> {
         let mut key = [0_u8; KEY_LENGTH];
-        fs::File::open(path)?.read_exact(&mut key)?;
-        return Ok(key);
+        fs::File::open(&path)?.read_exact(&mut key)?;
+        Ok(key)
+    };
+    match read_key() {
+        Ok(key) => return Ok(key),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
     }
     let key = random_bytes::<KEY_LENGTH>()?;
-    write_private(&path, &key)?;
-    Ok(key)
+    let temporary = write_private_candidate(data_dir, ".key.", &key)?;
+    match temporary.persist_noclobber(data_dir.join(file_name)) {
+        Ok(_) => {
+            fs::File::open(data_dir)?.sync_all()?;
+            Ok(key)
+        }
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(read_key()?),
+        Err(error) => Err(error.error.into()),
+    }
 }
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], AppError> {
@@ -428,22 +448,19 @@ fn random_bytes<const N: usize>() -> Result<[u8; N], AppError> {
         .map_err(|error| AppError::SecureStore(format!("secure random generation failed: {error}")))
 }
 
-pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), AppError> {
+pub(crate) fn write_private_candidate(
+    directory: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+) -> Result<tempfile::NamedTempFile, AppError> {
     use std::io::Write;
 
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    let mut file = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempfile_in(directory)?;
     file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
+    file.as_file().sync_all()?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -883,6 +900,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_job_save_preserves_an_existing_candidate_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.enc");
+        let previous = path.with_extension("enc.tmp");
+        fs::write(&previous, b"retained evidence").unwrap();
+        let store = SecureJobStore::with_test_key(path, [8; KEY_LENGTH]);
+        store.save(&PersistedState::default()).unwrap();
+        assert_eq!(fs::read(previous).unwrap(), b"retained evidence");
+        assert!(store.load().is_ok());
+    }
+
+    #[test]
     fn failed_temporary_write_preserves_the_last_authenticated_store() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.enc");
@@ -891,8 +920,12 @@ mod tests {
         store.save(&expected).unwrap();
         let original = fs::read(&path).unwrap();
 
-        fs::create_dir(path.with_extension("enc.tmp")).unwrap();
+        let displaced = directory.path().join("retained-original");
+        fs::rename(&path, &displaced).unwrap();
+        fs::create_dir(&path).unwrap();
         assert!(store.save(&PersistedState::default()).is_err());
+        fs::remove_dir(&path).unwrap();
+        fs::rename(displaced, &path).unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(

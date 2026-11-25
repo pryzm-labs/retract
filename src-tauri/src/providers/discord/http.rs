@@ -6,15 +6,16 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::Instant;
 
 use super::session::valid_user_token;
 
 const DISCORD_API: &str = "https://discord.com/api/v10/";
-const MAX_RATE_LIMIT_BODY: usize = 4096;
+const MAX_ERROR_BODY: usize = 4096;
 const MAX_LIVE_MESSAGE_BODY: usize = 64 * 1024;
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+pub(super) const MAX_JOB_WAIT_MILLIS: u64 = 300_000;
 const MAX_TRANSIENT_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,7 @@ pub(crate) enum DiscordDeleteError {
     Authentication,
     Permission,
     RateLimited {
-        retry_after_millis: u64,
+        retry_after_millis: Option<u64>,
         global: bool,
     },
     Transient,
@@ -130,6 +131,52 @@ struct LiveMessageExpectation<'a> {
     binding: &'a DiscordLiveMessageBinding,
 }
 
+/// An unrepresentable delay has no safe retry time for this client.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RetryDeadline {
+    Until(Instant),
+    Indefinite,
+}
+
+#[derive(Default)]
+struct RateLimits {
+    global: Option<RetryDeadline>,
+    channels: HashMap<String, RetryDeadline>,
+}
+
+impl RateLimits {
+    fn record(&mut self, channel: &str, global: bool, deadline: RetryDeadline, now: Instant) {
+        self.channels
+            .retain(|_, end| *end > RetryDeadline::Until(now));
+        if global {
+            self.global = self.global.max(Some(deadline));
+        } else {
+            self.channels
+                .entry(channel.to_owned())
+                .and_modify(|old| *old = (*old).max(deadline))
+                .or_insert(deadline);
+        }
+    }
+
+    fn check(&self, channel: &str, now: Instant) -> Result<(), DiscordDeleteError> {
+        let channel_deadline = self.channels.get(channel).copied();
+        let Some(deadline) = self.global.max(channel_deadline) else {
+            return Ok(());
+        };
+        let retry_after_millis = match deadline {
+            RetryDeadline::Until(end) if end <= now => return Ok(()),
+            RetryDeadline::Until(end) => {
+                u64::try_from((end - now).as_nanos().div_ceil(1_000_000)).ok()
+            }
+            RetryDeadline::Indefinite => None,
+        };
+        Err(DiscordDeleteError::RateLimited {
+            retry_after_millis,
+            global: self.global == Some(deadline),
+        })
+    }
+}
+
 pub(crate) struct DiscordDeleteClient {
     client: reqwest::Client,
     base: url::Url,
@@ -139,7 +186,7 @@ pub(crate) struct DiscordDeleteClient {
     channel_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     channel_deadlines: Mutex<HashMap<String, Instant>>,
     account_deadline: Mutex<Option<Instant>>,
-    global_deadline: Mutex<Option<Instant>>,
+    rate_limits: Mutex<RateLimits>,
     concurrency: Semaphore,
 }
 
@@ -188,7 +235,7 @@ impl DiscordDeleteClient {
             channel_locks: Mutex::new(HashMap::new()),
             channel_deadlines: Mutex::new(HashMap::new()),
             account_deadline: Mutex::new(None),
-            global_deadline: Mutex::new(None),
+            rate_limits: Mutex::default(),
             concurrency: Semaphore::new(4),
         })
     }
@@ -210,7 +257,6 @@ impl DiscordDeleteClient {
             .map_err(|_| DiscordDeleteError::Cancelled)?;
         let channel_lock = self.channel_lock(channel_id).await;
         let _channel_guard = channel_lock.lock().await;
-        self.wait_for_global(cancelled).await?;
         self.wait_for_account(cancelled).await?;
         self.wait_for_channel(channel_id, cancelled).await?;
         let endpoint = self.message_endpoint(channel_id, message_id)?;
@@ -248,49 +294,68 @@ impl DiscordDeleteClient {
             owner_user_id,
             binding: expected,
         };
+        let mut ambiguous = false;
         for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
-            self.wait_for_global(cancelled).await?;
-            self.wait_for_account(cancelled).await?;
-            self.wait_for_channel(channel_id, cancelled).await?;
-            check_cancelled(cancelled)?;
-
-            match self
-                .request_ownership(endpoint.clone(), &expected, token, cancelled)
-                .await
-            {
-                Ok(()) => {}
-                Err(DiscordDeleteError::Transient) if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {
-                    self.wait_for_transient_retry(attempt, cancelled).await?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            check_cancelled(cancelled)?;
-
-            let response = self
-                .client
-                .delete(endpoint.clone())
-                .header(reqwest::header::AUTHORIZATION, token)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .send()
+            let result = self
+                .delete_attempt(&endpoint, &expected, token, cancelled)
                 .await;
-            match response {
-                Ok(response) => match response.status().as_u16() {
-                    204 => return Ok(DeleteOutcome::Deleted),
-                    404 => return Ok(DeleteOutcome::AlreadyAbsent),
-                    401 => return Err(DiscordDeleteError::Authentication),
-                    403 => return Err(DiscordDeleteError::Permission),
-                    429 => return Err(self.rate_limit(response, cancelled).await),
-                    500..=599 if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
-                    500..=599 => return Err(DiscordDeleteError::Ambiguous),
-                    _ => return Err(DiscordDeleteError::Permanent),
-                },
-                Err(_) if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
-                Err(_) => return Err(DiscordDeleteError::Ambiguous),
+            match result {
+                Ok(DeleteOutcome::Deleted) => return result,
+                Err(DiscordDeleteError::Ambiguous) => ambiguous = true,
+                Err(DiscordDeleteError::Transient) if !ambiguous => {}
+                // A 404, 429 or failed recheck cannot settle an earlier lost response.
+                _ if ambiguous => return Err(DiscordDeleteError::Ambiguous),
+                _ => return result,
             }
-            self.wait_for_transient_retry(attempt, cancelled).await?;
+            if attempt + 1 == MAX_TRANSIENT_ATTEMPTS {
+                return result;
+            }
+            if let Err(error) = self.wait_for_transient_retry(attempt, cancelled).await {
+                return Err(if ambiguous {
+                    DiscordDeleteError::Ambiguous
+                } else {
+                    error
+                });
+            }
         }
         Err(DiscordDeleteError::Ambiguous)
+    }
+
+    async fn delete_attempt(
+        &self,
+        endpoint: &url::Url,
+        expected: &LiveMessageExpectation<'_>,
+        token: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<DeleteOutcome, DiscordDeleteError> {
+        self.wait_for_account(cancelled).await?;
+        self.wait_for_channel(expected.channel_id, cancelled)
+            .await?;
+        self.request_ownership(endpoint.clone(), expected, token, cancelled)
+            .await?;
+        self.check_rate_limit(expected.channel_id, cancelled)
+            .await?;
+        let response = self
+            .client
+            .delete(endpoint.clone())
+            .header(reqwest::header::AUTHORIZATION, token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| DiscordDeleteError::Ambiguous)?;
+        match response.status().as_u16() {
+            204 => Ok(DeleteOutcome::Deleted),
+            404 => confirm_unknown_message(response, cancelled)
+                .await
+                .map(|()| DeleteOutcome::AlreadyAbsent),
+            401 => Err(DiscordDeleteError::Authentication),
+            403 => Err(DiscordDeleteError::Permission),
+            429 => Err(self
+                .rate_limit(expected.channel_id, response, cancelled)
+                .await),
+            500..=599 => Err(DiscordDeleteError::Ambiguous),
+            _ => Err(DiscordDeleteError::Permanent),
+        }
     }
 
     fn validate_target(
@@ -339,7 +404,8 @@ impl DiscordDeleteClient {
         token: &str,
         cancelled: &AtomicBool,
     ) -> Result<(), DiscordDeleteError> {
-        check_cancelled(cancelled)?;
+        self.check_rate_limit(expected.channel_id, cancelled)
+            .await?;
         let response = self
             .client
             .get(endpoint)
@@ -348,6 +414,11 @@ impl DiscordDeleteClient {
             .send()
             .await
             .map_err(|_| DiscordDeleteError::Transient)?;
+        if response.status().as_u16() == 429 {
+            return Err(self
+                .rate_limit(expected.channel_id, response, cancelled)
+                .await);
+        }
         check_cancelled(cancelled)?;
         match response.status().as_u16() {
             200 => {
@@ -365,19 +436,23 @@ impl DiscordDeleteClient {
             }
             401 => Err(DiscordDeleteError::Authentication),
             403 => Err(DiscordDeleteError::Permission),
-            404 => Err(DiscordDeleteError::NotFound),
-            429 => Err(self.rate_limit(response, cancelled).await),
+            404 => {
+                confirm_unknown_message(response, cancelled).await?;
+                Err(DiscordDeleteError::NotFound)
+            }
             500..=599 => Err(DiscordDeleteError::Transient),
             _ => Err(DiscordDeleteError::Permanent),
         }
     }
 
-    async fn wait_for_global(&self, cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
-        let deadline = *self.global_deadline.lock().await;
-        if let Some(deadline) = deadline {
-            wait_until(deadline, cancelled).await?;
-        }
-        Ok(())
+    async fn check_rate_limit(
+        &self,
+        channel: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<(), DiscordDeleteError> {
+        let limits = self.rate_limits.lock().await;
+        check_cancelled(cancelled)?;
+        limits.check(channel, Instant::now())
     }
 
     async fn wait_for_account(&self, cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
@@ -425,36 +500,68 @@ impl DiscordDeleteClient {
 
     async fn rate_limit(
         &self,
+        channel: &str,
         response: reqwest::Response,
         cancelled: &AtomicBool,
     ) -> DiscordDeleteError {
-        let bytes = match bounded_body(response, MAX_RATE_LIMIT_BODY, cancelled).await {
-            Ok(bytes) => bytes,
-            Err(error) => return error,
-        };
         #[derive(Deserialize)]
         struct RateLimit {
             retry_after: f64,
             #[serde(default)]
             global: bool,
         }
-        let limit: RateLimit = match serde_json::from_slice(&bytes) {
-            Ok(limit) => limit,
-            Err(_) => return DiscordDeleteError::Transient,
+        let parsed = match bounded_body(response, MAX_ERROR_BODY, cancelled).await {
+            Ok(bytes) => serde_json::from_slice::<RateLimit>(&bytes).ok(),
+            Err(_) => None,
         };
-        if !limit.retry_after.is_finite() || limit.retry_after <= 0.0 {
-            return DiscordDeleteError::Transient;
+        // An unreadable response has unknown scope. Apply it to the whole client.
+        let global = parsed.as_ref().is_none_or(|limit| limit.global);
+        let now = Instant::now();
+        let deadline = parsed
+            .and_then(|limit| {
+                let millis = (limit.retry_after * 1000.0).ceil();
+                if !(millis > 0.0 && millis < u64::MAX as f64) {
+                    return None;
+                }
+                now.checked_add(Duration::from_millis(millis as u64))
+            })
+            .map_or(RetryDeadline::Indefinite, RetryDeadline::Until);
+        let mut limits = self.rate_limits.lock().await;
+        limits.record(channel, global, deadline, now);
+        if cancelled.load(Ordering::Acquire) {
+            return DiscordDeleteError::Cancelled;
         }
-        let duration =
-            Duration::from_secs_f64(limit.retry_after.min(MAX_RETRY_AFTER.as_secs_f64()));
-        let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-        if limit.global {
-            *self.global_deadline.lock().await = Some(Instant::now() + duration);
-        }
-        DiscordDeleteError::RateLimited {
-            retry_after_millis: millis,
-            global: limit.global,
-        }
+        limits
+            .check(channel, now)
+            .expect_err("a new rate limit blocks requests")
+    }
+}
+
+async fn confirm_unknown_message(
+    response: reqwest::Response,
+    cancelled: &AtomicBool,
+) -> Result<(), DiscordDeleteError> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: u32,
+    }
+    let bytes = bounded_body(response, MAX_ERROR_BODY, cancelled)
+        .await
+        .map_err(|error| {
+            if error == DiscordDeleteError::Cancelled {
+                error
+            } else {
+                DiscordDeleteError::Permanent
+            }
+        })?;
+    // The provider's numeric code belongs to a JSON object. Serde also
+    // accepts positional arrays for a struct unless the shape is checked.
+    if bytes.trim_ascii_start().starts_with(b"{")
+        && serde_json::from_slice::<ErrorBody>(&bytes).is_ok_and(|body| body.code == 10008)
+    {
+        Ok(())
+    } else {
+        Err(DiscordDeleteError::Permanent)
     }
 }
 
@@ -500,9 +607,10 @@ fn check_cancelled(cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
 async fn wait_until(deadline: Instant, cancelled: &AtomicBool) -> Result<(), DiscordDeleteError> {
     loop {
         check_cancelled(cancelled)?;
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Ok(());
-        };
+        }
         tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
     }
 }
@@ -512,4 +620,34 @@ async fn wait_duration(
     cancelled: &AtomicBool,
 ) -> Result<(), DiscordDeleteError> {
     wait_until(Instant::now() + duration, cancelled).await
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_deadlines_expire_only_at_the_full_provider_time() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut limits = RateLimits::default();
+        limits.record("a", true, RetryDeadline::Until(at(600_000)), start);
+        limits.record("b", true, RetryDeadline::Until(at(1_000)), start);
+        limits.record("a", false, RetryDeadline::Until(at(601_000)), start);
+        for (channel, now, remaining, global) in [
+            ("b", 300_000, 300_000, true),
+            ("a", 600_000, 1_000, false),
+            ("a", 600_999, 1, false),
+        ] {
+            assert_eq!(
+                limits.check(channel, at(now)),
+                Err(DiscordDeleteError::RateLimited {
+                    retry_after_millis: Some(remaining),
+                    global,
+                })
+            );
+        }
+        assert_eq!(limits.check("b", at(600_000)), Ok(()));
+        assert_eq!(limits.check("a", at(601_000)), Ok(()));
+    }
 }

@@ -48,18 +48,23 @@ The normal Docker `checks` target runs parser tests/fmt/strict Clippy on both ar
 
 Native CI on the exact final revision, separately authorized real-export/Keychain/manual validation, code review and publication are distinct gates. No Apple account or notarization requirement is introduced.
 
+### Offline X archive acceptance
+
+Use a synthetic single-part ZIP containing account metadata, an authored post with a searchable sentinel, a manually typed `RT @` prefix, and rows with structured repost markers. Verify the authored text and its privacy finding survive encrypted import and reopening, both types of structured marker exclude the repost, and repeating a current-policy import reuses its source. Reimport a v1 ZIP and verify the new source includes prefix-only rows. Import the synthetic `src-tauri/test-fixtures/x-archive/multipart.zip`, reopen its source offline and check all three unique posts and the privacy match from part 2. Check reordered members, invalid numbering, mismatched wrappers, duplicate observations, cancellation and a malformed final part after a batch has been staged. Switch from a live provider to X and verify only archive search is available. An unsupported provider or malformed archive must never expose Telegram controls. Exercise picker cancellation and quit during import on macOS separately.
+
 ### Discord live acceptance
 
 Development browser harness tests use synthetic credentials only and are separate from live acceptance. Import/search validation alone does not establish deletion, rate-limit or native credential behavior.
 
 - Import a current Data Package through the native picker; confirm the path and raw ZIP bytes never appear in frontend state or logs, progress counters advance, cancellation stops uncommitted work, and the imported source is searchable without Discord authentication.
+- Open the Discord start or retry picker, switch workspaces or session generations, then return a selection. Confirm the stale request starts no worker and preserves the previous checkpoint.
 - Open a retained Discord import with supported pre-hardening sealed plans. Confirm original seals, account/source records, terminal outcomes and counters remain intact; unfinished jobs stop for a fresh review and never replay automatically. Historical plans cannot receive execution authorization.
 - Cause an isolated candidate-source opening failure using synthetic data, not the owner's profile. Confirm the previous workspace/context and saved state remain usable, source discovery still works, and an explicit corrected retry succeeds without reimporting or clearing credentials. Stale requests from the retired source must fail after a successful switch.
 - Confirm production/preview builds discover no browser-debug providers and expose the browser-neutral manual-entry path. In a development-only synthetic compatibility run, test Chromium-family and Firefox harnesses separately: each must open a visible fresh temporary profile, bind automation to loopback, never touch the existing browser profile, close on success/cancel/timeout, and complete best-effort profile cleanup. Never use a real Discord credential for the development harness.
 - For manual entry, confirm the field is password-masked, autocomplete/spellcheck are off, the value clears immediately on submit and unmount, and neither success nor failure responses echo it.
 - Verify a mismatched Discord account is rejected before plan creation. Verify memory-only is the default; opt-in Keychain persistence survives restart once, and **Forget** removes it without damaging Telegram/archive keys.
 - Select one harmless owner-authored message whose exact channel/message IDs exist in the archive. Confirm the review names Discord risk, requires `DELETE DISCORD MESSAGES` plus device-owner authorization, sends only the exact DELETE target, and a second participant sees the message disappear.
-- Exercise 204, already-absent 404, 401, 403, route/global 429, recoverable 5xx, exhausted 5xx/network ambiguity, cancel, and restart. Confirm deleted/failed/uncertain counters are truthful, duplicate execution is blocked, and no live response widens the frozen archive targets.
+- Exercise 204, 401, 403, route/global 429, recoverable 5xx, exhausted 5xx/network ambiguity, cancel, and restart. Test HTTP 404 on both the ownership check and deletion. Only a bounded JSON object with the numeric Unknown Message code (10008) establishes exact absence. Unknown Channel (10003), empty, malformed and oversized bodies must leave the already-absent count unchanged. A lost delete response followed by an absent message must count as uncertain. Confirm the outcome counters are truthful, duplicate execution is blocked, and every request uses the frozen archive targets.
 - Measure a multi-channel harmless run. Confirm each channel is serialized, the 1.5-second-plus-jitter floor and account ceiling are respected, four-channel concurrency is not exceeded, and the UI remains explicit when a server-provided wait delays completion.
 
 ### Telegram compatibility
@@ -131,6 +136,8 @@ For every accepted operation, verify from both participating accounts after TDLi
 ## Reliability cases
 
 - Inject `FLOOD_WAIT_2`/429 for capability fetch and deletion. Job becomes queued, stays cancellable, persists its wait, rechecks permissions, and resumes.
+- Check a 429-second wait against a simulated clock. A wait longer than 24 hours or an unreadable duration stops the worker. A representable provider deadline remains in the job diagnostic.
+- Reject leaving after a successful clear, then separately reject removal from the chat list after a successful leave. Verify partial status, zero message deletions and the exact acknowledged effects after reopening.
 - Cancel while queued for flood wait. Job becomes cancelled and makes no later call.
 - Kill the app before a frozen-ID batch, during a completed batch response, and between batches. Recovered jobs must not replay old authorization or auto-resume, even under the same account/source. Retain counters, stop unfinished work for a new plan/review and fresh device-owner grant, and never turn ambiguous outcomes into confirmed deletions.
 - Kill the app around whole-history, self-only history, sender-wide, and permanent group-deletion calls. An ambiguous nonterminal job must stop with `restart_requires_new_review`; it must not replay against later messages until the user creates and authorizes a new plan.

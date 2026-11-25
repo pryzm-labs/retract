@@ -20,7 +20,7 @@
 
 *Synthetic fixture data shown; no real Telegram account or conversation is pictured.*
 
-Retract is a local-first macOS desktop app for searching and cleaning Telegram and Discord history. Credentials, sessions, imported archives, message search, sensitive-data detection, and deletion execution stay on your Mac. There is no Retract cloud service or telemetry.
+Retract is a local-first macOS desktop app for searching Telegram, Discord and X history, with reviewed cleanup for Telegram and Discord. Archive search and sensitive-data classification run on your Mac. Telegram live search passes your query to TDLib, which can contact Telegram. Reviewed remote deletions contact the selected provider. There is no Retract cloud service or telemetry.
 
 ## What Retract can do
 
@@ -46,7 +46,7 @@ Telegram deletion is not global erasure. Forwarded messages, quoted copies, scre
 > [!CAUTION]
 > Discord explicitly says that automating a normal user account (a “self-bot”) is forbidden and can result in account termination. Retract's Discord cleanup is an unofficial, unsupported form of normal-user automation. Use it only if you understand and accept that account risk. See [Discord's self-bot policy](https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots).
 
-Discord deletion is also not guaranteed global erasure. Access may have changed since the archive was created, attachments can remain cached for a period, and legal, safety, backup, quoted, copied, or downloaded records may remain. A successful run means Discord returned success or that the exact message was already absent; an ambiguous response is never reported as confirmed deletion.
+Discord deletion is also not guaranteed global erasure. Access may have changed since the archive was created, attachments can remain cached for a period, and legal, safety, backup, quoted, copied, or downloaded records may remain. Retract counts a deletion when Discord acknowledges it. It records a message as already absent only when Discord returns HTTP 404 with its “Unknown Message” code (10008). If a delete response was lost, a later report of absence leaves the outcome uncertain.
 
 ## Install an unsigned preview
 
@@ -86,7 +86,9 @@ Environment variables in [`.env.example`](.env.example) are optional developer a
 
 ## Choose a data source
 
-On first launch, Retract asks you to connect Telegram or import a Discord Data Package. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
+On first launch, choose Telegram, a Discord Data Package, or an X archive. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
+
+From Telegram sign-in or first-run Telegram setup, use **Choose data source** to open an imported archive. Switching accounts or sources clears the search term and filters. An archive search stays on this Mac.
 
 ### Connect Telegram
 
@@ -110,11 +112,10 @@ First request a package in Discord under **User Settings → Data & Privacy → 
 4. Open Discord connection settings. Read and acknowledge the unsupported-account-automation warning.
 5. Use **Enter token manually**. Follow the in-app browser-neutral Developer Tools instructions and paste only the `Authorization` header value, never a password, cookie, or bot token.
 6. Retract verifies `/users/@me` against the archive owner before it enables cleanup. Browser-debug capture exists only in development builds for synthetic compatibility tests and is intentionally absent from release builds.
-7. Retract verifies `/users/@me` and refuses to continue unless the account ID exactly matches the selected archive owner.
-8. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
-9. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
+7. Leave **Remember in macOS Keychain** off for a memory-only session. If enabled, use **Forget** in Discord connection settings to remove the saved token and clear the in-memory session.
+8. Select exact archive messages, review the frozen plan and pacing warning, type `DELETE DISCORD MESSAGES`, and complete the macOS device-owner prompt.
 
-Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, follows bounded rate-limit delays, and never treats an uncertain request as deleted. Release builds use explicit one-way manual token entry: generic browser-debug token capture is disabled because another local process could race or observe those endpoints. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
+Discord may rate-limit a large cleanup, so completion can take a long time. Retract serializes each channel, caps cross-channel work, honors server retry deadlines and stops the current job when the wait exceeds five minutes, and never treats an uncertain request as deleted. Release builds use explicit one-way manual token entry: generic browser-debug token capture is disabled because another local process could race or observe those endpoints. The archive remains local evidence after remote deletion; removing the original ZIP or Retract's imported copy is a separate decision.
 
 First archive use obtains an independent key and upgrades the shared vault while retaining Telegram secret values. **Quit all older Retract copies before first archive use**; older running binaries cannot honor the credential lease, and vault-format downgrades are unsupported. Imported-copy removal cannot erase exports, remote data, backups or filesystem snapshots. See [storage details](docs/STORAGE.md).
 
@@ -122,11 +123,19 @@ When upgrading older job state, Retract retains its exact ciphertext as `jobs.pr
 
 Connection failures show a safe diagnostic with verification retry and connection settings. If a profile is in use, close the other Retract process before retrying. Invalid state remains blocked: preserve the profile and backup rather than deleting or restoring files. A failed settings replacement can be corrected in the app; recovery rediscovers the current connection without automatically repeating a save or cleanup.
 
+### Search an X archive
+
+Choose **Import X archive** and select the ZIP provided by X. Search imported post text or switch on **Privacy findings only**. You can reopen the imported account from **Choose data source**. This workspace runs offline and needs no X credentials. [X archive download instructions](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive)
+
+Use **Back to data sources** in the X sidebar to switch workspaces. Choosing **Telegram** opens your saved connection or shows setup if you haven’t configured one.
+
+Select the original ZIP. Retract reads `data/account.js` and `data/tweets.js`, plus consecutive files named `data/tweets-part1.js`, `data/tweets-part2.js`, and so on. All parts are searchable together once the import finishes. It reads post and reply text and skips rows with structured repost indicators. Text beginning with `RT @` remains searchable when the archive gives no such indicator, so some results may quote another person. Reimport an older ZIP to include those rows in a new source. DMs and media files are outside this importer’s scope. The ZIP limit is 256 MiB. Single-part exports support up to 2 MiB of post JSON and 4,096 rows. Multipart exports support up to 32 parts, 128 MiB of JSON per part, 512 MiB of selected data and 250,000 rows in total. Each row is limited to 2 MiB and each indexed post to 64 KiB of text. Archive records show historical post text and creation timestamps. They grant no live deletion authority.
+
 ## Make the first deletion safely
 
 Do not begin with an old or valuable chat. Follow the complete [local live-test guide](docs/LOCAL_LIVE_TEST.md); the short version is:
 
-1. Prefer Telegram's test DC. Otherwise create a new private group with one informed participant.
+1. Complete the applicable disposable test-DC cases in the test plan before any production smoke test. A production test requires separate owner authorization and a new private group with an informed participant.
 2. Send a unique harmless text message, a disposable image, and a disposable file from your own account.
 3. Search the unique token in Retract and filter to **Mine**.
 4. Select only those fixtures and confirm the impact panel says **Delete for everyone** for every item.

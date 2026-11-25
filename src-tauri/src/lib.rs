@@ -30,6 +30,7 @@ use tokio::sync::RwLock;
 pub(crate) struct RuntimeState {
     pub(crate) service: RwLock<Arc<ProviderService>>,
     pub(crate) archives: Arc<persistence::archive::ArchiveOwner>,
+    pub(crate) x_imports: providers::x::commands::Imports,
     pub(crate) discord_imports: providers::discord::import::DiscordImportOwner,
     pub(crate) discord_session: Arc<providers::discord::session::DiscordSessionOwner>,
     pub(crate) discord_capture:
@@ -39,10 +40,12 @@ pub(crate) struct RuntimeState {
 impl RuntimeState {
     /// Application exit owns the credential-clear callback; tests inject it.
     pub(crate) async fn shutdown(&self, clear_cached_secrets: impl FnOnce()) {
+        self.x_imports.stop();
         self.discord_imports.reject_new_starts();
         let current = self.service.write().await;
         current.shutdown().await;
         self.discord_imports.shutdown().await;
+        self.x_imports.drain().await;
         self.discord_session.shutdown();
         self.archives.shutdown().await;
         clear_cached_secrets();
@@ -55,7 +58,7 @@ impl RuntimeState {
     pub(crate) fn new(service: Arc<ProviderService>) -> Self {
         Self::with_archives(
             service,
-            persistence::archive::ArchiveOwner::application(std::path::PathBuf::new()),
+            providers::archive::owner(std::path::PathBuf::new()),
         )
     }
 
@@ -70,6 +73,7 @@ impl RuntimeState {
         );
         Self {
             service: RwLock::new(service),
+            x_imports: Default::default(),
             discord_imports: providers::discord::import::DiscordImportOwner::new(archives.clone()),
             archives,
             discord_session,
@@ -144,7 +148,7 @@ pub fn run() {
         let root = app.path().app_local_data_dir();
         let application_root = root.as_ref().ok().cloned().unwrap_or_default();
         let archives = match &root {
-            Ok(root) => persistence::archive::ArchiveOwner::application(root.clone()),
+            Ok(root) => providers::archive::owner(root.clone()),
             Err(_) => persistence::archive::ArchiveOwner::unavailable(),
         };
         let service = root

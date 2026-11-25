@@ -153,3 +153,31 @@ it("restores a failed import when the source dialog is reopened", async () => {
   expect(await screen.findByRole("button", { name: "Retry failed import" })).toBeVisible();
   expect(screen.getByText("998 staged records · not yet available")).toBeVisible();
 });
+
+it("selects the exact imported X source and exposes saved X accounts", async () => {
+  const xSource = { ...source, scope: { ...source.scope, provider: providerKey("x") }, accountLabel: "X fixture" };
+  vi.spyOn(api, "discordImport").mockResolvedValue({ ...idleImport, sources: [xSource] });
+  vi.spyOn(api, "startXImport").mockResolvedValue(xSource.scope);
+  vi.spyOn(api, "archiveSources").mockResolvedValue([source, xSource]);
+  const select = vi.fn().mockResolvedValue(undefined);
+  render(<SourceSetupDialog context={null} telegramConfigured={false} required onClose={() => {}} onTelegram={() => {}} onSelect={select} onError={() => {}} />);
+  const saved = await screen.findByRole("button", { name: /X fixture/ });
+  expect(saved).toHaveTextContent(new Date(xSource.importedAt).toLocaleString());
+  fireEvent.click(screen.getByRole("button", { name: /Import X archive/ }));
+  await waitFor(() => expect(select).toHaveBeenCalledWith(xSource));
+});
+
+it("discards an X picker result after its dialog is retired", async () => {
+  let finish!: (scope: typeof source.scope) => void;
+  vi.spyOn(api, "startXImport").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  vi.spyOn(api, "discordImport").mockResolvedValue(idleImport);
+  const discover = vi.spyOn(api, "archiveSources").mockResolvedValue([source]);
+  const select = vi.fn();
+  const { unmount } = render(<SourceSetupDialog context={null} telegramConfigured={false} required onClose={() => {}} onTelegram={() => {}} onSelect={select} onError={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: /Import X archive/ }));
+  unmount();
+  finish({ ...scope, provider: providerKey("x") });
+  await Promise.resolve();
+  expect(discover).not.toHaveBeenCalled();
+  expect(select).not.toHaveBeenCalled();
+});

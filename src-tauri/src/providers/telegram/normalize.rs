@@ -93,37 +93,42 @@ pub fn normalize_job(
             selected: plan.summary.selected as u64,
             eligible: job.total as u64,
             deleted: job.deleted as u64,
+            already_absent: None,
             skipped: job.skipped as u64,
             failed: job.failed as u64,
             uncertain: job.uncertain as u64,
         },
+        acknowledged_effects: job.acknowledged_effects.clone(),
         next_batch: job.next_batch as u64,
         retry_at: job.retry_at.or_else(|| {
             job.retry_after_seconds
-                .map(|s| job.updated_at + chrono::Duration::seconds(s.min(86400) as i64))
+                .and_then(|s| super::diagnostics::retry_deadline(job.updated_at, s))
         }),
-        diagnostics: job
-            .error_codes
-            .iter()
-            .enumerate()
-            .map(|(index, code)| {
-                job.scoped_diagnostics
-                    .get(index)
-                    .filter(|d| legacy_diagnostic_code(d.code) == code)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let mut diagnostic = safe_diagnostic(code);
-                        if diagnostic.code == ErrorCode::RateLimited {
-                            diagnostic.retry_at = job.retry_at;
-                        }
-                        diagnostic
-                    })
-            })
-            .collect(),
+        diagnostics: job_diagnostics(job),
         started_authorized,
         created_at: job.created_at,
         updated_at: job.updated_at,
     })
+}
+
+pub(super) fn job_diagnostics(job: &JobRecord) -> Vec<retract_domain::SafeError> {
+    job.error_codes
+        .iter()
+        .enumerate()
+        .map(|(index, code)| {
+            job.scoped_diagnostics
+                .get(index)
+                .filter(|d| legacy_diagnostic_code(d.code) == code)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut diagnostic = safe_diagnostic(code);
+                    if diagnostic.code == ErrorCode::RateLimited {
+                        diagnostic.retry_at = job.retry_at;
+                    }
+                    diagnostic
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

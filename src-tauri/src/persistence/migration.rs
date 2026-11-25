@@ -51,7 +51,7 @@ pub(super) fn migrate_legacy(
             }
             crate::providers::telegram::model::JobStatus::Queued
             | crate::providers::telegram::model::JobStatus::Running
-                if job.deleted > 0 =>
+                if job.has_acknowledged_progress() =>
             {
                 LegacyTerminalStatus::Partial
             }

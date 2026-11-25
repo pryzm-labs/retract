@@ -642,6 +642,12 @@ fn jobs_reject_scope_or_plan_mismatch_and_blocked_retry_but_keep_eligible_counte
     job.counters.deleted = 3;
     assert!(job.validate(&plan).is_err());
     job.counters.deleted = 1;
+    assert_eq!(job.counters.already_absent, None);
+    job.counters.already_absent = Some(1);
+    job.validate(&plan).unwrap();
+    job.counters.already_absent = Some(u64::MAX);
+    assert!(job.validate(&plan).is_err());
+    job.counters.already_absent = Some(0);
     job.counters.uncertain = 1;
     job.status = JobStatus::Completed;
     assert!(job.validate(&plan).is_err());

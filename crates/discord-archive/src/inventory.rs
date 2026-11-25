@@ -493,7 +493,7 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
             .collect()
     }
 
-    pub(crate) fn selected_name(&self, index: EntryIndex) -> Result<&str, ArchiveError> {
+    pub fn selected_name(&self, index: EntryIndex) -> Result<&str, ArchiveError> {
         self.entries
             .get(index.0)
             .filter(|entry| !entry.directory)
@@ -511,7 +511,7 @@ impl<'a, R: Read + Seek> ArchiveInventory<'a, R> {
         self.consume(index, |_| Ok(()))
     }
 
-    pub(crate) fn consume<T>(
+    pub fn consume<T>(
         &mut self,
         index: EntryIndex,
         parse: impl FnOnce(&mut dyn Read) -> Result<T, ArchiveError>,

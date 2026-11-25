@@ -123,6 +123,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .auth-input input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--field-text); font-size: 11px; user-select: text; }
 .auth-submit { width: 100%; height: 38px; display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 11px; border: 0; border-radius: 8px; background: var(--green); color: #fff; font-size: 10.5px; font-weight: 650; cursor: pointer; }
 .auth-submit:disabled, .qr-start-button:disabled { opacity: .55; cursor: not-allowed; }
+.auth-source-button { width: 100%; margin-top: 12px; }
 .auth-progress, .auth-error { display: flex; align-items: center; gap: 8px; margin-top: 17px; padding: 10px; border-radius: 8px; font-size: 9.5px; line-height: 1.4; }
 .auth-progress { background: var(--surface-soft); color: var(--muted); }
 .auth-error { background: var(--red-soft); color: var(--red-deep); }
@@ -610,3 +611,12 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
   .toast { background: rgba(37,49,45,.98); border-color: #476158; color: #d5e7e0; }
   .toast-error { background: rgba(62,39,39,.98); border-color: #704845; color: #efd5d3; }
 }
+
+.archive-workspace > aside { padding: 24px 16px; gap: 12px; overflow: auto; }
+.archive-back { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.archive-back:hover:not(:disabled) { background: var(--green-soft); }
+.archive-back:disabled { opacity: .55; cursor: wait; }
+.archive-workspace .search-toolbar { display: grid; gap: 12px; }
+.archive-post { padding: 14px; margin-bottom: 5px; border-radius: 10px; background: var(--surface); }
+.archive-post time, .archive-post small { color: var(--muted); }
+.archive-post p { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

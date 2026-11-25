@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, LoaderCircle, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@retract/api";
 import { CommittedSettingsError, ProviderApiError } from "./providers/api";
@@ -24,7 +24,7 @@ import type {
   PlanView,
   SaveConnectionSettingsResult,
   SearchResponse,
-  DiscordSource
+  ArchiveSource
 } from "./types";
 
 interface ToastState {
@@ -88,6 +88,14 @@ export default function App() {
       actionInFlight.current = false;
       pendingRemovalJobs.current.clear();
       setBusyLabel(null);
+      setQuery("");
+      setDirection("any");
+      setContentFilter("all");
+      setDateFilter("any");
+      setExcludePinned(false);
+      setPrivacyScan(false);
+      setScope("all");
+      setChatQuery("");
       setSelectedChatId(null);
       setSelectedMessages(new Map());
       setCompletedDiscordMessageKeys(new Set());
@@ -621,15 +629,7 @@ export default function App() {
     }
   };
 
-  const activateDiscordSource = useCallback((next: AppSnapshot) => {
-    setQuery("");
-    setDirection("any");
-    setContentFilter("all");
-    setDateFilter("any");
-    setExcludePinned(false);
-    setPrivacyScan(false);
-    setScope("all");
-    setChatQuery("");
+  const activateSource = useCallback((next: AppSnapshot) => {
     setSourceSetupOpen(false);
     publish(next);
     if (next.context) {
@@ -638,7 +638,7 @@ export default function App() {
     }
   }, [publish, loadSnapshot]);
 
-  const selectDiscordSource = useCallback(async (source: DiscordSource) => {
+  const selectArchiveSource = useCallback(async (source: ArchiveSource) => {
     const previousContext = currentContext.current;
     const transitionEpoch = ++epoch.current;
     snapshotLoadGeneration.current += 1;
@@ -648,16 +648,16 @@ export default function App() {
     setSearching(false);
     setToast(null);
     try {
-      const next = await api.selectDiscordSource(source.scope, previousContext);
+      const next = await api.selectArchiveSource(source.scope, previousContext);
       if (transitionEpoch !== epoch.current) return;
-      activateDiscordSource(next);
+      activateSource(next);
     } catch (error) {
       if (transitionEpoch !== epoch.current) return;
       try {
         const discovered = await api.bootstrapSnapshot(null);
         if (transitionEpoch !== epoch.current) return;
         if (discovered.context && sameScope(discovered.context.scope, source.scope)) {
-          activateDiscordSource(discovered);
+          activateSource(discovered);
           return;
         }
       } catch {
@@ -667,7 +667,7 @@ export default function App() {
       if (transitionEpoch === epoch.current) setSyncingCatalog(false);
       throw error;
     }
-  }, [activateDiscordSource]);
+  }, [activateSource]);
 
   const sourceError = useCallback((error: unknown) => showError(error, setToast), []);
 
@@ -691,14 +691,35 @@ export default function App() {
     }
   }, [publish, loadSnapshot]);
 
+  const chooseTelegram = async () => {
+    const context = currentContext.current;
+    if (context?.scope.provider !== "x" || !connectionSettings?.setupComplete) {
+      setSourceSetupOpen(false);
+      setSettingsOpen(true);
+      return;
+    }
+    const generation = beginAction("Opening Telegram…");
+    if (generation === null) return;
+    setSourceSetupOpen(false);
+    setToast(null);
+    try {
+      const next = await api.openConfiguredTelegram(context);
+      if (generation === actionGeneration.current) activateSource(next);
+    } catch (error) {
+      if (generation === actionGeneration.current) showError(error, setToast);
+    } finally {
+      endAction(generation);
+    }
+  };
+
   const sourceDialog = sourceSetupOpen && connectionSettings ? (
     <SourceSetupDialog
       context={snapshot?.context ?? null}
       telegramConfigured={connectionSettings.setupComplete}
       required={!connectionSettings.setupComplete && !snapshot?.context}
       onClose={() => setSourceSetupOpen(false)}
-      onTelegram={() => { setSourceSetupOpen(false); setSettingsOpen(true); }}
-      onSelect={selectDiscordSource}
+      onTelegram={() => void chooseTelegram()}
+      onSelect={selectArchiveSource}
       onError={sourceError}
     />
   ) : null;
@@ -717,8 +738,51 @@ export default function App() {
     return <div className="app-loading">{sourceDialog}</div>;
   }
 
+  const setupRequired = !connectionSettings?.setupComplete && !snapshot.context;
+  const settingsDialog = settingsOpen && connectionSettings && (
+    <ConnectionSettingsDialog
+      key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"}
+      context={snapshot.context}
+      settings={connectionSettings}
+      required={setupRequired}
+      onClose={() => {
+        setSettingsOpen(false);
+        if (setupRequired) void openSourceSetup();
+      }}
+      onSaved={applyConnectionSettings}
+      onSaveFailed={recoverConnection}
+    />
+  );
+
+  if (snapshot.context?.scope.provider === "x") {
+    return <div className="app-shell archive-workspace">
+      <aside className="sidebar">
+        <button type="button" className="archive-back" disabled={busy} onClick={() => { setToast(null); setSourceSetupOpen(true); }}><ArrowLeft size={16} aria-hidden="true" /> Back to data sources</button>
+        <h2>X archive</h2><p>{snapshot.accountLabel}</p>
+        {busyLabel && <p role="status">{busyLabel}</p>}
+        {toast && <p role={toast.tone === "error" ? "alert" : "status"}>{toast.message}</p>}
+      </aside>
+      <main className="main-column"><header className="search-toolbar">
+        <label className="global-search">Search archived posts <input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
+        <label><input type="checkbox" checked={privacyScan} onChange={event => setPrivacyScan(event.target.checked)} /> Privacy findings only</label>
+      </header>
+      <section className="message-list" aria-label="Archived posts">
+        {searchError ? <p role="alert">{searchError} <button onClick={() => setSearchVersion(value => value + 1)}>Retry</button></p> :
+          searching ? <p role="status">Searching…</p> : results.messages.length === 0 ? <p>No matching posts.</p> :
+          results.messages.map(post => <article className="archive-post" key={refKey(post.ref)}>
+            <time dateTime={post.sentAt}>{new Date(post.sentAt).toLocaleString()}</time><p>{post.preview}</p>
+            {post.privacyFindings.length > 0 && <small>{post.privacyFindings.join(", ").replaceAll("_", " ")}</small>}
+          </article>)}
+        {results.truncated && <p>Showing a limited set of matches. Refine your search.</p>}
+      </section></main>
+      <aside className="impact-panel"><h2>Archive coverage</h2><p>Search post and reply text from this export. Some results may quote other people. Remote deletion is unavailable.</p></aside>
+      {sourceDialog}
+      {settingsDialog}
+    </div>;
+  }
+
   if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {
-    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => void openSourceSetup()}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}</section>{sourceDialog}</div>;
+    return <div className="app-loading"><section className="loading-card"><h1>Verifying Telegram account</h1>{snapshot.identity.state === "failed" ? <><p role="alert">{snapshot.identity.diagnostic.message}</p><p>Close another Retract process if this profile is in use, then retry. For state errors, preserve the profile and its backup; review connection settings before trying again.</p><button disabled={busy} onClick={() => void retryIdentity()}>Retry verification</button></> : <LoaderCircle className="spin" />}<button disabled={busy} onClick={() => void openSourceSetup()}>Choose data source</button><button disabled={busy} onClick={() => setSettingsOpen(true)}>Connection settings</button>{settingsDialog}</section>{sourceDialog}</div>;
   }
 
   if (syncingCatalog || (snapshot.context && snapshot.catalog.phase !== "ready")) {
@@ -728,10 +792,8 @@ export default function App() {
   if (snapshot.auth.stage !== "ready") {
     return (
       <>
-        <AuthGate context={snapshot.context} auth={snapshot.auth} onRefresh={refreshAuth} onOpenSettings={() => setSettingsOpen(true)} />
-        {connectionSettings && settingsOpen && (
-          <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
-        )}
+        <AuthGate context={snapshot.context} auth={snapshot.auth} onRefresh={refreshAuth} onOpenSources={() => void openSourceSetup()} onOpenSettings={() => setSettingsOpen(true)} />
+        {settingsDialog}
         {sourceDialog}
       </>
     );
@@ -811,9 +873,7 @@ export default function App() {
         <ConfirmDialog plan={plan} busy={busy} onClose={() => !busy && setPlan(null)} onConfirm={executePlan} />
       )}
 
-      {connectionSettings && settingsOpen && (
-        <ConnectionSettingsDialog context={snapshot.context} key={snapshot.context ? scopeKey(snapshot.context.scope) + snapshot.context.sessionGeneration : "setup"} settings={connectionSettings} required={!connectionSettings.setupComplete} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />
-      )}
+      {settingsDialog}
       {sourceDialog}
       {snapshot.context?.scope.provider === "discord" && discordConnectionOpen && (
         <DiscordConnectionDialog context={snapshot.context} onClose={() => setDiscordConnectionOpen(false)} onReady={() => { setDiscordConnectionOpen(false); setToast({ tone: "success", message: "Discord account verified for this archive." }); }} onError={sourceError} />

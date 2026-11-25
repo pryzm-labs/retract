@@ -181,7 +181,7 @@ describe("Retract desktop UI", () => {
       if (holdTelegramSearch) return new Promise((_, reject) => { rejectStaleSearch = reject; });
       return telegramSearch(request, context);
     });
-    vi.spyOn(api, "selectDiscordSource").mockImplementation(async () => {
+    vi.spyOn(api, "selectArchiveSource").mockImplementation(async () => {
       rejectStaleSearch?.(new Error("This action belongs to a different account or source."));
       await new Promise(resolve => window.setTimeout(resolve, 20));
       return discordBootstrap;
@@ -258,7 +258,7 @@ describe("Retract desktop UI", () => {
     vi.spyOn(api, "discordImport").mockResolvedValue({ active: false, sources: [source], progress: null, importScope: null, retryAvailable: false, failureCode: null, warningDetails: [] });
     vi.spyOn(api, "discordSession").mockResolvedValue({ state: "ready", accountId: "42", username: "owner", displayName: "Recovered Archive", remembered: false });
     vi.spyOn(api, "discordBrowsers").mockResolvedValue([]);
-    vi.spyOn(api, "selectDiscordSource").mockImplementation(async () => {
+    vi.spyOn(api, "selectArchiveSource").mockImplementation(async () => {
       nativeSwitched = true;
       throw new Error("This action belongs to a different account or source.");
     });

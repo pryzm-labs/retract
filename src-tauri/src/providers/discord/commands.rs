@@ -1,13 +1,14 @@
+use crate::providers::archive_commands::{SourceView, ready_entries, source_view};
+use crate::providers::archive_file::open_selected;
 use retract_domain::{ErrorCode, SafeError, Scope};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
 
 use super::{
-    application::build_connection,
     browser::{BrowserFamily, BrowserTokenCapture, CaptureCancellation},
     locators::DiscordUserLocator,
     progress::DiscordImportProgress,
@@ -15,132 +16,16 @@ use super::{
 use crate::{
     RuntimeState,
     compatibility::model_v2::{BootstrapRequest, BootstrapResponse, Empty},
-    persistence::archive::{ArchiveSourceEntry, ImportFailureCode, ImportPhase, ImportWarning},
+    persistence::archive::{ImportFailureCode, ImportPhase, ImportWarning},
     provider_service::{decode, encode, safe, validate_version},
 };
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DiscordSourceView {
-    scope: Scope,
-    account_label: String,
-    username: Option<String>,
-    imported_at: Option<chrono::DateTime<chrono::Utc>>,
-    warning_count: usize,
-}
-
-fn source_view(entry: &ArchiveSourceEntry) -> DiscordSourceView {
-    DiscordSourceView {
-        scope: entry.source.scope(),
-        account_label: entry.account.display_name.clone(),
-        username: entry.account.username.clone(),
-        imported_at: entry.source.imported_at,
-        warning_count: entry.source.warnings.len(),
-    }
-}
-
-async fn ready_entries(
-    runtime: &RuntimeState,
-) -> Result<
-    (
-        Arc<crate::persistence::archive::ArchiveService>,
-        Vec<ArchiveSourceEntry>,
-    ),
-    SafeError,
-> {
-    let archives = runtime.archives.open().await.map_err(archive_error)?;
-    let entries = archives.ready_sources().await.map_err(archive_error)?;
-    Ok((archives, entries))
-}
-
-fn archive_error(error: crate::persistence::archive::ArchiveError) -> SafeError {
-    safe(match error {
-        crate::persistence::archive::ArchiveError::UnavailableKey => {
-            ErrorCode::AuthenticationRequired
-        }
-        crate::persistence::archive::ArchiveError::InvalidRecord
-        | crate::persistence::archive::ArchiveError::InvalidStore => ErrorCode::InvalidArchive,
-        crate::persistence::archive::ArchiveError::ScopeMismatch => ErrorCode::NotFound,
-        _ => ErrorCode::Transient,
-    })
-}
-
-#[tauri::command]
-pub(crate) async fn list_sources_v2(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: Value,
-) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<Empty> = decode(request)?;
-    runtime
-        .service
-        .read()
-        .await
-        .check_optional(request.context.as_ref())?;
-    let (_, entries) = ready_entries(&runtime).await?;
-    encode(BootstrapResponse {
-        contract_version: 2,
-        context: runtime.service.read().await.context(),
-        payload: entries.iter().map(source_view).collect::<Vec<_>>(),
-    })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SelectArchive {
-    scope: Scope,
-}
-
-#[tauri::command]
-pub(crate) async fn select_archive_v2(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: Value,
-) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<SelectArchive> = decode(request)?;
-    let mut current = runtime.service.write().await;
-    current.check_optional(request.context.as_ref())?;
-    if current.has_workers().await {
-        return Err(safe(ErrorCode::PermissionChanged));
-    }
-    current.cancel_searches();
-    let (archives, entries) = ready_entries(&runtime).await?;
-    let entry = entries
-        .into_iter()
-        .find(|entry| entry.source.scope() == request.payload.scope)
-        .ok_or_else(|| safe(ErrorCode::NotFound))?;
-    // Prepare and validate the candidate before retiring the usable workspace.
-    // Construction/recovery can fail on retained state; failure must not strand
-    // the user behind a stopped service or prevent a subsequent source retry.
-    let candidate = crate::provider_service::ProviderService::new(build_connection(
-        &runtime.application_root,
-        entry,
-        archives,
-        runtime.discord_session.clone(),
-    )?);
-    let snapshot = match candidate
-        .bootstrap(
-            serde_json::json!({"contractVersion":2,"context":candidate.context(),"payload":{}}),
-        )
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            candidate.shutdown().await;
-            return Err(error);
-        }
-    };
-    current.shutdown().await;
-    *current = candidate;
-    Ok(snapshot)
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportView {
     active: bool,
     progress: Option<DiscordImportProgress>,
-    sources: Vec<DiscordSourceView>,
+    sources: Vec<SourceView>,
     import_scope: Option<Scope>,
     retry_available: bool,
     failure_code: Option<ImportFailureCode>,
@@ -188,35 +73,63 @@ pub(crate) async fn start_discord_import_v2<R: tauri::Runtime>(
     runtime: State<'_, Arc<RuntimeState>>,
     request: Value,
 ) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<Empty> = decode(request)?;
-    runtime
-        .service
-        .read()
-        .await
-        .check_optional(request.context.as_ref())?;
-    let selected = app
-        .dialog()
+    import_with_picker(&runtime, request, ImportAction::Start, || {
+        pick_archive(&app)
+    })
+    .await
+}
+
+enum ImportAction {
+    Start,
+    Retry,
+}
+
+fn pick_archive<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.dialog()
         .file()
         .add_filter("Discord data package", &["zip"])
-        .blocking_pick_file();
-    let Some(path) = selected.and_then(|path| path.into_path().ok()) else {
-        return encode(BootstrapResponse {
-            contract_version: 2,
-            context: runtime.service.read().await.context(),
-            payload: import_view(&runtime).await?,
-        });
+        .blocking_pick_file()
+        .and_then(|path| path.into_path().ok())
+}
+
+async fn import_with_picker(
+    runtime: &RuntimeState,
+    request: Value,
+    action: ImportAction,
+    pick: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Result<Value, SafeError> {
+    validate_version(&request)?;
+    let request: BootstrapRequest<Empty> = decode(request)?;
+    let original = {
+        let service = runtime.service.read().await;
+        service.check_optional(request.context.as_ref())?;
+        service.clone()
     };
-    let file = open_selected(&path).map_err(|_| safe(ErrorCode::InvalidArchive))?;
-    runtime
-        .discord_imports
-        .start_or_retry(file)
-        .await
+    let selected = pick();
+    // A picker can stay open across a workspace switch, including a switch
+    // between two setup services with no active context. Hold the read lease
+    // through worker admission, allowing switches while the dialog is open.
+    let service = runtime.service.read().await;
+    let current = || service.check_optional(request.context.as_ref()).is_ok();
+    if !Arc::ptr_eq(&original, &service) || !current() {
+        return Err(safe(ErrorCode::StaleContext));
+    }
+    if let Some(path) = selected {
+        let file = open_selected(&path).map_err(|_| safe(ErrorCode::InvalidArchive))?;
+        match action {
+            ImportAction::Start => runtime.discord_imports.start_or_retry(file, current).await,
+            ImportAction::Retry => runtime.discord_imports.retry_active(file, current).await,
+        }
         .map_err(import_error)?;
+    }
+    let payload = import_view(runtime).await?;
+    if !current() {
+        return Err(safe(ErrorCode::StaleContext));
+    }
     encode(BootstrapResponse {
         contract_version: 2,
-        context: runtime.service.read().await.context(),
-        payload: import_view(&runtime).await?,
+        context: request.context,
+        payload,
     })
 }
 
@@ -245,36 +158,10 @@ pub(crate) async fn retry_discord_import_v2<R: tauri::Runtime>(
     runtime: State<'_, Arc<RuntimeState>>,
     request: Value,
 ) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<Empty> = decode(request)?;
-    runtime
-        .service
-        .read()
-        .await
-        .check_optional(request.context.as_ref())?;
-    let selected = app
-        .dialog()
-        .file()
-        .add_filter("Discord data package", &["zip"])
-        .blocking_pick_file();
-    let Some(path) = selected.and_then(|path| path.into_path().ok()) else {
-        return encode(BootstrapResponse {
-            contract_version: 2,
-            context: runtime.service.read().await.context(),
-            payload: import_view(&runtime).await?,
-        });
-    };
-    let file = open_selected(&path).map_err(|_| safe(ErrorCode::InvalidArchive))?;
-    runtime
-        .discord_imports
-        .retry_active(file)
-        .await
-        .map_err(import_error)?;
-    encode(BootstrapResponse {
-        contract_version: 2,
-        context: runtime.service.read().await.context(),
-        payload: import_view(&runtime).await?,
+    import_with_picker(&runtime, request, ImportAction::Retry, || {
+        pick_archive(&app)
     })
+    .await
 }
 
 #[tauri::command]
@@ -522,6 +409,7 @@ async fn expected_owner(
 
 fn import_error(error: super::import::DiscordImportError) -> SafeError {
     safe(match error {
+        super::import::DiscordImportError::StaleContext => ErrorCode::StaleContext,
         super::import::DiscordImportError::InvalidArchive
         | super::import::DiscordImportError::UnsupportedProfile
         | super::import::DiscordImportError::InputChanged
@@ -532,32 +420,69 @@ fn import_error(error: super::import::DiscordImportError) -> SafeError {
     })
 }
 
-#[cfg(unix)]
-fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
-    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+#[cfg(test)]
+mod import_picker_tests {
+    use super::*;
+    use crate::{
+        compatibility::fixtures::{RolloverConnection, SyntheticIo, context},
+        persistence::archive::ArchiveOwner,
+        provider_service::ProviderService,
+    };
+    use serde_json::json;
 
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "selected archive is not a regular file",
+    #[test]
+    fn start_and_retry_reject_generation_change_while_picker_is_open() {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let selected = directory.path().join("selected.zip");
+        std::fs::write(&selected, b"synthetic selection").unwrap();
+        let original = context("syntheticContext");
+        let io = Arc::new(SyntheticIo::new(original.clone()));
+        let connection = RolloverConnection::new(&directory.path().join("profile"), io.clone());
+        let state = RuntimeState::with_archives(
+            ProviderService::new(connection),
+            ArchiveOwner::unavailable(),
+        );
+        for action in [ImportAction::Start, ImportAction::Retry] {
+            *io.active.write().unwrap() = Some(original.clone());
+            let request = json!({"contractVersion":2, "context":original, "payload":{}});
+            let result = executor.block_on(import_with_picker(&state, request, action, || {
+                io.active
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .session_generation = uuid::Uuid::new_v4();
+                Some(selected.clone())
+            }));
+            assert!(state.discord_imports.active_progress().is_none());
+            assert_eq!(result.unwrap_err().code, ErrorCode::StaleContext);
+        }
+    }
+
+    #[test]
+    fn setup_import_rejects_replacement_service_with_no_context() {
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let state =
+            RuntimeState::with_archives(ProviderService::setup(), ArchiveOwner::unavailable());
+        let request = json!({"contractVersion":2, "context":null, "payload":{}});
+        let result = executor.block_on(import_with_picker(
+            &state,
+            request,
+            ImportAction::Start,
+            || {
+                *state.service.try_write().unwrap() = ProviderService::setup();
+                None
+            },
         ));
+        assert_eq!(result.unwrap_err().code, ErrorCode::StaleContext);
     }
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(file)
-}
-#[cfg(not(unix))]
-fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
-    File::open(path)
 }
 
 #[cfg(all(test, unix))]

@@ -25,11 +25,7 @@ impl TelegramCleanup {
                     job.backfill_target_chat_ids(plan);
                 }
                 if legacy_unbound && matches!(job.status, JobStatus::Queued | JobStatus::Running) {
-                    job.status = if job.deleted > 0 {
-                        JobStatus::Partial
-                    } else {
-                        JobStatus::Failed
-                    };
+                    job.status = job.failure_status();
                     job.clear_retry();
                     push_error_once(&mut job, "legacy_store_requires_new_review");
                 } else if matches!(job.status, JobStatus::Queued | JobStatus::Running)
@@ -42,11 +38,7 @@ impl TelegramCleanup {
                             | PlanOperation::DeleteGroup
                     )
                 {
-                    job.status = if job.deleted > 0 {
-                        JobStatus::Partial
-                    } else {
-                        JobStatus::Failed
-                    };
+                    job.status = job.failure_status();
                     job.clear_retry();
                     push_error_once(&mut job, "restart_requires_new_review");
                 } else if matches!(job.status, JobStatus::Running) {
@@ -234,11 +226,7 @@ impl TelegramCleanup {
         if self.persistence_failed.load(Ordering::Acquire) {
             for job in &mut jobs {
                 if !job.status.is_terminal() {
-                    job.status = if job.deleted > 0 {
-                        JobStatus::Partial
-                    } else {
-                        JobStatus::Failed
-                    };
+                    job.status = job.failure_status();
                     job.clear_retry();
                     push_error_once(job, "state_persistence_failed");
                 }

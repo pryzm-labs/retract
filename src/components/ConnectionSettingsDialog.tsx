@@ -63,7 +63,7 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
       className="connection-dialog"
       onCancel={(event) => {
         event.preventDefault();
-        if (!required && !busy) onClose();
+        if (!busy) onClose();
       }}
     >
       {!required && <button type="button" className="dialog-close" onClick={onClose} disabled={busy} aria-label="Close settings"><X size={18} /></button>}
@@ -136,7 +136,7 @@ export function ConnectionSettingsDialog({ context = null, settings, required, o
 
         <footer className="connection-footer">
           <span className="keychain-note"><LockKeyhole size={14} /> Secrets stay in Keychain</span>
-          {!required && <button type="button" className="cancel-button" disabled={busy} onClick={onClose}>Cancel</button>}
+          <button type="button" className="cancel-button" disabled={busy} onClick={onClose}>{required ? "Choose data source" : "Cancel"}</button>
           <button type="submit" className="confirm-button" disabled={!saveReady || busy}>
             {busy ? <LoaderCircle className="spin" size={15} /> : <RotateCw size={15} />}
             {saved ? "Applied" : "Save settings"}

@@ -134,6 +134,13 @@ describe("record validation through the actual search and job adapters", () => {
     await expect(api.jobs(lifecycleContext)).rejects.toThrow();
     expect(invoke).toHaveBeenLastCalledWith("get_jobs_v2", { request: { contractVersion: 2, context: fixture.context, payload: {} } });
   });
+  it("preserves historical counters and bounds separately recorded absences", () => {
+    const job = wireJob(fixture.job);
+    expect(decodeJob(job).counters.alreadyAbsent).toBeUndefined();
+    const counters = { ...job.counters, eligible: 3, selected: 3, deleted: 1, failed: 0, uncertain: 0, alreadyAbsent: 2 };
+    expect(decodeJob({ ...job, counters }).counters).toMatchObject({ deleted: 1, alreadyAbsent: 2 });
+    expect(() => decodeJob({ ...job, counters: { ...counters, alreadyAbsent: 3 } })).toThrow();
+  });
   it("accepts content refs as dirty refs for item-level provider jobs", () => {
     const job = wireJob(fixture.job);
     job.dirtyRefs = [wireMessage(fixture.messages[0])];
@@ -180,7 +187,8 @@ describe("exact Rust/TypeScript v2 shapes", () => {
     const content = decodeContent(wireMessage(fixture.messages[0]), lifecycleContext.scope);
     const conversation = decodeConversation(wireChat(fixture.chats[0]), lifecycleContext.scope);
     const plan = decodePlan(wirePlan(fixture.context, [fixture.messages[0].ref]), lifecycleContext.scope);
-    const job = decodeJob(wireJob(fixture.job));
+    const wire = wireJob(fixture.job);
+    const job = decodeJob({ ...wire, acknowledgedEffects: ["membership_removed"], counters: { ...wire.counters, alreadyAbsent: 0 } });
     const ref = decodeRef(fixture.messages[0].ref);
     const shapes: Array<[string, string, object]> = [
       ["src-tauri/src/compatibility/model_v2.rs", "BootstrapResponse", bootstrap],

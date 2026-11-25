@@ -1,6 +1,6 @@
 use crate::{
     ActionDescriptor, ActionKind, Availability, ConfirmationTier, DomainError, ErrorCode,
-    SafeError, Scope, ScopedResourceRef, VersionedPayload,
+    ExpectedEffect, SafeError, Scope, ScopedResourceRef, VersionedPayload,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -252,6 +252,9 @@ pub struct JobCounters {
     pub selected: u64,
     pub eligible: u64,
     pub deleted: u64,
+    /// Older Discord records combined DELETE 204 and 404 under `deleted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_absent: Option<u64>,
     pub skipped: u64,
     pub failed: u64,
     pub uncertain: u64,
@@ -265,6 +268,9 @@ pub struct ScopedJobRecord {
     pub dirty_refs: Vec<ScopedResourceRef>,
     pub status: JobStatus,
     pub counters: JobCounters,
+    /// Chat-level effects acknowledged by the provider, in execution order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acknowledged_effects: Vec<ExpectedEffect>,
     pub next_batch: u64,
     pub retry_at: Option<DateTime<Utc>>,
     pub diagnostics: Vec<SafeError>,
@@ -289,6 +295,19 @@ impl ScopedJobRecord {
             return Err(DomainError::InvalidJob);
         }
         canonical_targets(&self.dirty_refs, &self.scope)?;
+        if !self.acknowledged_effects.is_empty() {
+            let mut steps = plan.steps.iter();
+            if !self.started_authorized
+                || !self.acknowledged_effects.iter().all(|effect| {
+                    steps.any(|step| {
+                        step.descriptor.effect == *effect
+                            && step.descriptor.kind != ActionKind::DeleteRemoteItem
+                    })
+                })
+            {
+                return Err(DomainError::InvalidJob);
+            }
+        }
         if (self.status.is_terminal() || self.status == JobStatus::Blocked)
             && self.retry_at.is_some()
         {
@@ -309,7 +328,8 @@ impl ScopedJobRecord {
         let accounted_eligible = self
             .counters
             .deleted
-            .checked_add(self.counters.failed)
+            .checked_add(self.counters.already_absent.unwrap_or(0))
+            .and_then(|count| count.checked_add(self.counters.failed))
             .and_then(|count| count.checked_add(self.counters.uncertain))
             .ok_or(DomainError::InvalidJob)?;
         if self.counters.eligible > self.counters.selected

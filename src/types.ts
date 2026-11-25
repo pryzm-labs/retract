@@ -229,7 +229,7 @@ export interface SaveConnectionSettingsResult {
   snapshot: AppSnapshot;
 }
 
-export interface DiscordSource {
+export interface ArchiveSource {
   scope: Scope;
   accountLabel: string;
   username: string | null;
@@ -255,7 +255,7 @@ export interface DiscordImportProgress {
 export interface DiscordImportStatus {
   active: boolean;
   progress: DiscordImportProgress | null;
-  sources: DiscordSource[];
+  sources: ArchiveSource[];
   importScope: Scope | null;
   retryAvailable: boolean;
   failureCode: "invalid_archive" | "unsupported_profile" | "limit_exceeded" | "input_changed" | "incomplete_source" | "storage_failure" | null;

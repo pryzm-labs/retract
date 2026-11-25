@@ -320,6 +320,7 @@ fn job(plan: &RemediationPlan) -> ScopedJobRecord {
         scope: plan.scope.clone(),
         dirty_refs: plan.targets.clone(),
         status: JobStatus::Queued,
+        acknowledged_effects: Vec::new(),
         counters: JobCounters {
             selected: 2,
             eligible: 2,
@@ -629,7 +630,11 @@ fn wrong_legacy_profile_unknown_headers_and_corrupt_ciphertext_fail_closed() {
 
 #[test]
 fn missing_active_file_with_backup_or_candidate_artifact_requires_recovery() {
-    for artifact in ["jobs.pre-provider.enc", "jobs.enc.tmp"] {
+    for artifact in [
+        "jobs.pre-provider.enc",
+        "jobs.enc.tmp",
+        "jobs.enc.tmp.synthetic",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join(artifact), b"migration evidence").unwrap();
 
@@ -1246,11 +1251,58 @@ fn default_store_entry_is_fail_closed_for_provider_backed_v3_state() {
 }
 
 #[test]
-fn failed_private_write_never_publishes_the_candidate() {
+fn job_save_preserves_an_existing_candidate_name() {
     let directory = tempfile::tempdir().unwrap();
     let store = open_validated(directory.path());
+    let previous = directory.path().join("jobs.enc.tmp");
+    fs::write(&previous, b"retained evidence").unwrap();
+    store
+        .transaction(|state| {
+            state.identities.push(account());
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    assert_eq!(fs::read(previous).unwrap(), b"retained evidence");
+    assert_eq!(
+        open_validated(directory.path())
+            .snapshot()
+            .unwrap()
+            .identities
+            .len(),
+        1
+    );
+}
+
+struct FailCandidateWrite(AtomicBool);
+
+impl StoreIo for FailCandidateWrite {
+    fn write_candidate(
+        &self,
+        directory: &Path,
+        bytes: &[u8],
+    ) -> Result<tempfile::NamedTempFile, AppError> {
+        if self.0.load(Ordering::Acquire) {
+            return Err(io::Error::other("synthetic candidate write failure").into());
+        }
+        RealStoreIo.write_candidate(directory, bytes)
+    }
+}
+
+#[test]
+fn failed_private_write_never_publishes_the_candidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let io = Arc::new(FailCandidateWrite(AtomicBool::new(false)));
+    let store = FoundationStore::open_with_test_key_and_io_and_payload_validator(
+        directory.path().to_path_buf(),
+        binding(),
+        CURRENT_KEY,
+        io.clone(),
+        strict_validator(),
+    )
+    .unwrap();
     let original_bytes = fs::read(directory.path().join("jobs.enc")).unwrap();
-    fs::create_dir(directory.path().join("jobs.enc.tmp")).unwrap();
+    io.0.store(true, Ordering::Release);
 
     assert!(matches!(
         store.transaction(|state| {
@@ -1281,7 +1333,7 @@ impl StoreIo for CorruptVerificationIo {
         Ok(bytes)
     }
 
-    fn replace(&self, from: &Path, to: &Path) -> Result<(), AppError> {
+    fn replace(&self, from: tempfile::NamedTempFile, to: &Path) -> Result<(), AppError> {
         self.real.replace(from, to)
     }
 
@@ -1332,7 +1384,7 @@ impl StoreIo for FailAfterReplaceIo {
         self.real.read_candidate(path)
     }
 
-    fn replace(&self, from: &Path, to: &Path) -> Result<(), AppError> {
+    fn replace(&self, from: tempfile::NamedTempFile, to: &Path) -> Result<(), AppError> {
         self.real.replace(from, to)
     }
 
@@ -1422,7 +1474,7 @@ fn migration_replace_failure_leaves_the_authenticated_legacy_file_authoritative(
         fn read_candidate(&self, path: &Path) -> Result<Vec<u8>, AppError> {
             self.0.read_candidate(path)
         }
-        fn replace(&self, _from: &Path, _to: &Path) -> Result<(), AppError> {
+        fn replace(&self, _from: tempfile::NamedTempFile, _to: &Path) -> Result<(), AppError> {
             Err(io::Error::other("synthetic replace failure").into())
         }
         fn sync_directory(&self, path: &Path) -> Result<(), AppError> {
@@ -1455,12 +1507,12 @@ fn migration_replace_failure_leaves_the_authenticated_legacy_file_authoritative(
 fn interrupted_migration_write_or_verification_keeps_legacy_active_and_retries_safely() {
     let write_directory = tempfile::tempdir().unwrap();
     let write_original = write_fixture(write_directory.path(), "rtrct02");
-    fs::create_dir(write_directory.path().join("jobs.enc.tmp")).unwrap();
     assert!(
-        FoundationStore::open_with_test_key(
+        FoundationStore::open_with_test_key_and_io(
             write_directory.path().to_path_buf(),
             binding(),
             CURRENT_KEY,
+            Arc::new(FailCandidateWrite(AtomicBool::new(true))),
         )
         .is_err()
     );
@@ -1472,7 +1524,6 @@ fn interrupted_migration_write_or_verification_keeps_legacy_active_and_retries_s
         fs::read(write_directory.path().join("jobs.pre-provider.enc")).unwrap(),
         write_original
     );
-    fs::remove_dir(write_directory.path().join("jobs.enc.tmp")).unwrap();
     FoundationStore::open_with_test_key(
         write_directory.path().to_path_buf(),
         binding(),
@@ -1521,7 +1572,7 @@ fn a_migration_post_replace_sync_failure_treats_v3_disk_as_authoritative_on_retr
         fn read_candidate(&self, path: &Path) -> Result<Vec<u8>, AppError> {
             self.real.read_candidate(path)
         }
-        fn replace(&self, from: &Path, to: &Path) -> Result<(), AppError> {
+        fn replace(&self, from: tempfile::NamedTempFile, to: &Path) -> Result<(), AppError> {
             self.real.replace(from, to)
         }
         fn sync_directory(&self, path: &Path) -> Result<(), AppError> {

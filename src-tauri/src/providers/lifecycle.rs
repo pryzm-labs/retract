@@ -67,6 +67,9 @@ pub trait FrozenBatchDriver: Sync {
     fn retry(&self, error: &Self::Error) -> Option<Self::Retry>;
     fn fatal(&self, error: &Self::Error) -> bool;
     fn uncertain(&self, error: &Self::Error) -> bool;
+    fn already_absent(&self, _error: &Self::Error) -> bool {
+        false
+    }
     async fn wait(&self, retry: Self::Retry) -> Result<bool, Self::Error>;
     async fn progress(&self, progress: FrozenProgress<'_, Self::Error>) -> Result<(), Self::Error>;
 }
@@ -74,6 +77,7 @@ pub trait FrozenBatchDriver: Sync {
 pub struct FrozenProgress<'a, E> {
     pub next: usize,
     pub skipped: usize,
+    pub already_absent: usize,
     pub deleted: usize,
     pub failed: usize,
     pub uncertain: usize,
@@ -93,11 +97,13 @@ pub async fn run_frozen_batches<D: FrozenBatchDriver>(
             }
             let mut allowed = Vec::new();
             let mut skipped = 0;
+            let mut already_absent = 0;
             let mut reach_error = None;
             for target in driver.targets(&batch) {
                 match driver.reach(&batch, target).await {
                     Ok(true) => allowed.push(target.clone()),
                     Ok(false) => skipped += 1,
+                    Err(error) if driver.already_absent(&error) => already_absent += 1,
                     Err(error) => {
                         reach_error = Some(error);
                         break;
@@ -108,7 +114,10 @@ pub async fn run_frozen_batches<D: FrozenBatchDriver>(
                 return Ok(true);
             }
             let affected = if reach_error.is_some() {
-                driver.targets(&batch).len().saturating_sub(skipped)
+                driver
+                    .targets(&batch)
+                    .len()
+                    .saturating_sub(skipped + already_absent)
             } else {
                 allowed.len()
             };
@@ -127,20 +136,27 @@ pub async fn run_frozen_batches<D: FrozenBatchDriver>(
                 }
                 continue;
             }
+            // Providers can report absence for an exact single-target mutation.
+            let mutation_absent = allowed.len() == 1
+                && result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| driver.already_absent(e));
             let fatal = result.as_ref().err().is_some_and(|e| driver.fatal(e));
             let uncertain = result.as_ref().err().is_some_and(|e| driver.uncertain(e));
             driver
                 .progress(FrozenProgress {
                     next: index + 1,
                     skipped,
+                    already_absent: already_absent + usize::from(mutation_absent),
                     deleted: if result.is_ok() { allowed.len() } else { 0 },
-                    failed: if result.is_err() && !uncertain {
+                    failed: if result.is_err() && !uncertain && !mutation_absent {
                         affected
                     } else {
                         0
                     },
                     uncertain: if uncertain { affected } else { 0 },
-                    error: result.as_ref().err(),
+                    error: result.as_ref().err().filter(|_| !mutation_absent),
                     fatal,
                 })
                 .await?;
@@ -215,7 +231,13 @@ impl ScopedRepository {
         for job in &jobs {
             if let Some(old) = expected.1.iter().find(|j| j.id == job.id)
                 && (job.next_batch < old.next_batch
+                    || !job
+                        .acknowledged_effects
+                        .starts_with(&old.acknowledged_effects)
                     || job.counters.deleted < old.counters.deleted
+                    || job.counters.already_absent.is_some()
+                        != old.counters.already_absent.is_some()
+                    || job.counters.already_absent < old.counters.already_absent
                     || job.counters.skipped < old.counters.skipped
                     || job.counters.failed < old.counters.failed
                     || job.counters.uncertain < old.counters.uncertain
@@ -276,7 +298,8 @@ pub fn block_foreign_jobs(store: &FoundationStore, scope: &Scope) -> Result<(), 
         for job in &mut state.jobs {
             if scope != &job.scope && !job.status.is_terminal() {
                 if job.status == retract_domain::JobStatus::Running {
-                    job.status = if job.counters.deleted > 0 {
+                    job.status = if job.counters.deleted > 0 || !job.acknowledged_effects.is_empty()
+                    {
                         retract_domain::JobStatus::Partial
                     } else {
                         retract_domain::JobStatus::Failed

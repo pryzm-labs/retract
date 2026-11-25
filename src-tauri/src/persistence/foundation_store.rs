@@ -19,15 +19,15 @@ use super::{
 use crate::{
     error::AppError,
     secure_store::{
-        KEY_LENGTH, LegacyCipherFormat, decode_legacy_state, decrypt_authenticated,
-        encrypt_authenticated, load_job_store_key, write_private,
+        JOB_CANDIDATE_PREFIX, KEY_LENGTH, LegacyCipherFormat, decode_legacy_state,
+        decrypt_authenticated, encrypt_authenticated, load_job_store_key, write_private_candidate,
     },
 };
 
 const V3_MAGIC: &[u8; 7] = b"RTRCT03";
 const ACTIVE_FILE: &str = "jobs.enc";
 const BACKUP_FILE: &str = "jobs.pre-provider.enc";
-const CANDIDATE_FILE: &str = "jobs.enc.tmp";
+const LEGACY_CANDIDATE_FILE: &str = "jobs.enc.tmp";
 const LOCK_FILE: &str = "jobs.lock";
 
 #[cfg(test)]
@@ -37,21 +37,20 @@ mod foundation_lock_tests;
 static OPEN_STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<FoundationStore>>>> = OnceLock::new();
 
 pub(super) trait StoreIo: Send + Sync {
-    fn read_candidate(&self, path: &Path) -> Result<Vec<u8>, AppError>;
-    fn replace(&self, from: &Path, to: &Path) -> Result<(), AppError>;
-    fn sync_directory(&self, path: &Path) -> Result<(), AppError>;
-}
+    fn write_candidate(
+        &self,
+        directory: &Path,
+        bytes: &[u8],
+    ) -> Result<tempfile::NamedTempFile, AppError> {
+        write_private_candidate(directory, JOB_CANDIDATE_PREFIX, bytes)
+    }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct RealStoreIo;
-
-impl StoreIo for RealStoreIo {
     fn read_candidate(&self, path: &Path) -> Result<Vec<u8>, AppError> {
         Ok(fs::read(path)?)
     }
 
-    fn replace(&self, from: &Path, to: &Path) -> Result<(), AppError> {
-        fs::rename(from, to)?;
+    fn replace(&self, from: tempfile::NamedTempFile, to: &Path) -> Result<(), AppError> {
+        from.persist(to).map_err(|error| error.error)?;
         Ok(())
     }
 
@@ -60,6 +59,11 @@ impl StoreIo for RealStoreIo {
         Ok(())
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RealStoreIo;
+
+impl StoreIo for RealStoreIo {}
 
 struct RuntimeState {
     committed: FoundationState,
@@ -483,10 +487,19 @@ fn initialize_state(
             Ok(state)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if profile_dir.join(BACKUP_FILE).exists() || profile_dir.join(CANDIDATE_FILE).exists() {
-                return Err(AppError::SecureStore(
-                    "migration evidence exists without an active job store".into(),
-                ));
+            for entry in fs::read_dir(profile_dir)? {
+                let name = entry?.file_name();
+                if name == ACTIVE_FILE
+                    || name == BACKUP_FILE
+                    || name == LEGACY_CANDIDATE_FILE
+                    || name
+                        .as_encoded_bytes()
+                        .starts_with(JOB_CANDIDATE_PREFIX.as_bytes())
+                {
+                    return Err(AppError::SecureStore(
+                        "migration evidence exists without an active job store".into(),
+                    ));
+                }
             }
             let state = FoundationState::empty(binding.clone());
             state.validate_with_provider_payloads(binding, payload_validator)?;
@@ -557,16 +570,15 @@ fn durable_save(
         let plaintext = serde_json::to_vec(candidate)
             .map_err(|error| AppError::SecureStore(error.to_string()))?;
         let payload = encrypt_authenticated(V3_MAGIC, key, &store_aad(binding)?, &plaintext)?;
-        let candidate_path = profile_dir.join(CANDIDATE_FILE);
-        write_private(&candidate_path, &payload)?;
-        let actual_bytes = io.read_candidate(&candidate_path)?;
+        let temporary = io.write_candidate(profile_dir, &payload)?;
+        let actual_bytes = io.read_candidate(temporary.path())?;
         let actual = decode_v3(&actual_bytes, key, binding, payload_validator)?;
         if &actual != candidate {
             return Err(AppError::SecureStore(
                 "foundation candidate verification failed".into(),
             ));
         }
-        io.replace(&candidate_path, active_path)?;
+        io.replace(temporary, active_path)?;
         Ok(())
     })();
     if let Err(error) = result {
