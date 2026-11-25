@@ -64,7 +64,7 @@ Cleanup freezes exact owner-authored archive channel/message IDs. Before each de
 
 ### X
 
-The X adapter reads a bounded single-part post archive using the ZIP inventory and the shared encrypted archive worker. Its scoped account feed supports offline post search and privacy findings. It registers no live connection or remediation port. The source picker opens the file in Rust and the webview receives scoped records.
+The X adapter streams bounded single-part and multipart post archives using the ZIP inventory and the shared encrypted archive worker. Its scoped account feed supports offline post search and privacy findings. It registers no live connection or remediation port. The source picker opens the file in Rust and the webview receives scoped records.
 
 ## Compatibility and verification
 

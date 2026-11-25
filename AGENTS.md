@@ -6,7 +6,7 @@ Retract is a free, MIT-licensed, open-source, local-first desktop application fr
 
 - Telegram: established live integration; preserve existing behavior.
 - Discord: existing archive import, search and experimental cleanup; preserve its security boundaries and accurately disclose platform/account risks.
-- X (Twitter): single-part archive import and offline post search; require separate verification and review before adding remediation.
+- X (Twitter): single-part and numbered multipart archive import and offline post search; require separate verification and review before adding remediation.
 - Facebook: possible future provider; out of scope unless explicitly requested.
 
 Keep one application, one shared privacy/search experience, and provider-specific ingestion and remediation. Core functionality must remain useful without a subscription, mandatory paid API, hosted Retract service, telemetry or cloud AI. Optional integrations with external costs must be explicit and user-controlled.

@@ -25,9 +25,14 @@ fn invalid() -> AppError {
 fn require(valid: bool) -> Result<(), AppError> {
     if valid { Ok(()) } else { Err(invalid()) }
 }
-fn profile() -> VersionedPayload {
+fn profile(multipart: bool) -> VersionedPayload {
     VersionedPayload {
-        schema: "x.ytd.single_part".into(),
+        schema: if multipart {
+            "x.ytd.multipart"
+        } else {
+            "x.ytd.single_part"
+        }
+        .into(),
         version: 1,
         payload: json!({}),
     }
@@ -83,7 +88,10 @@ impl ProviderPayloadValidator for Validator {
     fn validate_source(&self, s: &SourceRecord, a: &AccountRecord) -> Result<(), AppError> {
         self.validate_account(a)?;
         s.validate(a).map_err(|_| invalid())?;
-        require(s.kind == SourceKind::ArchiveImport && s.schema_profile == profile())
+        require(
+            s.kind == SourceKind::ArchiveImport
+                && (s.schema_profile == profile(false) || s.schema_profile == profile(true)),
+        )
     }
     fn validate_resource(&self, r: &ProviderResourceRef) -> Result<(), AppError> {
         r.validate().map_err(|_| invalid())?;

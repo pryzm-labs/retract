@@ -36,6 +36,7 @@ pub(crate) fn import_file(
     let initial = FileIdentity::read(&file).ok_or(ArchiveError::InvalidRecord)?;
     let limits = ArchiveLimits {
         max_archive_bytes: 256 * 1024 * 1024,
+        max_observed_bytes: 512 * 1024 * 1024,
         ..ArchiveLimits::default()
     };
     if initial.size > limits.max_archive_bytes {
@@ -47,30 +48,38 @@ pub(crate) fn import_file(
         discord_archive::ArchiveError::LimitExceeded => ArchiveError::LimitExceeded,
         _ => ArchiveError::InvalidRecord,
     };
-    let (account, posts) = {
-        let mut inventory =
-            ArchiveInventory::inspect(&mut file, limits, &cancel).map_err(parse_error)?;
-        parser::parse(&mut inventory).map_err(parse_error)?
-    };
-    if initial.verify(&file).is_none() {
-        return Err(ArchiveError::InvalidRecord);
-    }
+    let mut inventory =
+        ArchiveInventory::inspect(&mut file, limits, &cancel).map_err(parse_error)?;
+    let parser::Layout { account, parts } = parser::inspect(&mut inventory).map_err(parse_error)?;
+    let multipart = parts.len() > 1;
     let runtime = tokio::runtime::Handle::current();
     let service = runtime.block_on(owner.open())?;
-    let resolution = runtime.block_on(service.resolve_or_register_import(NewArchiveImport {
-        provider: key(),
-        native_identity: user(&account.id),
-        display_name: account.username.clone(),
-        username: Some(account.username.clone()),
-        avatar: None,
-        fingerprint: fingerprint.clone(),
-        schema_profile: profile(),
-        parser_policy: "x.coordinator.v2".into(),
-        observed_at: Utc::now(),
-    }))?;
+    let resolution = runtime.block_on(
+        service.resolve_or_register_import(NewArchiveImport {
+            provider: key(),
+            native_identity: user(&account.id),
+            display_name: account.username.clone(),
+            username: Some(account.username.clone()),
+            avatar: None,
+            fingerprint: fingerprint.clone(),
+            schema_profile: profile(multipart),
+            parser_policy: if multipart {
+                "x.multipart.v1"
+            } else {
+                "x.coordinator.v2"
+            }
+            .into(),
+            observed_at: Utc::now(),
+        }),
+    )?;
     let scope = resolution.checkpoint.scope.clone();
     let session = match resolution.disposition {
-        ImportDisposition::Ready => return Ok(scope),
+        ImportDisposition::Ready => {
+            drop(inventory);
+            cancel.check()?;
+            initial.verify(&file).ok_or(ArchiveError::InvalidRecord)?;
+            return Ok(scope);
+        }
         ImportDisposition::Busy => return Err(ArchiveError::Busy),
         ImportDisposition::RetryRequired => {
             runtime.block_on(service.retry_import(&resolution.checkpoint))?
@@ -78,7 +87,7 @@ pub(crate) fn import_file(
         ImportDisposition::Start => resolution.session.ok_or(ArchiveError::StorageFailure)?,
     };
     let observed_at = resolution.checkpoint.observed_at;
-    let result = (|| {
+    let staged = (|| {
         let actor = resource(&scope, ResourceKind::Actor, &account.id);
         let feed = resource(&scope, ResourceKind::Conversation, &account.id);
         let invalid = |_| ArchiveError::InvalidRecord;
@@ -135,7 +144,7 @@ pub(crate) fn import_file(
                 }
             }
         };
-        for post in posts {
+        let mut store_post = |post: parser::Post| -> Result<(), ArchiveError> {
             cancel.check()?;
             let reference = resource(&scope, ResourceKind::Content, &post.id_str);
             let timestamp = DateTime::parse_from_str(&post.created_at, "%a %b %d %H:%M:%S %z %Y")
@@ -169,10 +178,24 @@ pub(crate) fn import_file(
                 append(&batch)?;
                 batch = ImportBatchV2::default();
             }
-        }
+            Ok(())
+        };
+        // Preserve storage/cancellation errors across the inventory's parser-only callback.
+        let mut sink_error = None;
+        let parsed = parser::visit_posts(&mut inventory, &parts, |post| {
+            store_post(post).map_err(|error| {
+                sink_error = Some(error);
+                discord_archive::ArchiveError::ReadFailure
+            })
+        });
+        parsed.map_err(|error| sink_error.unwrap_or_else(|| parse_error(error)))?;
         if !batch.records.contents.is_empty() || !batch.records.actors.is_empty() {
             append(&batch)?;
         }
+        Ok(())
+    })();
+    drop(inventory);
+    let result = staged.and_then(|()| {
         cancel.check()?;
         if digest_file(&mut file, initial.size, &cancel)? != fingerprint
             || initial.verify(&file).is_none()
@@ -181,7 +204,7 @@ pub(crate) fn import_file(
         }
         runtime.block_on(service.finish_import(&session))?;
         Ok(scope)
-    })();
+    });
     if let Err(error) = result {
         if error == ArchiveError::Cancelled {
             runtime.block_on(service.cancel_import(&session))?;

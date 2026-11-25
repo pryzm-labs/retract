@@ -50,7 +50,7 @@ Native CI on the exact final revision, separately authorized real-export/Keychai
 
 ### Offline X archive acceptance
 
-Use a synthetic single-part ZIP containing account metadata, an authored post with a searchable sentinel, and a repost. Verify the authored post and its privacy finding survive encrypted import and reopening, the repost is excluded, and importing the same ZIP again leaves one observation. Switch from a live provider to X and verify only archive search is available. An unsupported provider or malformed archive must never expose Telegram controls. Exercise picker cancellation and quit during import on macOS separately.
+Use a synthetic single-part ZIP containing account metadata, an authored post with a searchable sentinel, a manually typed `RT @` prefix, and rows with structured repost markers. Verify the authored text and its privacy finding survive encrypted import and reopening, both types of structured marker exclude the repost, and repeating a current-policy import reuses its source. Reimport a v1 ZIP and verify the new source includes prefix-only rows. Import the synthetic `src-tauri/test-fixtures/x-archive/multipart.zip`, reopen its source offline and check all three unique posts and the privacy match from part 2. Check reordered members, invalid numbering, mismatched wrappers, duplicate observations, cancellation and a malformed final part after a batch has been staged. Switch from a live provider to X and verify only archive search is available. An unsupported provider or malformed archive must never expose Telegram controls. Exercise picker cancellation and quit during import on macOS separately.
 
 ### Discord live acceptance
 

@@ -1,11 +1,15 @@
-//! Inert parsing of the single-part YTD export. Only the two selected members
-//! are decompressed. The inventory verifies their CRC, names and declared size.
+//! Inert parsing of numbered YTD post arrays in ZIP inventory order-independent form.
 use discord_archive::{ArchiveError as Error, ArchiveInventory, EntryIndex};
 use serde::Deserialize;
-use std::io::{Read, Seek};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read, Seek},
+};
 
 const MAX_ACCOUNT: u64 = 64 * 1024;
-const MAX_POSTS: u64 = 2 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const MAX_PARTS: usize = 32;
+const MAX_RAW_ROW: u64 = 2 * MIB;
 
 #[derive(Deserialize)]
 pub(super) struct Account {
@@ -65,25 +69,52 @@ fn member<T: serde::de::DeserializeOwned, R: Read + Seek>(
         result.map_err(|_| Error::InvalidJson)
     })
 }
-pub(super) fn parse<R: Read + Seek>(
+pub(super) struct Layout {
+    pub account: Account,
+    pub parts: Vec<EntryIndex>,
+}
+
+pub(super) fn inspect<R: Read + Seek>(
     inventory: &mut ArchiveInventory<R>,
-) -> Result<(Account, Vec<Post>), Error> {
+) -> Result<Layout, Error> {
     let mut account = None;
-    let mut tweets = None;
+    let mut parts = BTreeMap::new();
     for i in 0..inventory.entry_count() {
         let index = EntryIndex(i);
-        match inventory.selected_name(index) {
-            Ok("data/account.js") => account = Some(index),
-            Ok("data/tweets.js") => tweets = Some(index),
-            Ok(name)
-                if name.starts_with("data/tweets-part")
-                    || name.starts_with("data/tweet-part")
-                    || name == "data/tweet.js" =>
-            {
+        let number = match inventory.selected_name(index) {
+            Ok("data/account.js") => {
+                account = Some(index);
+                continue;
+            }
+            Ok("data/tweets.js") => 0,
+            Ok(name) if name.starts_with("data/tweets-part") => {
+                let digits = name
+                    .strip_prefix("data/tweets-part")
+                    .and_then(|s| s.strip_suffix(".js"))
+                    .ok_or(Error::UnsupportedProfile)?;
+                if digits.starts_with('0')
+                    || digits.is_empty()
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err(Error::UnsupportedProfile);
+                }
+                let n = digits.parse::<usize>().map_err(|_| Error::LimitExceeded)?;
+                if n >= MAX_PARTS {
+                    return Err(Error::LimitExceeded);
+                }
+                n
+            }
+            Ok(name) if name == "data/tweet.js" || name.starts_with("data/tweet-part") => {
                 return Err(Error::UnsupportedProfile);
             }
-            _ => (),
+            _ => continue,
+        };
+        if parts.insert(number, index).is_some() {
+            return Err(Error::InvalidProfile);
         }
+    }
+    if parts.is_empty() || !parts.keys().copied().eq(0..parts.len()) {
+        return Err(Error::UnsupportedProfile);
     }
     let [account]: [AccountRow; 1] = member(
         inventory,
@@ -94,54 +125,99 @@ pub(super) fn parse<R: Read + Seek>(
     if !valid_id(&account.account.id) || !valid_name(&account.account.username) {
         return Err(Error::InvalidProfile);
     }
-    let Posts(posts) = member(
-        inventory,
-        tweets.ok_or(Error::UnsupportedProfile)?,
-        b"window.YTD.tweets.part0 = ",
-        MAX_POSTS,
-    )?;
-    Ok((account.account, posts))
+    Ok(Layout {
+        account: account.account,
+        parts: parts.into_values().collect(),
+    })
 }
 
-struct Posts(Vec<Post>);
+// Leave the next JSON token available for Serde. Only JSON whitespace is legal.
+fn next_token(reader: &mut impl BufRead) -> Result<Option<u8>, Error> {
+    loop {
+        let bytes = reader.fill_buf().map_err(|_| Error::ReadFailure)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let skip = bytes
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .count();
+        if skip == 0 {
+            return Ok(Some(bytes[0]));
+        }
+        reader.consume(skip);
+    }
+}
 
-impl<'de> Deserialize<'de> for Posts {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Rows;
-        impl<'de> serde::de::Visitor<'de> for Rows {
-            type Value = Posts;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a bounded list of archived posts")
+pub(super) fn visit_posts<R: Read + Seek>(
+    inventory: &mut ArchiveInventory<R>,
+    parts: &[EntryIndex],
+    mut visit: impl FnMut(Post) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let multipart = parts.len() > 1;
+    let member_limit = if multipart { 128 * MIB } else { 2 * MIB };
+    let mut remaining = if multipart { 250_000 } else { 4096 };
+    for (number, &entry) in parts.iter().enumerate() {
+        let prefix = format!("window.YTD.tweets.part{number} = ");
+        inventory.consume(entry, |input| {
+            let mut header = vec![0; prefix.len()];
+            input
+                .read_exact(&mut header)
+                .map_err(|_| Error::InvalidProfile)?;
+            if header != prefix.as_bytes() {
+                return Err(Error::UnsupportedProfile);
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut rows: A,
-            ) -> Result<Posts, A::Error> {
-                use serde::de::Error;
-                let mut posts = vec![];
-                for _ in 0..4096 {
-                    let Some(TweetRow { tweet: post }) = rows.next_element()? else {
-                        return Ok(Posts(posts));
-                    };
+            let mut reader = BufReader::new(input.take(member_limit + 1));
+            if next_token(&mut reader)? != Some(b'[') {
+                return Err(Error::InvalidJson);
+            }
+            reader.consume(1);
+            if next_token(&mut reader)? != Some(b']') {
+                loop {
+                    if remaining == 0 {
+                        return Err(Error::LimitExceeded);
+                    }
+                    remaining -= 1;
+                    // Decode one self-delimiting object, bounding even unknown fields
+                    // before any individual row can consume the entire member budget.
+                    if next_token(&mut reader)? != Some(b'{') {
+                        return Err(Error::InvalidJson);
+                    }
+                    let mut row = (&mut reader).take(MAX_RAW_ROW + 1);
+                    let result =
+                        TweetRow::deserialize(&mut serde_json::Deserializer::from_reader(&mut row));
+                    if row.limit() == 0 {
+                        return Err(Error::LimitExceeded);
+                    }
+                    let post = result.map_err(|_| Error::InvalidJson)?.tweet;
                     if !valid_id(&post.id_str)
                         || post.id.as_ref().is_some_and(|id| id != &post.id_str)
                     {
-                        return Err(A::Error::custom("invalid post identity"));
+                        return Err(Error::InvalidProfile);
                     }
-                    if post.retweeted || post.retweeted_status.is_some() {
-                        continue;
+                    if !post.retweeted && post.retweeted_status.is_none() {
+                        if post.full_text.len() > 64 * 1024 {
+                            return Err(Error::LimitExceeded);
+                        }
+                        visit(post)?;
                     }
-                    if post.full_text.len() > 64 * 1024 {
-                        return Err(A::Error::custom("post exceeds size limit"));
+                    match next_token(&mut reader)? {
+                        Some(b',') => reader.consume(1),
+                        Some(b']') => break,
+                        _ => return Err(Error::InvalidJson),
                     }
-                    posts.push(post);
                 }
-                if rows.next_element::<serde::de::IgnoredAny>()?.is_some() {
-                    return Err(A::Error::custom("too many archived posts"));
-                }
-                Ok(Posts(posts))
             }
-        }
-        deserializer.deserialize_seq(Rows)
+            reader.consume(1);
+            let trailing = next_token(&mut reader)?;
+            if reader.into_inner().limit() == 0 {
+                return Err(Error::LimitExceeded);
+            }
+            if trailing.is_some() {
+                return Err(Error::InvalidJson);
+            }
+            Ok(())
+        })?;
     }
+    Ok(())
 }
