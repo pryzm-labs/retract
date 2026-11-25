@@ -36,8 +36,7 @@ impl ImportTestLaunch for DiscordImportOwner {
     }
 }
 
-#[path = "../../../../crates/discord-archive/tests/common/mod.rs"]
-pub(crate) mod zip_fixture;
+pub(crate) use crate::providers::archive_file::zip_fixture;
 
 const FROZEN: &[u8] = include_bytes!("../../../test-fixtures/discord-import/current-json.zip");
 fn runtime() -> tokio::runtime::Runtime {

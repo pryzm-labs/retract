@@ -1,6 +1,6 @@
 # Architecture
 
-Retract is a local-first Tauri 2 application: React and TypeScript render the UI, while Rust owns credentials, provider access, immutable cleanup plans and execution. There is no hosted Retract service. Telegram uses pinned, statically linked TDLib; Discord uses a locally imported Data Package and, only for cleanup, a verified matching user session. Other providers are not enabled.
+Retract is a local-first Tauri 2 application: React and TypeScript render the UI, while Rust owns credentials, provider access, immutable cleanup plans and execution. There is no hosted Retract service. Telegram uses pinned, statically linked TDLib; Discord uses a locally imported Data Package and, only for cleanup, a verified matching user session. X supplies a read-only archive query port.
 
 ## Component boundaries
 
@@ -61,6 +61,10 @@ The import coordinator retains the selected regular-file descriptor, validates i
 Release builds accept browser-neutral, one-way manual token submission; memory-only sessions are the default and Keychain persistence is opt-in. The backend never returns a saved token to the webview. Browser-debug capture is development-only synthetic compatibility code, not a supported release sign-in method.
 
 Cleanup freezes exact owner-authored archive channel/message IDs. Before each deletion, the live author, channel and message IDs, timestamp, text and ordered attachment filenames must match the reviewed archive evidence. Attachments with identical names cannot be distinguished by this check; live responses cannot discover or add targets. Requests serialize per channel, use bounded cross-channel concurrency/account pacing and honor bounded server delays. Success or exact absence completes a target; permission/authentication failures are explicit, and exhausted network ambiguity remains uncertain. Remote deletion does not remove the local archive or original ZIP.
+
+### X
+
+The X adapter reads a bounded single-part post archive using the ZIP inventory and the shared encrypted archive worker. Its scoped account feed supports offline post search and privacy findings. It registers no live connection or remediation port. The source picker opens the file in Rust and the webview receives scoped records.
 
 ## Compatibility and verification
 

@@ -291,12 +291,17 @@ impl ProviderService {
         // No catalog lookup is performed by bootstrap or identity retry.
         if let Some(context) = &context {
             let provider = self.registration(context).await?;
-            let lifecycle = provider
-                .reviewed_lifecycle()
-                .map_err(|_| safe(ErrorCode::UnsupportedSchema))?;
-            lifecycle.recover(context).await?;
-            self.check(context)?;
-            snapshot.recent_jobs = lifecycle.jobs(context).await?;
+            match provider.reviewed_lifecycle() {
+                Ok(lifecycle) => {
+                    lifecycle.recover(context).await?;
+                    self.check(context)?;
+                    snapshot.recent_jobs = lifecycle.jobs(context).await?;
+                }
+                Err(crate::providers::ProviderRegistryError::UnsupportedCapability(
+                    ProviderCapability::AutomaticRemediation,
+                )) if self.connection.store().is_none() => snapshot.recent_jobs.clear(),
+                Err(_) => return Err(safe(ErrorCode::UnsupportedSchema)),
+            }
             self.check(context)?;
             self.validate_jobs(context, &snapshot.recent_jobs)?;
         }
@@ -359,11 +364,13 @@ impl ProviderService {
                 }
                 let mut snapshot = self.connection.bootstrap()?;
                 snapshot.chats = chats;
-                snapshot.recent_jobs = provider
-                    .reviewed_lifecycle()
-                    .map_err(|_| safe(ErrorCode::UnsupportedSchema))?
-                    .jobs(&context)
-                    .await?;
+                snapshot.recent_jobs = match provider.reviewed_lifecycle() {
+                    Ok(lifecycle) => lifecycle.jobs(&context).await?,
+                    Err(crate::providers::ProviderRegistryError::UnsupportedCapability(
+                        ProviderCapability::AutomaticRemediation,
+                    )) if self.connection.store().is_none() => vec![],
+                    Err(_) => return Err(safe(ErrorCode::UnsupportedSchema)),
+                };
                 self.check(&context)?;
                 self.validate_jobs(&context, &snapshot.recent_jobs)?;
                 encode(snapshot)?

@@ -220,7 +220,7 @@ fn lifecycle_directory_preflight_rejects_alias_and_writable_parent() {
 fn lifecycle_non_macos_production_open_never_creates_files() {
     let fixture = Fixture::new();
     let root = fixture.directory.path().join("absent");
-    let owner = ArchiveOwner::application(root.clone());
+    let owner = crate::providers::archive::owner(root.clone());
     runtime().block_on(async {
         assert_eq!(owner.open().await.err(), Some(ArchiveError::UnavailableKey));
         owner.shutdown().await;

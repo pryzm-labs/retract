@@ -1,6 +1,6 @@
 # Storage and compatibility
 
-Retract keeps Telegram's encrypted TDLib session database, authenticated cleanup state and explicitly imported Discord content in separate stores. Credentials and independent encryption keys live in the versioned macOS Keychain vault. None of these stores provides forensic erasure or a safe automatic downgrade.
+Retract keeps Telegram's encrypted TDLib session database, authenticated cleanup state and explicitly imported Discord and X content in separate stores. Credentials and independent encryption keys live in the versioned macOS Keychain vault. None of these stores provides forensic erasure or a safe automatic downgrade.
 
 ## Job state and migration
 
@@ -16,7 +16,7 @@ Frozen synthetic fixtures under [`src-tauri/test-fixtures/`](../src-tauri/test-f
 
 ## Imported archive storage
 
-Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a production Discord Data Package importer. The source-selection UI can import, search, privacy-scan, and remediate exact owner-authored Discord message IDs after a matching live account is verified. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database. Other archive providers remain unavailable.
+Retract contains an internal encrypted archive repository, a lazy bounded backend service, and a production Discord Data Package importer. The source-selection UI can import, search, privacy-scan, and remediate exact owner-authored Discord message IDs after a matching live account is verified. Telegram continues to use its existing live-provider and foundation-store paths; live Telegram message bodies and existing jobs are not copied into this database. The X importer uses the same encrypted repository under its own provider/account/source scope and validator. It imports post text for offline queries.
 
 ## Native dependency
 
@@ -60,7 +60,7 @@ Each batch is limited to 500 records and 4 MiB of normalized encoded input, incl
 
 Internal queries select one provider/account/source and return that source's complete observation, even if another export contains a newer version of the same resource. Search uses literal FTS phrases rather than raw MATCH operators, with author, content-kind and exclusive date filters. Attachment display names are searchable and use the shared privacy detector; attachment contents and remote locators are not fetched. Queries accept at most 4 KiB of text and return at most 200 records per page; resolution is also limited to 200 references.
 
-Pagination preserves exact timestamp ordering and binds its cursor to scope, filters and the completed import generation. A missing or replaced generation rejects old cursors. The Discord UI queries these interfaces through the scoped provider adapter; other archive providers are not enabled.
+Pagination preserves exact timestamp ordering and binds its cursor to scope, filters and the completed import generation. A missing or replaced generation rejects old cursors. The Discord UI queries these interfaces through the scoped provider adapter; the X archive view uses the same scoped query interfaces for its account feed.
 
 ## Source removal and maintenance
 
@@ -113,6 +113,12 @@ Reference measurement at source `08a67cc3deb595cd6d4f27664467e550eaf636d1`, usin
 | Sampled total disk high, including rollback journal | 498,728,136 |
 
 This workload used rollback journals; no WAL growth was observed. Sampled disk values are lower bounds on actual peaks. The process high-water RSS during removal includes identity pruning and memory-backed `VACUUM`, not their isolated costs. Benchmark execution is separate from standard packaging and native/manual verification.
+
+## X archive profile
+
+The first X profile accepts a single posts part. It reads the exact `window.YTD.account.part0` and `window.YTD.tweets.part0` array assignments from `data/account.js` and `data/tweets.js` as inert JSON. Account and post IDs remain decimal strings. The source records the archive fingerprint and parser policy. Only completed imports become searchable. Media files, DMs, recognized reposts and other datasets are outside this profile. The archive can establish historical observations only.
+
+X documents a ZIP containing machine-readable account and post data. The member names and wrappers are specific to the observed layout, and the compatibility fixture uses invented account and post values. [X archive documentation](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive) · [Published archive structure](https://totohu.com/x-archive-structure/)
 
 ## Discord Data Package profile
 

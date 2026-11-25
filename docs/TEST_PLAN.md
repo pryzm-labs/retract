@@ -48,6 +48,10 @@ The normal Docker `checks` target runs parser tests/fmt/strict Clippy on both ar
 
 Native CI on the exact final revision, separately authorized real-export/Keychain/manual validation, code review and publication are distinct gates. No Apple account or notarization requirement is introduced.
 
+### Offline X archive acceptance
+
+Use a synthetic single-part ZIP containing account metadata, an authored post with a searchable sentinel, and a repost. Verify the authored post and its privacy finding survive encrypted import and reopening, the repost is excluded, and importing the same ZIP again leaves one observation. Switch from a live provider to X and verify only archive search is available. An unsupported provider or malformed archive must never expose Telegram controls. Exercise picker cancellation and quit during import on macOS separately.
+
 ### Discord live acceptance
 
 Development browser harness tests use synthetic credentials only and are separate from live acceptance. Import/search validation alone does not establish deletion, rate-limit or native credential behavior.

@@ -610,3 +610,9 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
   .toast { background: rgba(37,49,45,.98); border-color: #476158; color: #d5e7e0; }
   .toast-error { background: rgba(62,39,39,.98); border-color: #704845; color: #efd5d3; }
 }
+
+.archive-workspace > aside { padding: 24px 16px; gap: 12px; overflow: auto; }
+.archive-workspace .search-toolbar { display: grid; gap: 12px; }
+.archive-post { padding: 14px; margin-bottom: 5px; border-radius: 10px; background: var(--surface); }
+.archive-post time, .archive-post small { color: var(--muted); }
+.archive-post p { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }

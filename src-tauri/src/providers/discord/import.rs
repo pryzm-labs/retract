@@ -11,6 +11,7 @@ use crate::persistence::archive::{
     ImportSession, ImportWarningCode, ImportWarningDelta, MAX_BATCH_BYTES, MAX_BATCH_RECORDS,
     NewArchiveImport, encoded_size,
 };
+use crate::providers::archive_file::FileIdentity;
 use discord_archive::{
     ArchiveInventory, ArchiveLimits, Cancellation, ChannelContext, DiscordArchiveReader, DiscordId,
     DiscordProfile, EntryIntegrity, ExportAccount, RecordSink, SentMessage,
@@ -19,7 +20,6 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -413,40 +413,6 @@ impl Drop for DiscordImportOwner {
     }
 }
 
-#[derive(PartialEq, Eq)]
-struct FileIdentity {
-    dev: u64,
-    inode: u64,
-    links: u64,
-    size: u64,
-    modified: (i64, i64),
-    changed: (i64, i64),
-}
-impl FileIdentity {
-    fn read(file: &File) -> Result<Self, DiscordImportError> {
-        let m = file
-            .metadata()
-            .map_err(|_| DiscordImportError::InvalidArchive)?;
-        if !m.is_file() || m.nlink() == 0 {
-            return Err(DiscordImportError::InvalidArchive);
-        }
-        Ok(Self {
-            dev: m.dev(),
-            inode: m.ino(),
-            links: m.nlink(),
-            size: m.size(),
-            modified: (m.mtime(), m.mtime_nsec()),
-            changed: (m.ctime(), m.ctime_nsec()),
-        })
-    }
-    fn verify(&self, file: &File) -> Result<(), DiscordImportError> {
-        if Self::read(file).as_ref() != Ok(self) {
-            Err(DiscordImportError::InputChanged)
-        } else {
-            Ok(())
-        }
-    }
-}
 struct CountedFile<'a> {
     file: &'a Mutex<File>,
     control: &'a Control,
@@ -617,7 +583,8 @@ fn run(
     live: &mut Option<Live>,
 ) -> Completion {
     control.check()?;
-    let identity = FileIdentity::read(&file.lock().unwrap())?;
+    let identity =
+        FileIdentity::read(&file.lock().unwrap()).ok_or(DiscordImportError::InvalidArchive)?;
     #[cfg(not(test))]
     let limits = ArchiveLimits::default();
     #[cfg(test)]
@@ -633,10 +600,14 @@ fn run(
         .progress
         .send_modify(|p| p.inventory_entries = Some(inventory.entry_count() as u64));
     let profile = DiscordProfile::detect(&mut inventory)?;
-    identity.verify(&file.lock().unwrap())?;
+    identity
+        .verify(&file.lock().unwrap())
+        .ok_or(DiscordImportError::InputChanged)?;
     control.phase(Phase::Hashing);
     let fingerprint = hash(file, control, identity.size, false)?;
-    identity.verify(&file.lock().unwrap())?;
+    identity
+        .verify(&file.lock().unwrap())
+        .ok_or(DiscordImportError::InputChanged)?;
     let account = ExportAccount {
         id: DiscordId::parse(&profile.account.id)?,
         username: profile.account.username.clone(),
@@ -766,9 +737,13 @@ fn run(
     control.point(TestPoint::BeforeVerification);
     control.check()?;
     control.phase(Phase::Verifying);
-    identity.verify(&file.lock().unwrap())?;
+    identity
+        .verify(&file.lock().unwrap())
+        .ok_or(DiscordImportError::InputChanged)?;
     let fingerprint = hash(file, control, identity.size, true)?;
-    identity.verify(&file.lock().unwrap())?;
+    identity
+        .verify(&file.lock().unwrap())
+        .ok_or(DiscordImportError::InputChanged)?;
     let live = live.as_ref().ok_or(DiscordImportError::StorageFailure)?;
     if fingerprint != live.checkpoint.fingerprint {
         return Err(DiscordImportError::InputChanged);
@@ -777,7 +752,9 @@ fn run(
     control.point(TestPoint::BeforeFinish);
     control.check()?;
     // Check metadata again after any wait before finalizing; no path is reopened.
-    identity.verify(&file.lock().unwrap())?;
+    identity
+        .verify(&file.lock().unwrap())
+        .ok_or(DiscordImportError::InputChanged)?;
     runtime.block_on(live.service.finish_import(&live.session))?;
     Ok(outcome(status(live)?, ImportDisposition::Ready, control))
 }

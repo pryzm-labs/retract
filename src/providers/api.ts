@@ -1,9 +1,10 @@
 import type { RetractApi } from "../api-contract";
 import type { AppSnapshot, PlanOperation } from "../types";
-import { array, decodeBootstrap, decodeContext, decodeContent, decodeConversation, decodeEnvelope, decodeError, decodeIntents, decodeJob, decodePlan, decodeRefs, invalid, object, nullable, recordRef, text, type IntentDescriptor } from "./contract";
+import { array, decodeScope, decodeBootstrap, decodeContext, decodeContent, decodeConversation, decodeEnvelope, decodeError, decodeIntents, decodeJob, decodePlan, decodeRefs, invalid, object, nullable, recordRef, text, type IntentDescriptor } from "./contract";
 import { contentView, conversationView, decodeSettings, jobView, planView, searchFilters, snapshotView as telegramSnapshotView } from "./telegram";
-import { decodeDiscordBrowser, decodeDiscordImport, decodeDiscordSession, decodeDiscordSource, discordContentView, discordConversationView, discordSearchFilters, discordSnapshotView } from "./discord";
+import { decodeDiscordBrowser, decodeDiscordImport, decodeDiscordSession, decodeArchiveSource, discordContentView, discordConversationView, discordSearchFilters, discordSnapshotView } from "./discord";
 import { refKey, sameScope, type ActiveContext, type ScopedResourceRef } from "./identity";
+import { xContentView, xSnapshotView } from "./x";
 export type Transport = (command: string, request: unknown) => Promise<unknown>;
 export class ProviderApiError extends Error {
   readonly code: ReturnType<typeof decodeError>["code"];
@@ -41,9 +42,15 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     catch (error) { if (error instanceof Error) throw error; throw new ProviderApiError(decodeError(error)); }
   }
   async function active(command: string, payload: unknown, context: ActiveContext) { decodeContext(context); return decodeEnvelope(await call(command, payload, context), context).payload; }
-  const snapshotView = (response: ReturnType<typeof decodeBootstrap>) => response.context?.scope.provider === "discord" ? discordSnapshotView(response) : telegramSnapshotView(response);
+  const snapshotView = (response: ReturnType<typeof decodeBootstrap>) => {
+    const key = response.context?.scope.provider;
+    if (key === "x") return xSnapshotView(response);
+    if (key === "discord") return discordSnapshotView(response);
+    if (!key || key === "telegram" || (import.meta.env.MODE === "test" && key === "synthetic")) return telegramSnapshotView(response);
+    return invalid();
+  };
   const projectConversation = (record: ReturnType<typeof decodeConversation>) => record.scope.provider === "discord" ? discordConversationView(record) : conversationView(record);
-  const projectContent = (record: ReturnType<typeof decodeContent>) => record.scope.provider === "discord" ? discordContentView(record) : contentView(record);
+  const projectContent = (record: ReturnType<typeof decodeContent>) => record.scope.provider === "x" ? xContentView(record) : record.scope.provider === "discord" ? discordContentView(record) : contentView(record);
   async function intents(targets: ScopedResourceRef[], context: ActiveContext): Promise<IntentDescriptor[]> { decodeRefs(targets, context.scope); return decodeIntents(await active("get_intents_v2", { actionId: "", targets, actor: null }, context)); }
   async function prepare(targets: ScopedResourceRef[], operation: PlanOperation, actor: ScopedResourceRef | null, context: ActiveContext) {
     const catalog = await intents(targets, context);
@@ -66,7 +73,7 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     },
     search: async (request, context, signal) => {
       decodeRefs(request.conversations, context.scope, "conversation");
-      const filters = context.scope.provider === "discord" ? discordSearchFilters(request) : searchFilters(request);
+      const filters = context.scope.provider === "x" ? { schema: "x.search_filters", version: 1, payload: { privacyScan: request.privacyScan ?? false } } : context.scope.provider === "discord" ? discordSearchFilters(request) : searchFilters(request);
       if (signal?.aborted) throw new ProviderApiError(decodeError({ code: "search_cancelled", retryAt: null }));
       const searchToken = { clientId: searchClientId, sequence: ++searchSequence };
       if (!Number.isSafeInteger(searchToken.sequence)) return invalid();
@@ -108,8 +115,15 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     },
     jobs: async context => array(await active("get_jobs_v2", {}, context), decodeJob).map(jobView),
     cancelJob: async (jobId, context) => { const job = decodeJob(await active("cancel_job_v2", { jobId }, context)); if (job.id !== jobId || !sameScope(job.scope, context.scope)) return invalid(); return jobView(job); },
-    discordSources: async context => array(decodeEnvelope(await call("list_sources_v2", {}, context), context, true).payload, decodeDiscordSource),
-    selectDiscordSource: async (scope, context) => snapshotView(decodeBootstrap(await call("select_archive_v2", { scope }, context))),
+    archiveSources: async context => array(decodeEnvelope(await call("list_sources_v2", {}, context), context, true).payload, decodeArchiveSource),
+    selectArchiveSource: async (scope, context) => snapshotView(decodeBootstrap(await call("select_archive_v2", { scope }, context))),
+    startXImport: async context => {
+      const payload = object(decodeEnvelope(await call("start_x_import_v2", {}, context), context, true).payload);
+      const scope = nullable(payload.scope, decodeScope);
+      if (scope && scope.provider !== "x") return invalid();
+      return scope;
+    },
+    cancelXImport: async context => { decodeEnvelope(await call("cancel_x_import_v2", {}, context), context, true); },
     startDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("start_discord_import_v2", {}, context), context, true).payload),
     retryDiscordImport: async context => decodeDiscordImport(decodeEnvelope(await call("retry_discord_import_v2", {}, context), context, true).payload),
     discordImport: async context => decodeDiscordImport(decodeEnvelope(await call("get_discord_import_v2", {}, context), context, true).payload),

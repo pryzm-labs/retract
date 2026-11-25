@@ -24,7 +24,7 @@ import type {
   PlanView,
   SaveConnectionSettingsResult,
   SearchResponse,
-  DiscordSource
+  ArchiveSource
 } from "./types";
 
 interface ToastState {
@@ -621,7 +621,7 @@ export default function App() {
     }
   };
 
-  const activateDiscordSource = useCallback((next: AppSnapshot) => {
+  const activateArchiveSource = useCallback((next: AppSnapshot) => {
     setQuery("");
     setDirection("any");
     setContentFilter("all");
@@ -638,7 +638,7 @@ export default function App() {
     }
   }, [publish, loadSnapshot]);
 
-  const selectDiscordSource = useCallback(async (source: DiscordSource) => {
+  const selectArchiveSource = useCallback(async (source: ArchiveSource) => {
     const previousContext = currentContext.current;
     const transitionEpoch = ++epoch.current;
     snapshotLoadGeneration.current += 1;
@@ -648,16 +648,16 @@ export default function App() {
     setSearching(false);
     setToast(null);
     try {
-      const next = await api.selectDiscordSource(source.scope, previousContext);
+      const next = await api.selectArchiveSource(source.scope, previousContext);
       if (transitionEpoch !== epoch.current) return;
-      activateDiscordSource(next);
+      activateArchiveSource(next);
     } catch (error) {
       if (transitionEpoch !== epoch.current) return;
       try {
         const discovered = await api.bootstrapSnapshot(null);
         if (transitionEpoch !== epoch.current) return;
         if (discovered.context && sameScope(discovered.context.scope, source.scope)) {
-          activateDiscordSource(discovered);
+          activateArchiveSource(discovered);
           return;
         }
       } catch {
@@ -667,7 +667,7 @@ export default function App() {
       if (transitionEpoch === epoch.current) setSyncingCatalog(false);
       throw error;
     }
-  }, [activateDiscordSource]);
+  }, [activateArchiveSource]);
 
   const sourceError = useCallback((error: unknown) => showError(error, setToast), []);
 
@@ -698,7 +698,7 @@ export default function App() {
       required={!connectionSettings.setupComplete && !snapshot?.context}
       onClose={() => setSourceSetupOpen(false)}
       onTelegram={() => { setSourceSetupOpen(false); setSettingsOpen(true); }}
-      onSelect={selectDiscordSource}
+      onSelect={selectArchiveSource}
       onError={sourceError}
     />
   ) : null;
@@ -715,6 +715,31 @@ export default function App() {
 
   if (sourceSetupOpen && !snapshot.context) {
     return <div className="app-loading">{sourceDialog}</div>;
+  }
+
+  if (snapshot.context?.scope.provider === "x") {
+    return <div className="app-shell archive-workspace">
+      <aside className="sidebar"><h2>X archive</h2><p>{snapshot.accountLabel}</p>
+        <button onClick={() => void openSourceSetup()}>Choose data source</button>
+      </aside>
+      <main className="main-column"><header className="search-toolbar">
+        <label className="global-search">Search archived posts <input type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
+        <label><input type="checkbox" checked={privacyScan} onChange={event => setPrivacyScan(event.target.checked)} /> Privacy findings only</label>
+      </header>
+      <section className="message-list" aria-label="Archived posts">
+        {searchError ? <p role="alert">{searchError} <button onClick={() => setSearchVersion(value => value + 1)}>Retry</button></p> :
+          searching ? <p role="status">Searching…</p> : results.messages.length === 0 ? <p>No matching posts.</p> :
+          results.messages.map(post => <article className="archive-post" key={refKey(post.ref)}>
+            <time dateTime={post.sentAt}>{new Date(post.sentAt).toLocaleString()}</time><p>{post.preview}</p>
+            {post.privacyFindings.length > 0 && <small>{post.privacyFindings.join(", ").replaceAll("_", " ")}</small>}
+          </article>)}
+        {results.truncated && <p>Showing a limited set of matches. Refine your search.</p>}
+      </section></main>
+      <aside className="impact-panel"><h2>Archive coverage</h2><p>Search authored posts in this export. Remote deletion is unavailable.</p></aside>
+      {sourceDialog}
+      {settingsOpen && connectionSettings && <ConnectionSettingsDialog context={snapshot.context} settings={connectionSettings} required={false} onClose={() => setSettingsOpen(false)} onSaved={applyConnectionSettings} onSaveFailed={recoverConnection} />}
+      {toast && <p role="status">{toast.message}</p>}
+    </div>;
   }
 
   if (snapshot.identity.state === "failed" || (snapshot.auth.stage === "ready" && (!snapshot.context || snapshot.identity.state !== "ready"))) {

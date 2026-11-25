@@ -5,16 +5,10 @@ use tokio::sync::Mutex;
 
 type Opener = dyn Fn() -> Result<ArchiveStore, ArchiveError> + Send + Sync;
 
-fn application_validators() -> std::collections::BTreeMap<
+pub(crate) type ArchiveValidators = std::collections::BTreeMap<
     retract_domain::ProviderKey,
     Arc<dyn crate::persistence::ProviderPayloadValidator>,
-> {
-    use crate::providers::discord::{DiscordPayloadValidator, locators::discord_provider_key};
-    std::collections::BTreeMap::from([(
-        discord_provider_key(),
-        Arc::new(DiscordPayloadValidator) as Arc<dyn crate::persistence::ProviderPayloadValidator>,
-    )])
-}
+>;
 pub(crate) struct ArchiveOwner {
     opener: Arc<Opener>,
     state: Mutex<State>,
@@ -38,8 +32,7 @@ impl ArchiveOwner {
         }
     }
 
-    pub(crate) fn application(root: std::path::PathBuf) -> Self {
-        let validators = application_validators();
+    pub(crate) fn application(root: std::path::PathBuf, validators: ArchiveValidators) -> Self {
         Self::with_opener(move || {
             #[cfg(target_os = "macos")]
             {
@@ -117,6 +110,7 @@ pub(super) fn prepare_archive_directory(
 mod discord_tests {
     use super::*;
     use crate::persistence::archive::{ArchiveKey, ArchiveQuerySource, ImportBatch};
+    use crate::providers::archive::application_validators;
     use crate::providers::discord::{
         DiscordNormalizer, locators::discord_provider_key, model::DiscordSourceProfile,
     };
@@ -512,6 +506,7 @@ mod discord_tests {
             });
             runtime().block_on(async {
                 let application = crate::RuntimeState {
+                    x_imports: Default::default(),
                     service: tokio::sync::RwLock::new(
                         crate::provider_service::ProviderService::setup(),
                     ),
@@ -637,12 +632,18 @@ mod discord_tests {
     fn discord_application_validator_registration_is_lazy_and_does_not_offer_a_provider() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("absent");
-        let owner = ArchiveOwner::application(root.clone());
+        let owner = ArchiveOwner::application(root.clone(), application_validators());
         let state = owner.state.try_lock().unwrap();
         assert!(state.service.is_none()); // No worker/opener can access the DB or key loader.
         assert!(!root.exists());
         let validators = application_validators();
-        assert_eq!(validators.len(), 1);
+        assert_eq!(validators.len(), 2);
+        assert_eq!(
+            validators[&crate::providers::x::key()]
+                .validation_policy_key()
+                .as_str(),
+            "x.archive.v1"
+        );
         assert_eq!(
             validators[&discord_provider_key()]
                 .validation_policy_key()

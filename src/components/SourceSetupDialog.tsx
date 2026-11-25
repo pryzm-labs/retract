@@ -2,7 +2,7 @@ import { Archive, LoaderCircle, MessageCircle, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@retract/api";
 import type { ActiveContext } from "../providers/identity";
-import type { DiscordImportStatus, DiscordSource } from "../types";
+import type { DiscordImportStatus, ArchiveSource } from "../types";
 
 interface Props {
   context: ActiveContext | null;
@@ -10,19 +10,24 @@ interface Props {
   required?: boolean;
   onClose: () => void;
   onTelegram: () => void;
-  onSelect: (source: DiscordSource) => Promise<void>;
+  onSelect: (source: ArchiveSource) => Promise<void>;
   onError: (error: unknown) => void;
 }
 
 export function SourceSetupDialog({ context, telegramConfigured, required = false, onClose, onTelegram, onSelect, onError }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
-  const [sources, setSources] = useState<DiscordSource[]>([]);
+  const [sources, setSources] = useState<ArchiveSource[]>([]);
   const [status, setStatus] = useState<DiscordImportStatus | null>(null);
+  const [importingX, setImportingX] = useState(false);
   const [busy, setBusy] = useState(false);
   const [sourceLookup, setSourceLookup] = useState<"loading" | "ready" | "failed">("loading");
   const [sourceLookupVersion, setSourceLookupVersion] = useState(0);
   const autoSelecting = useRef(false);
   const selecting = useRef(false);
+  const importGeneration = useRef(0);
+  useEffect(() => {
+    return () => { importGeneration.current += 1; };
+  }, [context?.sessionGeneration]);
 
   useEffect(() => { const dialog = ref.current; if (dialog && !dialog.open) dialog.showModal(); }, []);
   useEffect(() => {
@@ -60,6 +65,25 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     catch (error) { onError(error); }
     finally { setBusy(false); }
   }
+  async function importX() {
+    const generation = ++importGeneration.current;
+    setBusy(true);
+    setImportingX(true);
+    try {
+      const scope = await api.startXImport(context);
+      if (scope && generation === importGeneration.current) {
+        const entries = await api.archiveSources(context);
+        if (generation !== importGeneration.current) return;
+        const source = entries.find(entry => sameScope(entry, scope));
+        if (!source) throw new Error("Imported X archive could not be opened.");
+        await select(source);
+      }
+    } catch (error) {
+      if (generation === importGeneration.current) onError(error);
+    } finally {
+      if (generation === importGeneration.current) { setBusy(false); setImportingX(false); }
+    }
+  }
   async function retryArchive() {
     autoSelecting.current = false;
     setBusy(true);
@@ -77,7 +101,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     autoSelecting.current = true;
     await select(ready);
   }
-  async function select(source: DiscordSource) {
+  async function select(source: ArchiveSource) {
     if (selecting.current) return;
     selecting.current = true;
     setBusy(true);
@@ -102,7 +126,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
     {!required && <button className="dialog-close" type="button" aria-label="Close source setup" onClick={onClose} disabled={busy}><X size={18} /></button>}
     <p className="eyebrow">DATA SOURCE</p>
     <h2>Choose what to clean up</h2>
-    <p className="dialog-lead">Retract works locally with Telegram or an exported Discord data package. You can switch sources later.</p>
+    <p className="dialog-lead">Connect Telegram or search an archive from Discord or X.</p>
     <div className="source-choice-grid">
       <button type="button" className="source-choice" onClick={onTelegram} disabled={busy}>
         <MessageCircle size={22} /><span><strong>Telegram</strong><small>{telegramConfigured ? "Use the configured account" : "Configure a real account"}</small></span>
@@ -111,7 +135,11 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
         {busy || status?.active ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
         <span><strong>Import Discord package</strong><small>Choose the ZIP downloaded from Discord</small></span>
       </button>
+      <button type="button" className="source-choice" onClick={() => void importX()} disabled={busy || status?.active}>
+        <Upload size={22} /><span><strong>Import X archive</strong><small>Search authored posts offline</small></span>
+      </button>
     </div>
+    {importingX && <div role="status">Importing X archive… <button type="button" onClick={() => void api.cancelXImport(context).catch(onError)}>Cancel</button></div>}
     {progress && <div className={`discord-import-progress phase-${progress.phase}`} role="status" aria-live="polite">
       <Archive size={17} /><span><strong>{importPhase(progress.phase)}</strong><small>{processed}</small>{progress.warnings > 0 && <small>{progress.warnings.toLocaleString()} warnings</small>}</span>
       {status?.active && <button type="button" onClick={() => void api.cancelDiscordImport(context).then(setStatus).catch(onError)}>Cancel</button>}
@@ -129,10 +157,16 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
       </div> : sourceLookup === "failed" ? <div className="source-discovery-state source-discovery-error" role="alert">
         <span>Couldn’t load imported accounts.</span>
         <button type="button" onClick={() => setSourceLookupVersion(version => version + 1)}>Retry loading imported accounts</button>
-      </div> : sources.length === 0 ? <p className="source-discovery-empty">No imported Discord accounts yet.</p> : sources.map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
+      </div> : !sources.some(source => source.scope.provider === "discord") ? <p className="source-discovery-empty">No imported Discord accounts yet.</p> : sources.filter(source => source.scope.provider === "discord").map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
         <Archive size={17} /><span><strong>{source.accountLabel}</strong><small>{source.username ? `@${source.username} · ` : ""}{source.importedAt ? `Imported ${new Date(source.importedAt).toLocaleDateString()}` : "Ready"}</small></span>
       </button>)}
     </section>
+    {sources.some(source => source.scope.provider === "x") && <section className="available-sources">
+      <p className="eyebrow">IMPORTED X ACCOUNTS</p>
+      {sources.filter(source => source.scope.provider === "x").map(source => <button type="button" key={source.scope.sourceId} onClick={() => void select(source)} disabled={busy}>
+        <Archive size={17} /><span><strong>{source.accountLabel}</strong><small>Read-only X archive</small></span>
+      </button>)}
+    </section>}
     <p className="source-privacy-note">Archive contents stay on this device. Importing does not connect to Discord or delete anything.</p>
   </dialog>;
 }
@@ -141,7 +175,7 @@ function importPhase(phase: NonNullable<DiscordImportStatus["progress"]>["phase"
   return ({ inspecting: "Inspecting archive", hashing: "Verifying package", registering: "Registering source", importing: "Importing messages", verifying: "Checking imported records", ready: "Archive ready", cancelled: "Import cancelled", failed: "Import failed" })[phase];
 }
 
-function sameScope(source: DiscordSource, scope: NonNullable<DiscordImportStatus["importScope"]>): boolean {
+function sameScope(source: ArchiveSource, scope: NonNullable<DiscordImportStatus["importScope"]>): boolean {
   return source.scope.provider === scope.provider && source.scope.accountId === scope.accountId && source.scope.sourceId === scope.sourceId;
 }
 

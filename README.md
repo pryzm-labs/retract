@@ -20,7 +20,7 @@
 
 *Synthetic fixture data shown; no real Telegram account or conversation is pictured.*
 
-Retract is a local-first macOS desktop app for searching and cleaning Telegram and Discord history. Archive search and sensitive-data classification run on your Mac. Telegram live search passes your query to TDLib, which can contact Telegram. Reviewed remote deletions contact the selected provider. There is no Retract cloud service or telemetry.
+Retract is a local-first macOS desktop app for searching Telegram, Discord and X history, with reviewed cleanup for Telegram and Discord. Archive search and sensitive-data classification run on your Mac. Telegram live search passes your query to TDLib, which can contact Telegram. Reviewed remote deletions contact the selected provider. There is no Retract cloud service or telemetry.
 
 ## What Retract can do
 
@@ -86,7 +86,7 @@ Environment variables in [`.env.example`](.env.example) are optional developer a
 
 ## Choose a data source
 
-On first launch, Retract asks you to connect Telegram or import a Discord Data Package. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
+On first launch, choose Telegram, a Discord Data Package, or an X archive. There is no fixture or demo option in the end-user app, and Telegram is not required for Discord cleanup.
 
 ### Connect Telegram
 
@@ -120,6 +120,12 @@ First archive use obtains an independent key and upgrades the shared vault while
 When upgrading older job state, Retract retains its exact ciphertext as `jobs.pre-provider.enc` and replaces the active `jobs.enc` with version 3. Older versions cannot read the active v3 file. The backup is never automatically restored or removed; unfinished legacy jobs require a new review. Work belonging to a different account stays blocked, never retargeted. This job migration preserves credential values and TDLib session/profile paths; the separate archive-key upgrade is described above. See the [migration contract](docs/STORAGE.md#job-state-and-migration).
 
 Connection failures show a safe diagnostic with verification retry and connection settings. If a profile is in use, close the other Retract process before retrying. Invalid state remains blocked: preserve the profile and backup rather than deleting or restoring files. A failed settings replacement can be corrected in the app; recovery rediscovers the current connection without automatically repeating a save or cleanup.
+
+### Search an X archive
+
+Choose **Import X archive** and select the ZIP provided by X. Search imported post text or switch on **Privacy findings only**. You can reopen the imported account from **Choose data source**. This workspace runs offline and needs no X credentials. [X archive download instructions](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive)
+
+This first importer supports the single-part `data/account.js` and `data/tweets.js` layout. It reads authored post and reply text, skips recognized reposts, and excludes DMs and media files. The ZIP limit is 256 MiB. The posts member supports up to 2 MiB of JSON and 4,096 rows. Multipart post exports are unsupported. Archive observations describe the export date and grant no live deletion authority.
 
 ## Make the first deletion safely
 

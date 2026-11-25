@@ -8,6 +8,7 @@ import { messageKey } from "./components/ResultsList";
 import fixture from "./test/fixtures/provider-lifecycle.json";
 import type { MessageSnapshot } from "./types";
 import { decodeContext, decodeScope, decodeContent, decodeRef } from "./providers/contract";
+import { resourceId } from "./providers/identity";
 import { contentView } from "./providers/telegram";
 import { wireMessage, wireJob, wireSnapshot, wirePlan, wireChat, deletionDescriptor, lifecycleContext, lifecycleMessages, lifecycleChats } from "./test/lifecycle-wire";
 
@@ -48,11 +49,19 @@ function installTransport(options: {
       case "get_bootstrap_snapshot_v2":
       case "get_snapshot_v2": {
         const next = wireSnapshot(captured, options.jobs);
+        if (captured.scope.provider === "x") return { ...next, payload: { ...next.payload, auth: { schema: "x.account", version: 1, payload: { accountLabel: "Archive owner" } } } };
         next.payload.chats = next.payload.chats.map(chat => ({ ...chat, scope: captured.scope }));
         return next;
       }
       case "get_connection_settings_v2": return envelope(fixture.connectionSettings);
       case "search_messages_v2": {
+        if (captured.scope.provider === "x") {
+          const scope = decodeScope(captured.scope);
+          const resource = { provider: scope.provider, accountId: scope.accountId, resourceKind: "content" as const,
+            locatorSchema: "x.post", locatorVersion: 1, canonicalKey: "9007199254740995", locatorPayload: { id: "9007199254740995" } };
+          const post = { ...wireMessage(fixture.messages[0]), scope, resource, id: resourceId(resource), kind: "text", evidence: "archive", providerMetadata: null, searchableText: "Synthetic authored post" };
+          return envelope({ items: [post], nextCursor: null, completion: "complete" });
+        }
         const filters = request.payload.filters as { payload: { contentKinds: string[] } };
         const visible = filters.payload.contentKinds.length ? [] : options.search && request.payload.query === "late" ? await options.search("late") : messages;
         return envelope({ items: visible.map(wireMessage), nextCursor: null, completion: "complete" });
@@ -91,6 +100,22 @@ async function switchToSyntheticAccount() {
 describe("provider foundation lifecycle migration gate", () => {
   beforeEach(() => { vi.mocked(invoke).mockReset(); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it("rejects an unregistered provider before displaying Telegram controls", async () => {
+    const context = { ...fixture.context, scope: { ...fixture.context.scope, provider: "unknown_archive" } };
+    installTransport({ context });
+    await expect(api.bootstrapSnapshot()).rejects.toThrow();
+  });
+
+  it("opens X archives as searchable read-only sources", async () => {
+    const context = { ...fixture.context, scope: { ...fixture.context.scope, provider: "x" } };
+    installTransport({ context });
+    render(<App />);
+    expect(await screen.findByRole("searchbox", { name: "Search archived posts" })).toBeVisible();
+    expect(await screen.findByText("Synthetic authored post")).toBeVisible();
+    expect(screen.queryByText(/delete for everyone/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /connection settings/i })).toBeNull();
+  });
 
   it("keeps identical native targets in different accounts distinct", () => {
     const first = lifecycleMessages[0];

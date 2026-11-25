@@ -1,13 +1,14 @@
+use crate::providers::archive_commands::{SourceView, ready_entries, source_view};
+use crate::providers::archive_file::open_selected;
 use retract_domain::{ErrorCode, SafeError, Scope};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::{fs::File, sync::Arc};
+use std::sync::Arc;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
 
 use super::{
-    application::build_connection,
     browser::{BrowserFamily, BrowserTokenCapture, CaptureCancellation},
     locators::DiscordUserLocator,
     progress::DiscordImportProgress,
@@ -15,132 +16,16 @@ use super::{
 use crate::{
     RuntimeState,
     compatibility::model_v2::{BootstrapRequest, BootstrapResponse, Empty},
-    persistence::archive::{ArchiveSourceEntry, ImportFailureCode, ImportPhase, ImportWarning},
+    persistence::archive::{ImportFailureCode, ImportPhase, ImportWarning},
     provider_service::{decode, encode, safe, validate_version},
 };
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DiscordSourceView {
-    scope: Scope,
-    account_label: String,
-    username: Option<String>,
-    imported_at: Option<chrono::DateTime<chrono::Utc>>,
-    warning_count: usize,
-}
-
-fn source_view(entry: &ArchiveSourceEntry) -> DiscordSourceView {
-    DiscordSourceView {
-        scope: entry.source.scope(),
-        account_label: entry.account.display_name.clone(),
-        username: entry.account.username.clone(),
-        imported_at: entry.source.imported_at,
-        warning_count: entry.source.warnings.len(),
-    }
-}
-
-async fn ready_entries(
-    runtime: &RuntimeState,
-) -> Result<
-    (
-        Arc<crate::persistence::archive::ArchiveService>,
-        Vec<ArchiveSourceEntry>,
-    ),
-    SafeError,
-> {
-    let archives = runtime.archives.open().await.map_err(archive_error)?;
-    let entries = archives.ready_sources().await.map_err(archive_error)?;
-    Ok((archives, entries))
-}
-
-fn archive_error(error: crate::persistence::archive::ArchiveError) -> SafeError {
-    safe(match error {
-        crate::persistence::archive::ArchiveError::UnavailableKey => {
-            ErrorCode::AuthenticationRequired
-        }
-        crate::persistence::archive::ArchiveError::InvalidRecord
-        | crate::persistence::archive::ArchiveError::InvalidStore => ErrorCode::InvalidArchive,
-        crate::persistence::archive::ArchiveError::ScopeMismatch => ErrorCode::NotFound,
-        _ => ErrorCode::Transient,
-    })
-}
-
-#[tauri::command]
-pub(crate) async fn list_sources_v2(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: Value,
-) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<Empty> = decode(request)?;
-    runtime
-        .service
-        .read()
-        .await
-        .check_optional(request.context.as_ref())?;
-    let (_, entries) = ready_entries(&runtime).await?;
-    encode(BootstrapResponse {
-        contract_version: 2,
-        context: runtime.service.read().await.context(),
-        payload: entries.iter().map(source_view).collect::<Vec<_>>(),
-    })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SelectArchive {
-    scope: Scope,
-}
-
-#[tauri::command]
-pub(crate) async fn select_archive_v2(
-    runtime: State<'_, Arc<RuntimeState>>,
-    request: Value,
-) -> Result<Value, SafeError> {
-    validate_version(&request)?;
-    let request: BootstrapRequest<SelectArchive> = decode(request)?;
-    let mut current = runtime.service.write().await;
-    current.check_optional(request.context.as_ref())?;
-    if current.has_workers().await {
-        return Err(safe(ErrorCode::PermissionChanged));
-    }
-    current.cancel_searches();
-    let (archives, entries) = ready_entries(&runtime).await?;
-    let entry = entries
-        .into_iter()
-        .find(|entry| entry.source.scope() == request.payload.scope)
-        .ok_or_else(|| safe(ErrorCode::NotFound))?;
-    // Prepare and validate the candidate before retiring the usable workspace.
-    // Construction/recovery can fail on retained state; failure must not strand
-    // the user behind a stopped service or prevent a subsequent source retry.
-    let candidate = crate::provider_service::ProviderService::new(build_connection(
-        &runtime.application_root,
-        entry,
-        archives,
-        runtime.discord_session.clone(),
-    )?);
-    let snapshot = match candidate
-        .bootstrap(
-            serde_json::json!({"contractVersion":2,"context":candidate.context(),"payload":{}}),
-        )
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            candidate.shutdown().await;
-            return Err(error);
-        }
-    };
-    current.shutdown().await;
-    *current = candidate;
-    Ok(snapshot)
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportView {
     active: bool,
     progress: Option<DiscordImportProgress>,
-    sources: Vec<DiscordSourceView>,
+    sources: Vec<SourceView>,
     import_scope: Option<Scope>,
     retry_available: bool,
     failure_code: Option<ImportFailureCode>,
@@ -530,34 +415,6 @@ fn import_error(error: super::import::DiscordImportError) -> SafeError {
         super::import::DiscordImportError::Busy => ErrorCode::PermissionChanged,
         _ => ErrorCode::Transient,
     })
-}
-
-#[cfg(unix)]
-fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
-    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "selected archive is not a regular file",
-        ));
-    }
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(file)
-}
-#[cfg(not(unix))]
-fn open_selected(path: &std::path::Path) -> std::io::Result<File> {
-    File::open(path)
 }
 
 #[cfg(all(test, unix))]

@@ -18,7 +18,7 @@ mod worker;
 #[allow(unused_imports)]
 pub(crate) use codec::ArchiveKey;
 pub(crate) use error::ArchiveError;
-pub(crate) use lifecycle::ArchiveOwner;
+pub(crate) use lifecycle::{ArchiveOwner, ArchiveValidators};
 #[allow(unused_imports)]
 pub(crate) use model::{
     ArchiveImportResolution, ArchiveSearch, ArchiveSourceEntry, ENVELOPE_BYTES, ImportBatch,
