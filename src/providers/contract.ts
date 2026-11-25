@@ -37,7 +37,7 @@ export interface RemediationPlan {
 export type JobStatus = "queued" | "running" | "blocked" | "completed" | "partial" | "failed" | "cancelled";
 export interface ScopedJobRecord {
   id: Uuid; planId: Uuid; scope: Scope; dirtyRefs: ScopedResourceRef[]; status: JobStatus;
-  counters: { selected: number; eligible: number; deleted: number; skipped: number; failed: number; uncertain: number };
+  counters: { selected: number; eligible: number; deleted: number; alreadyAbsent?: number; skipped: number; failed: number; uncertain: number };
   nextBatch: number; retryAt: string | null; diagnostics: SafeError[]; startedAuthorized: boolean; createdAt: string; updatedAt: string;
 }
 export interface LegacyHistoryRecord { id: Uuid; planId: Uuid; operation: import("../types").PlanOperation; status: "completed" | "partial" | "failed" | "cancelled"; total: number; deleted: number; skipped: number; failed: number; nextBatch: number; diagnostics: SafeError[]; createdAt: string; updatedAt: string }
@@ -104,11 +104,15 @@ export function decodePlan(value: unknown, expected: Scope): RemediationPlan {
   decodeRefs([...plan.targets, ...plan.steps.flatMap(s => s.targets)], scope);
   if (targets.size !== steps.size || [...targets].some(id => !steps.has(id))) return invalid(); return plan;
 }
+export function combinedDiscordCount(job: ScopedJobRecord): boolean {
+  return job.scope.provider === "discord" && job.counters.alreadyAbsent === undefined;
+}
+
 export function decodeJob(value: unknown): ScopedJobRecord {
   const v = object(value), scope = decodeScope(v.scope), c = object(v.counters);
-  const job: ScopedJobRecord = { id: uuid(v.id), planId: uuid(v.planId), scope, dirtyRefs: decodeRefs(v.dirtyRefs, scope), status: choice(v.status, ["queued", "running", "blocked", "completed", "partial", "failed", "cancelled"]), counters: { selected: count(c.selected), eligible: count(c.eligible), deleted: count(c.deleted), skipped: count(c.skipped), failed: count(c.failed), uncertain: count(c.uncertain) }, nextBatch: count(v.nextBatch), retryAt: nullable(v.retryAt, date), diagnostics: array(v.diagnostics, decodeError), startedAuthorized: bool(v.startedAuthorized), createdAt: date(v.createdAt), updatedAt: date(v.updatedAt) };
+  const job: ScopedJobRecord = { id: uuid(v.id), planId: uuid(v.planId), scope, dirtyRefs: decodeRefs(v.dirtyRefs, scope), status: choice(v.status, ["queued", "running", "blocked", "completed", "partial", "failed", "cancelled"]), counters: { selected: count(c.selected), eligible: count(c.eligible), deleted: count(c.deleted), ...(c.alreadyAbsent === undefined ? {} : { alreadyAbsent: count(c.alreadyAbsent) }), skipped: count(c.skipped), failed: count(c.failed), uncertain: count(c.uncertain) }, nextBatch: count(v.nextBatch), retryAt: nullable(v.retryAt, date), diagnostics: array(v.diagnostics, decodeError), startedAuthorized: bool(v.startedAuthorized), createdAt: date(v.createdAt), updatedAt: date(v.updatedAt) };
   const active = job.status === "queued" || job.status === "running";
-  if (Date.parse(job.updatedAt) < Date.parse(job.createdAt) || (!active && job.retryAt) || (["running", "completed", "partial"].includes(job.status) && !job.startedAuthorized) || job.counters.eligible > job.counters.selected || job.counters.skipped > job.counters.selected || job.counters.deleted + job.counters.failed + job.counters.uncertain > job.counters.eligible || (job.status === "completed" && (job.counters.failed || job.counters.uncertain)) || (active && job.counters.uncertain) || (job.status === "blocked" && !job.diagnostics.some(d => ["identity_unavailable", "scope_mismatch", "stale_context"].includes(d.code)))) return invalid(); return job;
+  if (Date.parse(job.updatedAt) < Date.parse(job.createdAt) || (!active && job.retryAt) || (["running", "completed", "partial"].includes(job.status) && !job.startedAuthorized) || job.counters.eligible > job.counters.selected || job.counters.skipped > job.counters.selected || job.counters.deleted + (job.counters.alreadyAbsent ?? 0) + job.counters.failed + job.counters.uncertain > job.counters.eligible || (job.status === "completed" && (job.counters.failed || job.counters.uncertain)) || (active && job.counters.uncertain) || (job.status === "blocked" && !job.diagnostics.some(d => ["identity_unavailable", "scope_mismatch", "stale_context"].includes(d.code)))) return invalid(); return job;
 }
 export function decodeLegacy(value: unknown): LegacyHistoryRecord { const v = object(value); return { id: uuid(v.id), planId: uuid(v.planId), operation: choice(v.operation, ["selected_messages", "delete_my_messages", "clear_history", "clear_history_and_leave", "delete_all_messages_and_leave", "remove_chat_for_self", "delete_by_sender", "delete_group", "leave_chat"]), status: choice(v.status, ["completed", "partial", "failed", "cancelled"]), total: count(v.total), deleted: count(v.deleted), skipped: count(v.skipped), failed: count(v.failed), nextBatch: count(v.nextBatch), diagnostics: array(v.diagnostics, decodeError), createdAt: date(v.createdAt), updatedAt: date(v.updatedAt) }; }
 export function decodeBootstrap(value: unknown, expected?: ActiveContext | null): BootstrapResponse<BootstrapSnapshot> {

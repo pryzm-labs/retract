@@ -294,47 +294,66 @@ impl DiscordDeleteClient {
             owner_user_id,
             binding: expected,
         };
+        let mut ambiguous = false;
         for attempt in 0..MAX_TRANSIENT_ATTEMPTS {
-            self.wait_for_account(cancelled).await?;
-            self.wait_for_channel(channel_id, cancelled).await?;
-            check_cancelled(cancelled)?;
-
-            match self
-                .request_ownership(endpoint.clone(), &expected, token, cancelled)
-                .await
-            {
-                Ok(()) => {}
-                Err(DiscordDeleteError::Transient) if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {
-                    self.wait_for_transient_retry(attempt, cancelled).await?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            self.check_rate_limit(channel_id, cancelled).await?;
-            let response = self
-                .client
-                .delete(endpoint.clone())
-                .header(reqwest::header::AUTHORIZATION, token)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .send()
+            let result = self
+                .delete_attempt(&endpoint, &expected, token, cancelled)
                 .await;
-            match response {
-                Ok(response) => match response.status().as_u16() {
-                    204 => return Ok(DeleteOutcome::Deleted),
-                    404 => return Ok(DeleteOutcome::AlreadyAbsent),
-                    401 => return Err(DiscordDeleteError::Authentication),
-                    403 => return Err(DiscordDeleteError::Permission),
-                    429 => return Err(self.rate_limit(channel_id, response, cancelled).await),
-                    500..=599 if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
-                    500..=599 => return Err(DiscordDeleteError::Ambiguous),
-                    _ => return Err(DiscordDeleteError::Permanent),
-                },
-                Err(_) if attempt + 1 < MAX_TRANSIENT_ATTEMPTS => {}
-                Err(_) => return Err(DiscordDeleteError::Ambiguous),
+            match result {
+                Ok(DeleteOutcome::Deleted) => return result,
+                Err(DiscordDeleteError::Ambiguous) => ambiguous = true,
+                Err(DiscordDeleteError::Transient) if !ambiguous => {}
+                // A 404, 429 or failed recheck cannot settle an earlier lost response.
+                _ if ambiguous => return Err(DiscordDeleteError::Ambiguous),
+                _ => return result,
             }
-            self.wait_for_transient_retry(attempt, cancelled).await?;
+            if attempt + 1 == MAX_TRANSIENT_ATTEMPTS {
+                return result;
+            }
+            if let Err(error) = self.wait_for_transient_retry(attempt, cancelled).await {
+                return Err(if ambiguous {
+                    DiscordDeleteError::Ambiguous
+                } else {
+                    error
+                });
+            }
         }
         Err(DiscordDeleteError::Ambiguous)
+    }
+
+    async fn delete_attempt(
+        &self,
+        endpoint: &url::Url,
+        expected: &LiveMessageExpectation<'_>,
+        token: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<DeleteOutcome, DiscordDeleteError> {
+        self.wait_for_account(cancelled).await?;
+        self.wait_for_channel(expected.channel_id, cancelled)
+            .await?;
+        self.request_ownership(endpoint.clone(), expected, token, cancelled)
+            .await?;
+        self.check_rate_limit(expected.channel_id, cancelled)
+            .await?;
+        let response = self
+            .client
+            .delete(endpoint.clone())
+            .header(reqwest::header::AUTHORIZATION, token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| DiscordDeleteError::Ambiguous)?;
+        match response.status().as_u16() {
+            204 => Ok(DeleteOutcome::Deleted),
+            404 => Ok(DeleteOutcome::AlreadyAbsent),
+            401 => Err(DiscordDeleteError::Authentication),
+            403 => Err(DiscordDeleteError::Permission),
+            429 => Err(self
+                .rate_limit(expected.channel_id, response, cancelled)
+                .await),
+            500..=599 => Err(DiscordDeleteError::Ambiguous),
+            _ => Err(DiscordDeleteError::Permanent),
+        }
     }
 
     fn validate_target(

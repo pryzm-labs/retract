@@ -1,3 +1,4 @@
+import { combinedDiscordCount } from "../providers/contract";
 import { sameScope, type Uuid } from "../providers/identity";
 import { useState } from "react";
 import type { IntentDescriptor, LegacyHistoryRecord } from "../providers/contract";
@@ -163,7 +164,7 @@ function JobRow({ job, busy, onCancel, onDetails }: { job: JobRecord; busy: bool
       <span className={`job-state job-${job.status}`}>{active ? <History size={14} /> : job.status === "completed" ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}</span>
       <span className="job-copy">
         <strong>{plural(job.total, "message")}</strong>
-        <small>{job.retryAfterSeconds ? `rate limited · retry in ${job.retryAfterSeconds}s` : job.status}{job.deleted > 0 ? ` · ${job.deleted} deleted` : ""}</small>
+        <small>{job.retryAfterSeconds ? `rate limited · retry in ${job.retryAfterSeconds}s` : job.status}{job.deleted > 0 ? ` · ${job.deleted} ${combinedDiscordCount(job) ? "deleted or already absent" : "deleted"}` : ""}{job.counters.alreadyAbsent ? ` · ${job.counters.alreadyAbsent} already absent` : ""}</small>
       </span>
       {active && <button type="button" className="job-cancel" disabled={busy} onClick={() => onCancel(job.id)}>Cancel</button>}
       <button type="button" className="job-cancel" aria-label={`View details for cleanup job ${job.id}`} aria-haspopup="dialog" onClick={onDetails}>Details</button>

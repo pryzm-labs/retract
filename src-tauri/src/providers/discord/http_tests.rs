@@ -67,6 +67,9 @@ fn scripted_server(responses: Vec<(String, String)>) -> (String, thread::JoinHan
                 let mut request = vec![0_u8; 16 * 1024];
                 let count = socket.read(&mut request).unwrap();
                 request.truncate(count);
+                if status == "DROP" {
+                    return String::from_utf8(request).unwrap();
+                }
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -582,4 +585,42 @@ fn server_failures_retry_a_bounded_number_of_times_and_end_uncertain() {
         Err(DiscordDeleteError::Ambiguous)
     );
     assert_eq!(exhausted.join().unwrap().len(), 6);
+}
+
+#[test]
+fn lost_delete_response_stays_uncertain_on_absence_or_a_later_rate_limit() {
+    for (extra_check, status, body) in [
+        (false, "404 Not Found", ""),
+        (false, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
+        (true, "404 Not Found", ""),
+        (true, "429 Too Many Requests", r#"{"retry_after":0.25}"#),
+    ] {
+        let mut responses = vec![
+            ("200 OK".into(), live_message()),
+            ("DROP".into(), String::new()),
+        ];
+        if extra_check {
+            responses.push(("200 OK".into(), live_message()));
+        }
+        responses.push((status.into(), body.into()));
+        let (base, server) = scripted_server(responses);
+        let client = DiscordDeleteClient::for_test(&base).unwrap();
+        assert_eq!(
+            runtime().block_on(client.delete_owned(
+                "9007199254741101",
+                "1985931830091579393",
+                "9007199254741001",
+                &binding(),
+                TOKEN,
+                &AtomicBool::new(false)
+            )),
+            Err(DiscordDeleteError::Ambiguous),
+            "extra_check={extra_check} status={status}"
+        );
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| r.starts_with("DELETE ")).count(),
+            1 + usize::from(extra_check)
+        );
+    }
 }

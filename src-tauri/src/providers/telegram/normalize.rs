@@ -93,6 +93,7 @@ pub fn normalize_job(
             selected: plan.summary.selected as u64,
             eligible: job.total as u64,
             deleted: job.deleted as u64,
+            already_absent: None,
             skipped: job.skipped as u64,
             failed: job.failed as u64,
             uncertain: job.uncertain as u64,

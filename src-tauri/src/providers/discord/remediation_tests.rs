@@ -80,6 +80,7 @@ struct Delete {
     probes: Mutex<Vec<(String, String, String, String)>>,
     deletes: Mutex<Vec<(String, String, String, String)>>,
     probe_error: Mutex<Option<DiscordDeleteError>>,
+    delete_outcome: Option<DeleteOutcome>,
     expected_binding: Option<DiscordLiveMessageBinding>,
 }
 
@@ -157,7 +158,7 @@ impl DiscordMessageDelete for Delete {
             owner.into(),
             token.into(),
         ));
-        Ok(DeleteOutcome::Deleted)
+        Ok(self.delete_outcome.unwrap_or(DeleteOutcome::Deleted))
     }
 }
 
@@ -376,6 +377,7 @@ fn historical_discord_plans_reopen_without_resealing_or_replaying() {
                 selected: 1,
                 eligible: 1,
                 deleted: 0,
+                already_absent: None,
                 skipped: 0,
                 failed: 0,
                 uncertain: 0,
@@ -733,4 +735,47 @@ fn mutation_uses_only_frozen_channel_message_and_matching_session_token() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::StaleContext);
     assert_eq!(delete.deletes.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn reviewed_execution_reports_absence_at_preflight_and_delete() {
+    use crate::providers::{frozen_lifecycle::FrozenProviderIo, ports::PrepareIntent};
+    let (context, record) = fixture();
+    let target = content_ref(&record);
+    let delete = Arc::new(Delete {
+        delete_outcome: Some(DeleteOutcome::AlreadyAbsent),
+        ..Default::default()
+    });
+    let io = DiscordRemediationIo::new(
+        context.clone(),
+        OWNER.into(),
+        Arc::new(Query(vec![record])),
+        ready_session(),
+        delete.clone(),
+    )
+    .unwrap();
+    runtime().block_on(async {
+        let plan = io
+            .describe(
+                &context,
+                PrepareIntent {
+                    action_id: "selected_messages".into(),
+                    targets: vec![target.clone()],
+                    actor: None,
+                },
+                uuid::Uuid::from_u128(40),
+            )
+            .await
+            .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let result = io
+            .mutate(&plan, &plan.targets, &cancelled)
+            .await
+            .unwrap_err();
+        assert_eq!(result.code, ErrorCode::AlreadyRemoved);
+        *delete.probe_error.lock().unwrap() = Some(DiscordDeleteError::NotFound);
+        let result = io.preflight(&target, &cancelled).await.unwrap_err();
+        assert_eq!(result.code, ErrorCode::AlreadyRemoved);
+        assert_eq!(delete.deletes.lock().unwrap().len(), 1);
+    });
 }

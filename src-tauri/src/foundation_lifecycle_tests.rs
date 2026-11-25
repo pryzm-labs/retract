@@ -441,3 +441,30 @@ fn foundation_lifecycle_canonical_payload_disagreement_is_rejected() {
         assert!(harness.store.snapshot().unwrap().plans.is_empty());
     });
 }
+
+#[test]
+fn exact_target_absence_has_its_own_durable_job_counter() {
+    tauri::async_runtime::block_on(async {
+        let active = context("syntheticContext");
+        let reference = fixture()["messages"][2]["ref"].clone();
+        let directory = tempfile::tempdir().unwrap();
+        let io = Arc::new(SyntheticIo::new(active.clone()));
+        *io.mutation_error.lock().unwrap() = Some(SafeError {
+            code: ErrorCode::AlreadyRemoved,
+            retry_at: None,
+        });
+        let harness = synthetic(directory.path(), io.clone());
+        let plan = harness.prepare(&active, vec![reference]);
+        harness.authorize(&active, &plan);
+        let job = harness.start(&active, &plan).unwrap();
+        let finished = harness.settled(&active, job.id).await;
+        assert_eq!(finished.status, JobStatus::Completed);
+        assert_eq!(finished.counters.deleted, 0);
+        assert_eq!(finished.counters.already_absent, Some(1));
+        assert_eq!(finished.counters.failed, 0);
+        assert_eq!(finished.counters.uncertain, 0);
+        let stored = encrypted_state(directory.path(), &active, KEY).unwrap();
+        assert!(stored.jobs.contains(&finished));
+        assert_eq!(io.calls.lock().unwrap().len(), 1);
+    });
+}

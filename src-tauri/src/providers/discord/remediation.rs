@@ -356,7 +356,15 @@ impl FrozenProviderIo for DiscordRemediationIo {
     ) -> Result<bool, SafeError> {
         self.check_context(&self.context)?;
         let records = self.resolve_owned(std::slice::from_ref(target)).await?;
-        self.verify_live_owned(&records, cancelled).await?;
+        self.verify_live_owned(&records, cancelled)
+            .await
+            .map_err(|error| {
+                if error.code == ErrorCode::NotFound {
+                    safe(ErrorCode::AlreadyRemoved)
+                } else {
+                    error
+                }
+            })?;
         self.check_context(&self.context)?;
         Ok(true)
     }
@@ -408,7 +416,10 @@ impl FrozenProviderIo for DiscordRemediationIo {
             )
             .await
         {
-            Ok(DeleteOutcome::Deleted | DeleteOutcome::AlreadyAbsent) => Ok(()),
+            Ok(DeleteOutcome::Deleted) => Ok(()),
+            Ok(DeleteOutcome::AlreadyAbsent) | Err(DiscordDeleteError::NotFound) => {
+                Err(safe(ErrorCode::AlreadyRemoved))
+            }
             Err(error) => Err(self.map_delete_error(error)),
         }
     }

@@ -442,6 +442,7 @@ pub struct SyntheticIo {
     pub preflights: Arc<Mutex<Vec<chrono::DateTime<Utc>>>>,
     pub preflight_delay_ms: Arc<std::sync::atomic::AtomicU64>,
     pub preflight_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
+    pub mutation_error: Arc<Mutex<Option<SafeError>>>,
     pub mutation_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
     pub search_barrier: Arc<Mutex<Option<Arc<PreflightBarrier>>>>,
 }
@@ -459,6 +460,7 @@ impl SyntheticIo {
             preflights: Arc::new(Mutex::new(vec![])),
             preflight_delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             preflight_barrier: Arc::new(Mutex::new(None)),
+            mutation_error: Arc::new(Mutex::new(None)),
             mutation_barrier: Arc::new(Mutex::new(None)),
             search_barrier: Arc::new(Mutex::new(None)),
         }
@@ -572,7 +574,11 @@ impl FrozenProviderIo for SyntheticIo {
             barrier.release.notified().await;
         }
         self.calls.lock().unwrap().push(targets.to_vec());
-        Ok(())
+        self.mutation_error
+            .lock()
+            .unwrap()
+            .take()
+            .map_or(Ok(()), Err)
     }
     async fn intents(
         &self,

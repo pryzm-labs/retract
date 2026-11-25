@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ImpactPanel } from "./ImpactPanel";
 import { testJob } from "../test/v2-fixtures";
 import { safeMessages, type SafeError } from "../providers/contract";
+import { providerKey } from "../providers/identity";
 import type { JobRecord } from "../types";
 
 function renderJobs(jobs: JobRecord[]) {
@@ -14,14 +15,14 @@ afterEach(() => vi.useRealTimers());
 describe("accessible cleanup details", () => {
   it("discloses separate outcome counters and returns keyboard focus without expanding compact rows", () => {
     const job = testJob("outcomes", "partial", { total: 10, deleted: 2, skipped: 3, failed: 4,
-      counters: { selected: 13, eligible: 10, deleted: 2, skipped: 3, failed: 4, uncertain: 1 },
+      counters: { selected: 13, eligible: 10, deleted: 2, alreadyAbsent: 2, skipped: 3, failed: 4, uncertain: 1 },
       diagnostics: [{ code: "ambiguous_outcome", message: "RAW_SECRET", retryAt: null }] });
     renderJobs([job]);
     expect(screen.queryByText("Skipped")).not.toBeInTheDocument();
     const trigger = screen.getByRole("button", { name: `View details for cleanup job ${job.id}` });
     trigger.focus(); fireEvent.click(trigger);
     const dialog = screen.getByRole("dialog", { name: "Cleanup job details" });
-    for (const [label, value] of [["Selected", 13], ["Eligible", 10], ["Deleted", 2], ["Skipped", 3], ["Failed", 4], ["Uncertain", 1]]) {
+    for (const [label, value] of [["Selected", 13], ["Eligible", 10], ["Deleted", 2], ["Already absent", 2], ["Skipped", 3], ["Failed", 4], ["Uncertain", 1]]) {
       expect(within(dialog).getByRole("group", { name: label as string })).toHaveTextContent(String(value));
     }
     expect(within(dialog).getByText(safeMessages.ambiguous_outcome)).toBeInTheDocument();
@@ -30,6 +31,17 @@ describe("accessible cleanup details", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("preserves the meaning of historical Discord aggregate counts", () => {
+    const job = testJob("discord-history", "completed", { total: 2, deleted: 2 });
+    job.scope = { ...job.scope, provider: providerKey("discord") };
+    renderJobs([job]);
+    expect(screen.getByText(/2 deleted or already absent/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: `View details for cleanup job ${job.id}` }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("group", { name: "Deleted or already absent" })).toHaveTextContent("2");
+    expect(within(dialog).queryByRole("group", { name: "Deleted" })).toBeNull();
   });
 
   it("updates the retry countdown from the backend timestamp", () => {

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { JobRecord } from "../types";
-import type { LegacyHistoryRecord } from "../providers/contract";
+import { combinedDiscordCount, type LegacyHistoryRecord } from "../providers/contract";
 import { diagnosticMessage } from "./ActionEffects";
 
 export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRecord; onClose: () => void }) {
@@ -23,6 +23,7 @@ export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRec
     return () => window.clearInterval(timer);
   }, [retryAt]);
   const seconds = retryAt ? Math.max(0, Math.ceil((Date.parse(retryAt) - now) / 1000)) : 0;
+  const combined = scoped && combinedDiscordCount(job);
   const counts = scoped ? job.counters : { selected: null, eligible: job.total, deleted: job.deleted, skipped: job.skipped, failed: job.failed, uncertain: null };
   return <dialog ref={dialogRef} className="confirm-dialog job-details" aria-labelledby={titleId}
     onCancel={event => { event.preventDefault(); onClose(); }}
@@ -33,7 +34,8 @@ export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRec
     <p role="status" aria-label="Job status">{job.status}</p>
     <div className="dialog-summary job-counts">
       {Object.entries(counts).map(([key, value]) => {
-        const label = key[0].toUpperCase() + key.slice(1);
+        const label = key === "deleted" && combined ? "Deleted or already absent"
+          : key === "alreadyAbsent" ? "Already absent" : key[0].toUpperCase() + key.slice(1);
         return <div key={key} role="group" aria-label={label}><strong>{value === null ? "Not recorded" : value.toLocaleString()}</strong><span>{label}</span></div>;
       })}
     </div>
@@ -41,6 +43,6 @@ export function JobDetails({ job, onClose }: { job: JobRecord | LegacyHistoryRec
     {job.status === "blocked" && <p className="dialog-lead">Reconnect the original account and source in Connection settings. Review this cleanup again before starting a new action; switching accounts does not move this job.</p>}
     {!scoped && <p className="dialog-lead">Legacy history is preserved. A new review is required. Original account binding and unrecorded counters cannot be recovered from this history.</p>}
     {job.diagnostics.length > 0 && <ul className="job-diagnostics" aria-label="Job diagnostics">{job.diagnostics.map((diagnostic, index) => <li key={index}>{diagnosticMessage(diagnostic.code)}</li>)}</ul>}
-    <p className="dialog-lead">Deleted counts confirmed removals. Skipped items were not executed; failed and uncertain outcomes are separate. In-flight work may still have taken effect after cancellation or a connection change. Completed effects cannot be undone.</p>
+    <p className="dialog-lead">{combined ? "This job recorded confirmed removals and already-absent messages together." : "Deleted counts confirmed removals."} Skipped items were not executed. Failed and uncertain outcomes are separate. In-flight work may still have taken effect after cancellation or a connection change. Completed effects cannot be undone.</p>
   </dialog>;
 }

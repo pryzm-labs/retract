@@ -658,6 +658,7 @@ impl crate::providers::lifecycle::FrozenBatchDriver for TelegramFrozenDriver<'_>
         let crate::providers::lifecycle::FrozenProgress {
             next,
             skipped,
+            already_absent: _,
             deleted,
             failed,
             uncertain,

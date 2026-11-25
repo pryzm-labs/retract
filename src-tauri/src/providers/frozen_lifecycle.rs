@@ -347,6 +347,7 @@ impl ReviewedLifecycle for FrozenLifecycle {
             counters: JobCounters {
                 selected: plan.targets.len() as u64,
                 eligible: plan.targets.len() as u64,
+                already_absent: Some(0),
                 ..JobCounters::default()
             },
             next_batch: 0,
@@ -569,6 +570,9 @@ impl FrozenBatchDriver for Driver<'_> {
                     | ErrorCode::IdentityUnavailable
             )
     }
+    fn already_absent(&self, error: &SafeError) -> bool {
+        error.code == ErrorCode::AlreadyRemoved
+    }
     fn uncertain(&self, error: &SafeError) -> bool {
         error.code == ErrorCode::AmbiguousOutcome
     }
@@ -595,6 +599,7 @@ impl FrozenBatchDriver for Driver<'_> {
         let super::lifecycle::FrozenProgress {
             next,
             skipped,
+            already_absent,
             deleted,
             failed,
             uncertain,
@@ -606,6 +611,14 @@ impl FrozenBatchDriver for Driver<'_> {
                 let j = s.1.iter_mut().find(|j| j.id == self.id).unwrap();
                 let cancelled = j.status == JobStatus::Cancelled;
                 j.next_batch = next as u64;
+                if already_absent > 0 {
+                    let absent = j
+                        .counters
+                        .already_absent
+                        .as_mut()
+                        .ok_or_else(|| safe(ErrorCode::UnsupportedSchema))?;
+                    *absent += already_absent as u64;
+                }
                 j.counters.skipped += skipped as u64;
                 j.counters.deleted += deleted as u64;
                 j.counters.failed += failed as u64;
