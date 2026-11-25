@@ -87,6 +87,7 @@ function installTransport(options: {
       case "get_jobs_v2": return envelope((options.poll ? await options.poll() : []).map(j => wireJob(j as typeof fixture.job)));
       case "refresh_chats_v2": return envelope(options.refresh ? await options.refresh() : []);
       case "save_connection_settings_v2":
+      case "open_configured_telegram_v2":
         currentContext = options.switchContext ?? fixture.syntheticContext;
         messages = options.switchMessages ?? [fixture.messages[2]];
         return { ...wireSnapshot(currentContext), payload: { ...wireSnapshot(currentContext).payload, chats: wireSnapshot(currentContext).payload.chats.map(chat => ({ ...chat, scope: currentContext.scope })) } };
@@ -123,7 +124,21 @@ describe("provider foundation lifecycle migration gate", () => {
     expect(screen.queryByRole("button", { name: /connection settings/i })).toBeNull();
   });
 
-  it("keeps an archive query and privacy filter out of every Telegram search after switching through settings", async () => {
+  it("opens data sources from X without waiting for a workspace rediscovery", async () => {
+    const transport = installTransport({ context: xContext });
+    render(<App />);
+    await screen.findByRole("searchbox", { name: "Search archived posts" });
+    const base = transport.getMockImplementation()!;
+    const rediscovery = deferred<unknown>();
+    transport.mockImplementation((command, args) =>
+      command === "get_bootstrap_snapshot_v2" ? rediscovery.promise : base(command, args));
+    fireEvent.click(screen.getByRole("button", { name: "Back to data sources" }));
+    expect(await screen.findByRole("heading", { name: "Choose data source" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Close source setup" }));
+    expect(screen.getByRole("searchbox", { name: "Search archived posts" })).toBeVisible();
+  });
+
+  it("returns from X to the configured Telegram workspace without changing settings or sending an archive query", async () => {
     const transport = installTransport({ context: xContext, switchContext: fixture.context, switchMessages: [fixture.messages[0]] });
     render(<App />);
     const archiveQuery = await screen.findByRole("searchbox", { name: "Search archived posts" });
@@ -133,16 +148,33 @@ describe("provider foundation lifecycle migration gate", () => {
     await waitFor(() => expect(transport).toHaveBeenCalledWith("search_messages_v2", {
       request: expect.objectContaining({ context: xContext, payload: expect.objectContaining({ query: sentinel }) })
     }));
-    fireEvent.click(screen.getByRole("button", { name: "Choose data source" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back to data sources" }));
     fireEvent.click(await screen.findByRole("button", { name: /Telegram/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "Save settings" }));
     expect(await screen.findByText("First lossless target")).toBeVisible();
+    expect(transport).toHaveBeenCalledWith("open_configured_telegram_v2", {
+      request: { contractVersion: 2, context: xContext, payload: {} }
+    });
+    expect(transport.mock.calls.map(([command]) => command)).not.toContain("save_connection_settings_v2");
     const searches = transport.mock.calls.filter(([command, args]) =>
       command === "search_messages_v2" && (args as { request: { context: FixtureContext } }).request.context.scope.provider === "telegram");
     expect(searches.length).toBeGreaterThan(0);
     for (const [, args] of searches) {
       expect(args).toMatchObject({ request: { payload: { query: "", filters: { payload: { privacyScan: false } } } } });
     }
+  });
+
+  it("leaves X searchable and exposes the source picker again when Telegram cannot open", async () => {
+    const transport = installTransport({ context: xContext });
+    const base = transport.getMockImplementation()!;
+    transport.mockImplementation((command, args) =>
+      command === "open_configured_telegram_v2" ? Promise.reject(new Error("Telegram unavailable")) : base(command, args));
+    render(<App />);
+    await screen.findByText("Synthetic authored post");
+    fireEvent.click(screen.getByRole("button", { name: "Back to data sources" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Telegram/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Telegram unavailable");
+    expect(screen.getByText("Synthetic authored post")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Back to data sources" })).toBeEnabled();
   });
 
   it.each([true, false])("reopens an archive without signing in to Telegram (settings configured: %s)", async configured => {

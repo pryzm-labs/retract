@@ -19,6 +19,7 @@ Ad-hoc-signed, unnotarized preview for Apple-silicon macOS.
 - Honor Telegram retry deadlines and preserve acknowledged chat effects when a later cleanup step fails.
 - Distinguish confirmed Discord deletions, messages already absent, and uncertain outcomes. Honor Discord channel and global retry deadlines.
 - Reject stale Discord and X archive selections after workspace changes.
+- Return from an X archive to data sources or a configured Telegram workspace without saving connection settings again.
 - Use exclusively created private files for encrypted job-store updates before atomic replacement.
 
 ### Changed

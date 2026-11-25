@@ -613,6 +613,9 @@ input:checked + .custom-checkbox { border-color: var(--green); background: var(-
 }
 
 .archive-workspace > aside { padding: 24px 16px; gap: 12px; overflow: auto; }
+.archive-back { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.archive-back:hover:not(:disabled) { background: var(--green-soft); }
+.archive-back:disabled { opacity: .55; cursor: wait; }
 .archive-workspace .search-toolbar { display: grid; gap: 12px; }
 .archive-post { padding: 14px; margin-bottom: 5px; border-radius: 10px; background: var(--surface); }
 .archive-post time, .archive-post small { color: var(--muted); }

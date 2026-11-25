@@ -64,6 +64,7 @@ export function createApi(transport: Transport, isDesktop: () => boolean): Retra
     bootstrapSnapshot: async (context = null) => snapshotView(decodeBootstrap(await call("get_bootstrap_snapshot_v2", {}, context), context)),
     snapshot: async context => snapshotView(decodeBootstrap(await call("get_snapshot_v2", {}, context), context)),
     connectionSettings: async context => decodeSettings(decodeEnvelope(await call("get_connection_settings_v2", {}, context), context, true).payload),
+    openConfiguredTelegram: async context => snapshotView(decodeBootstrap(await call("open_configured_telegram_v2", {}, context))),
     saveConnectionSettings: async (request, context) => {
       const snapshot = snapshotView(decodeBootstrap(await call("save_connection_settings_v2", request, context)));
       try {

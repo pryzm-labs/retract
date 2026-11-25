@@ -120,7 +120,55 @@ pub(crate) async fn save_connection_settings_v2<R: tauri::Runtime>(
         .await
 }
 
+#[tauri::command]
+pub(crate) async fn open_configured_telegram_v2<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    runtime: State<'_, Arc<RuntimeState>>,
+    request: Value,
+) -> Result<Value, SafeError> {
+    runtime
+        .open_configured_telegram(request, || crate::create_service(&app))
+        .await
+}
+
 impl RuntimeState {
+    pub(crate) async fn open_configured_telegram(
+        &self,
+        raw: Value,
+        create: impl FnOnce() -> Result<
+            Arc<crate::provider_service::ProviderService>,
+            crate::error::AppError,
+        >,
+    ) -> Result<Value, SafeError> {
+        validate_version(&raw)?;
+        let request: BootstrapRequest<Empty> = decode(raw)?;
+        let mut current = self.service.write().await;
+        current.check_optional(request.context.as_ref())?;
+        if !request
+            .context
+            .as_ref()
+            .is_some_and(|context| context.scope.provider == crate::providers::x::key())
+        {
+            return Err(safe(ErrorCode::PermissionChanged));
+        }
+        let candidate = create().map_err(boundary_error)?;
+        let snapshot = match candidate
+            .bootstrap(
+                serde_json::json!({"contractVersion":2,"context":candidate.context(),"payload":{}}),
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                candidate.shutdown().await;
+                return Err(error);
+            }
+        };
+        current.shutdown().await;
+        *current = candidate;
+        Ok(snapshot)
+    }
+
     /// The registered command owns the real settings/vault and connection
     /// factories; this lifecycle seam also admits synthetic I/O in tests.
     pub(crate) async fn save_settings(
@@ -209,6 +257,7 @@ pub fn register<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
         retry_identity_v2,
         get_connection_settings_v2,
         save_connection_settings_v2,
+        open_configured_telegram_v2,
         crate::providers::archive_commands::list_sources_v2,
         crate::providers::archive_commands::select_archive_v2,
         crate::providers::discord::commands::start_discord_import_v2,

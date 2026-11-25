@@ -125,7 +125,7 @@ export function SourceSetupDialog({ context, telegramConfigured, required = fals
   return <dialog ref={ref} className="source-setup-dialog" onCancel={event => { if (required || busy) event.preventDefault(); else onClose(); }}>
     {!required && <button className="dialog-close" type="button" aria-label="Close source setup" onClick={onClose} disabled={busy}><X size={18} /></button>}
     <p className="eyebrow">DATA SOURCE</p>
-    <h2>Choose what to clean up</h2>
+    <h2>Choose data source</h2>
     <p className="dialog-lead">Connect Telegram or search an archive from Discord or X.</p>
     <div className="source-choice-grid">
       <button type="button" className="source-choice" onClick={onTelegram} disabled={busy}>

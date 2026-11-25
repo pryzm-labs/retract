@@ -93,6 +93,18 @@ fn authored_archive_import_search_and_replay() {
             let result=backend.run_search(backend.prepare_search(query).unwrap()).await.unwrap();
             assert_eq!(result["payload"]["items"].as_array().unwrap().len(),1);
             assert!(backend.active("prepare_intent",call(serde_json::json!({"actionId":"delete","targets":[],"actor":null}))).await.is_err());
+
+            let runtime = crate::RuntimeState::new(backend.clone());
+            let mut stale = ctx.clone();
+            stale.session_generation = uuid::Uuid::new_v4();
+            let request = serde_json::json!({"contractVersion":2,"context":stale,"payload":{}});
+            assert_eq!(runtime.open_configured_telegram(request, || panic!("stale switch opened a provider")).await.unwrap_err().code, ErrorCode::StaleContext);
+            let request = call(serde_json::json!({}));
+            assert_eq!(runtime.open_configured_telegram(request.clone(), || Err(AppError::ProfileInUse)).await.unwrap_err().code, ErrorCode::ProfileInUse);
+            assert!(backend.bootstrap(request.clone()).await.is_ok());
+            let next = runtime.open_configured_telegram(request.clone(), || Ok(crate::provider_service::ProviderService::setup())).await.unwrap();
+            assert!(next["context"].is_null());
+            assert!(backend.bootstrap(request).await.is_err());
             owner.shutdown().await;
         });
 }

@@ -127,6 +127,8 @@ Connection failures show a safe diagnostic with verification retry and connectio
 
 Choose **Import X archive** and select the ZIP provided by X. Search imported post text or switch on **Privacy findings only**. You can reopen the imported account from **Choose data source**. This workspace runs offline and needs no X credentials. [X archive download instructions](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive)
 
+Use **Back to data sources** in the X sidebar to switch workspaces. Choosing **Telegram** opens your saved connection or shows setup if you haven’t configured one.
+
 Select the original ZIP. Retract reads `data/account.js` and `data/tweets.js`, plus consecutive files named `data/tweets-part1.js`, `data/tweets-part2.js`, and so on. All parts are searchable together once the import finishes. It reads post and reply text and skips rows with structured repost indicators. Text beginning with `RT @` remains searchable when the archive gives no such indicator, so some results may quote another person. Reimport an older ZIP to include those rows in a new source. DMs and media files are outside this importer’s scope. The ZIP limit is 256 MiB. Single-part exports support up to 2 MiB of post JSON and 4,096 rows. Multipart exports support up to 32 parts, 128 MiB of JSON per part, 512 MiB of selected data and 250,000 rows in total. Each row is limited to 2 MiB and each indexed post to 64 KiB of text. Archive records show historical post text and creation timestamps. They grant no live deletion authority.
 
 ## Make the first deletion safely

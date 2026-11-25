@@ -150,7 +150,7 @@ describe("connection bootstrap and replacement recovery", () => {
     });
     render(<App />);
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Choose what to clean up" })).toBeVisible()
+      expect(screen.getByRole("heading", { name: "Choose data source" })).toBeVisible()
     );
     fireEvent.click(screen.getByRole("button", { name: /Telegram/ }));
     expect(await screen.findByRole("heading", { name: "Connect Telegram" })).toBeVisible();

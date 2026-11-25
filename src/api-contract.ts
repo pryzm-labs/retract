@@ -8,6 +8,7 @@ export interface RetractApi {
   bootstrapSnapshot(context?: ActiveContext | null): Promise<AppSnapshot>;
   connectionSettings(context: ActiveContext | null): Promise<ConnectionSettings>;
   saveConnectionSettings(request: SaveConnectionSettingsRequest, context: ActiveContext | null): Promise<SaveConnectionSettingsResult>;
+  openConfiguredTelegram(context: ActiveContext): Promise<AppSnapshot>;
   search(request: SearchRequest, context: ActiveContext, signal?: AbortSignal): Promise<SearchResponse>;
   refreshChats(conversations: ScopedResourceRef[], context: ActiveContext): Promise<ChatSummary[]>;
   intents(targets: ScopedResourceRef[], context: ActiveContext): Promise<IntentDescriptor[]>;
