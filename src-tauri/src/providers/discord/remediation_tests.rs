@@ -476,9 +476,23 @@ fn historical_discord_plans_reopen_without_resealing_or_replaying() {
 }
 
 #[test]
-fn plan_freeze_fails_closed_when_live_message_is_missing_or_not_owned() {
+fn plan_freeze_fails_closed_when_live_evidence_is_unavailable() {
     for (failure, expected) in [
         (DiscordDeleteError::NotFound, ErrorCode::NotFound),
+        (
+            DiscordDeleteError::RateLimited {
+                retry_after_millis: Some(300_001),
+                global: false,
+            },
+            ErrorCode::RateLimited,
+        ),
+        (
+            DiscordDeleteError::RateLimited {
+                retry_after_millis: None,
+                global: true,
+            },
+            ErrorCode::RateLimited,
+        ),
         (
             DiscordDeleteError::OwnershipMismatch,
             ErrorCode::PermissionChanged,
@@ -512,6 +526,7 @@ fn plan_freeze_fails_closed_when_live_message_is_missing_or_not_owned() {
             .unwrap_err();
 
         assert_eq!(error.code, expected);
+        assert_eq!(error.retry_at, None);
         assert_eq!(delete.probes.lock().unwrap().len(), 1);
         assert!(delete.deletes.lock().unwrap().is_empty());
     }

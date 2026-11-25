@@ -63,4 +63,5 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
 security-framework = "3"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tauri = { version = "2", features = ["test"] }

@@ -560,13 +560,14 @@ impl FrozenBatchDriver for Driver<'_> {
         }
     }
     fn fatal(&self, error: &SafeError) -> bool {
-        matches!(
-            error.code,
-            ErrorCode::AmbiguousOutcome
-                | ErrorCode::StaleContext
-                | ErrorCode::ScopeMismatch
-                | ErrorCode::IdentityUnavailable
-        )
+        (error.code == ErrorCode::RateLimited && error.retry_at.is_none())
+            || matches!(
+                error.code,
+                ErrorCode::AmbiguousOutcome
+                    | ErrorCode::StaleContext
+                    | ErrorCode::ScopeMismatch
+                    | ErrorCode::IdentityUnavailable
+            )
     }
     fn uncertain(&self, error: &SafeError) -> bool {
         error.code == ErrorCode::AmbiguousOutcome

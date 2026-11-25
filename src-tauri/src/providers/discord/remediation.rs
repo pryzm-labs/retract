@@ -268,12 +268,9 @@ impl DiscordRemediationIo {
                 retry_after_millis, ..
             } => SafeError {
                 code: ErrorCode::RateLimited,
-                retry_at: Some(
-                    Utc::now()
-                        + ChronoDuration::milliseconds(
-                            i64::try_from(retry_after_millis).unwrap_or(i64::MAX),
-                        ),
-                ),
+                retry_at: retry_after_millis
+                    .filter(|millis| *millis <= super::http::MAX_JOB_WAIT_MILLIS)
+                    .map(|millis| Utc::now() + ChronoDuration::milliseconds(millis as i64)),
             },
             DiscordDeleteError::Transient => safe(ErrorCode::Transient),
             DiscordDeleteError::Ambiguous => safe(ErrorCode::AmbiguousOutcome),
